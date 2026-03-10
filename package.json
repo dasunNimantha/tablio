@@ -14,6 +14,7 @@
     "@tanstack/react-table": "^8.20.0",
     "@tanstack/react-virtual": "^3.10.0",
     "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-fs": "^2.0.0",
     "chart.js": "^4.5.1",
     "lucide-react": "^0.460.0",

@@ -31,6 +31,8 @@ import {
   Search,
   X,
 } from "lucide-react";
+import { save } from "@tauri-apps/plugin-dialog";
+import { writeTextFile } from "@tauri-apps/plugin-fs";
 import "./DataGrid.css";
 
 interface Props {
@@ -325,6 +327,16 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
 
   const handleExport = async (format: "csv" | "json" | "sql") => {
     try {
+      const ext = format === "sql" ? "sql" : format;
+      const filePath = await save({
+        defaultPath: `${table}.${ext}`,
+        filters: [{
+          name: format.toUpperCase(),
+          extensions: [ext],
+        }],
+      });
+      if (!filePath) return;
+
       const content = await api.exportTableData({
         connection_id: connectionId,
         database,
@@ -333,14 +345,8 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         format,
         filter: activeFilter,
       });
-      const ext = format === "sql" ? "sql" : format;
-      const blob = new Blob([content], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${table}.${ext}`;
-      a.click();
-      URL.revokeObjectURL(url);
+
+      await writeTextFile(filePath, content);
     } catch (e) {
       setError(String(e));
     }

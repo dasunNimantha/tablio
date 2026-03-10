@@ -32,3 +32,4 @@ anyhow = "1"
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
+tauri-plugin-dialog = "2.6.0"

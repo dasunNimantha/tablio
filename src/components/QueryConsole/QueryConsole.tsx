@@ -8,6 +8,8 @@ import { ExportMenu } from "../ExportMenu";
 import { SavedQueries } from "../SavedQueries/SavedQueries";
 import { ChartView } from "../ChartView/ChartView";
 import { format as formatSQL } from "sql-formatter";
+import { save } from "@tauri-apps/plugin-dialog";
+import { writeTextFile } from "@tauri-apps/plugin-fs";
 import "./QueryConsole.css";
 
 interface Props {
@@ -143,20 +145,24 @@ export function QueryConsole({ connectionId, database }: Props) {
   const handleExportResult = async (format: "csv" | "json" | "sql") => {
     if (!result || !result.is_select) return;
     try {
+      const ext = format === "sql" ? "sql" : format;
+      const filePath = await save({
+        defaultPath: `query_result.${ext}`,
+        filters: [{
+          name: format.toUpperCase(),
+          extensions: [ext],
+        }],
+      });
+      if (!filePath) return;
+
       const content = await api.exportQueryResult({
         columns: result.columns,
         rows: result.rows as unknown[][],
         format,
         table_name: null,
       });
-      const ext = format === "sql" ? "sql" : format;
-      const blob = new Blob([content], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `query_result.${ext}`;
-      a.click();
-      URL.revokeObjectURL(url);
+
+      await writeTextFile(filePath, content);
     } catch (e) {
       setError(String(e));
     }
