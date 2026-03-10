@@ -1,0 +1,136 @@
+.col-organizer-wrapper {
+  position: relative;
+}
+
+.col-organizer-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  z-index: 200;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-dropdown);
+  min-width: 240px;
+  max-width: 320px;
+  max-height: 420px;
+  display: flex;
+  flex-direction: column;
+}
+
+.col-organizer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.col-organizer-reset {
+  width: 24px;
+  height: 24px;
+  color: var(--text-muted);
+}
+
+.col-organizer-reset:hover {
+  color: var(--accent);
+}
+
+.col-organizer-list {
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.col-organizer-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: grab;
+  user-select: none;
+  transition: background 0.1s;
+}
+
+.col-organizer-item:hover {
+  background: var(--bg-hover);
+}
+
+.col-organizer-pk {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.col-organizer-hidden {
+  opacity: 0.45;
+}
+
+.col-organizer-hidden .col-organizer-name {
+  text-decoration: line-through;
+}
+
+.col-organizer-dragging {
+  opacity: 0.35;
+}
+
+.col-organizer-dragover {
+  border-top: 2px solid var(--accent);
+}
+
+.col-organizer-grip {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  cursor: grab;
+  flex-shrink: 0;
+}
+
+.col-organizer-grip-spacer {
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.col-organizer-eye {
+  width: 22px !important;
+  height: 22px !important;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.col-organizer-eye:hover {
+  color: var(--accent);
+}
+
+.col-organizer-eye-locked {
+  color: var(--text-muted);
+  opacity: 0.4;
+  flex-shrink: 0;
+}
+
+.col-organizer-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.col-organizer-badge {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--accent-muted);
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}

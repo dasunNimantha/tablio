@@ -166,6 +166,7 @@ th.grid-row-number {
 
 .grid-table tbody tr {
   transition: background 0.08s;
+  cursor: pointer;
 }
 
 .grid-table tbody tr:hover td {
@@ -178,10 +179,6 @@ th.grid-row-number {
 
 .grid-table tbody tr.row-selected td {
   background: var(--bg-selected);
-}
-
-.grid-table tbody tr {
-  cursor: pointer;
 }
 
 .grid-cell {
@@ -384,10 +381,6 @@ th.grid-row-number {
   color: inherit;
   border-radius: 2px;
   padding: 0 1px;
-}
-
-.search-match-header {
-  background: rgba(234, 179, 8, 0.15) !important;
 }
 
 .refresh-interval-wrapper {

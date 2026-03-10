@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
-import { api, DatabaseInfo, SchemaInfo, TableInfo, FunctionInfo, ConnectionConfig } from "../../lib/tauri";
+import { api, DatabaseInfo, SchemaInfo, TableInfo, FunctionInfo } from "../../lib/tauri";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { ConnectionDialog } from "../ConnectionDialog";
 import {
@@ -25,8 +25,6 @@ interface TreeNode {
   id: string;
   label: string;
   type: "connection" | "database" | "schema" | "table-group" | "view-group" | "function-group" | "table" | "view" | "function";
-  children?: TreeNode[];
-  isLoading?: boolean;
   connectionId: string;
   connectionColor: string;
   database?: string;

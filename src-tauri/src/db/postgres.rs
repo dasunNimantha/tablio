@@ -82,6 +82,17 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// Rejects filter strings that could inject SQL (e.g. statement terminator or comments).
+fn filter_is_unsafe(filter: &str) -> bool {
+    let s = filter.trim();
+    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/")
+}
+
+/// Rejects type or default fragments that could inject SQL.
+fn sql_fragment_is_unsafe(s: &str) -> bool {
+    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") || s.contains('\'')
+}
+
 fn json_to_sql_literal(val: &serde_json::Value) -> String {
     match val {
         serde_json::Value::Null => "NULL".to_string(),
@@ -397,6 +408,12 @@ impl DatabaseDriver for PostgresDriver {
         sort: Option<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData> {
+        if let Some(ref f) = filter {
+            if !f.trim().is_empty() && filter_is_unsafe(f) {
+                anyhow::bail!("Filter contains invalid characters (; -- /* */)");
+            }
+        }
+
         let columns = self.list_columns(database, schema, table).await?;
 
         let where_clause = filter
@@ -615,6 +632,20 @@ impl DatabaseDriver for PostgresDriver {
         table_name: &str,
         columns: &[ColumnDefinition],
     ) -> Result<()> {
+        if columns.is_empty() {
+            anyhow::bail!("At least one column is required");
+        }
+        for col in columns {
+            if sql_fragment_is_unsafe(&col.data_type) {
+                anyhow::bail!("Invalid character in data type for column {}", col.name);
+            }
+            if let Some(d) = &col.default_value {
+                if !d.is_empty() && sql_fragment_is_unsafe(d) {
+                    anyhow::bail!("Invalid character in default value for column {}", col.name);
+                }
+            }
+        }
+
         let pk_cols: Vec<&ColumnDefinition> = columns.iter().filter(|c| c.is_primary_key).collect();
         let mut col_defs = Vec::new();
         for col in columns {
@@ -759,6 +790,25 @@ impl DatabaseDriver for PostgresDriver {
         table_name: &str,
         operations: &[AlterTableOperation],
     ) -> Result<()> {
+        for op in operations {
+            match op {
+                AlterTableOperation::ChangeColumnType { new_type, .. } => {
+                    if sql_fragment_is_unsafe(new_type) {
+                        anyhow::bail!("Invalid character in column type");
+                    }
+                }
+                AlterTableOperation::SetDefault {
+                    default_value: Some(d),
+                    ..
+                } if !d.is_empty() => {
+                    if sql_fragment_is_unsafe(d) {
+                        anyhow::bail!("Invalid character in default value");
+                    }
+                }
+                _ => {}
+            }
+        }
+
         let mut current_table = table_name.to_string();
 
         for op in operations {

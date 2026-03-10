@@ -76,6 +76,11 @@ fn json_to_sql_literal(val: &serde_json::Value) -> String {
     }
 }
 
+fn filter_is_unsafe(filter: &str) -> bool {
+    let s = filter.trim();
+    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/")
+}
+
 fn format_bytes(bytes: i64) -> String {
     const KB: i64 = 1024;
     const MB: i64 = KB * 1024;
@@ -245,6 +250,12 @@ impl DatabaseDriver for SqliteDriver {
         sort: Option<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData> {
+        if let Some(ref f) = filter {
+            if !f.trim().is_empty() && filter_is_unsafe(f) {
+                anyhow::bail!("Filter contains invalid characters (; -- /* */)");
+            }
+        }
+
         let columns = self.list_columns(database, schema, table).await?;
 
         let where_clause = filter

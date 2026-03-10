@@ -52,6 +52,22 @@ export function QueryConsole({ connectionId, database }: Props) {
     return () => observer.disconnect();
   }, []);
 
+  const getQueryText = (): string => {
+    if (editorRef.current) {
+      const model = editorRef.current.getModel();
+      const selection = editorRef.current.getSelection();
+      if (selection && !selection.isEmpty() && model) {
+        return model.getValueInRange(selection).trim();
+      }
+      if (model) {
+        return model.getValue().trim();
+      }
+    }
+    return sql.trim();
+  };
+
+  const executeRef = useRef<() => void>(() => {});
+
   const handleEditorMount: OnMount = (editor) => {
     editorRef.current = editor;
 
@@ -60,21 +76,9 @@ export function QueryConsole({ connectionId, database }: Props) {
       label: "Execute Query",
       keybindings: [2048 | 3],
       run: () => {
-        executeCurrentStatement();
+        executeRef.current();
       },
     });
-  };
-
-  const getQueryText = (): string => {
-    let queryToRun = sql.trim();
-    if (editorRef.current) {
-      const selection = editorRef.current.getSelection();
-      const model = editorRef.current.getModel();
-      if (selection && !selection.isEmpty() && model) {
-        queryToRun = model.getValueInRange(selection);
-      }
-    }
-    return queryToRun;
   };
 
   const executeCurrentStatement = useCallback(async () => {
@@ -118,7 +122,11 @@ export function QueryConsole({ connectionId, database }: Props) {
     } finally {
       setExecuting(false);
     }
-  }, [sql, connectionId, database]);
+  }, [connectionId, database]);
+
+  useEffect(() => {
+    executeRef.current = executeCurrentStatement;
+  }, [executeCurrentStatement]);
 
   const explainCurrentStatement = useCallback(async () => {
     const queryToRun = getQueryText();
@@ -141,7 +149,7 @@ export function QueryConsole({ connectionId, database }: Props) {
     } finally {
       setExecuting(false);
     }
-  }, [sql, connectionId, database]);
+  }, [connectionId, database]);
 
   const handleExportResult = async (format: "csv" | "json" | "sql") => {
     if (!result || !result.is_select) return;

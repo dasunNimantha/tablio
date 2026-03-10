@@ -26,23 +26,17 @@ export function EditableCell({
   const isNull = value === null || value === undefined;
   const displayValue = isNull ? "NULL" : String(value);
 
+  const committedRef = useRef(false);
+
   const handleDoubleClick = () => {
+    committedRef.current = false;
     setEditing(true);
     setEditValue(isNull ? "" : String(value));
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      commitEdit();
-    } else if (e.key === "Escape") {
-      setEditing(false);
-    } else if (e.key === "Tab") {
-      e.preventDefault();
-      commitEdit();
-    }
-  };
-
   const commitEdit = () => {
+    if (committedRef.current) return;
+    committedRef.current = true;
     setEditing(false);
     if (editValue === "" && column.is_nullable) {
       onChange(null);
@@ -50,6 +44,18 @@ export function EditableCell({
     }
     const parsed = parseValue(editValue, column.data_type);
     onChange(parsed);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      commitEdit();
+    } else if (e.key === "Escape") {
+      committedRef.current = true;
+      setEditing(false);
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      commitEdit();
+    }
   };
 
   useEffect(() => {

@@ -36,11 +36,23 @@
   width: 130px;
 }
 
-.filter-and {
-  font-size: 12px;
-  font-weight: 600;
+.filter-join-btn {
+  font-size: 11px;
+  font-weight: 700;
   color: var(--accent);
-  padding: 0 5px;
+  background: var(--accent-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  height: 24px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.filter-join-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-muted);
 }
 
 .filter-actions {

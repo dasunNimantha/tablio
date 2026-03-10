@@ -51,7 +51,7 @@
   flex-wrap: wrap;
 }
 
-.chart-axis-selectors label {
+.chart-axis-group {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -63,16 +63,12 @@
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  white-space: nowrap;
 }
 
-.chart-axis-selectors select {
-  height: 34px;
-  min-width: 130px;
-}
-
-.chart-y-select {
-  min-height: 76px;
-  padding: 6px 10px;
+.chart-axis-selectors .cs-trigger {
+  min-width: 140px;
+  height: 32px;
 }
 
 .chart-canvas {

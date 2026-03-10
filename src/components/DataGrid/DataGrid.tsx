@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import {
   api,
   ColumnInfo,
@@ -13,6 +13,7 @@ import { EditableCell } from "./EditableCell";
 import { FilterBar } from "./FilterBar";
 import { RowDetailView } from "./RowDetailView";
 import { ExportMenu } from "../ExportMenu";
+import { ColumnOrganizer, ColumnSettings, loadColumnSettings, saveColumnSettings, applyColumnSettings } from "./ColumnOrganizer";
 import { useToastStore } from "../../stores/toastStore";
 import {
   Save,
@@ -88,6 +89,20 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   const tableRef = useRef<HTMLDivElement>(null);
   const resizingRef = useRef<{ col: string; startX: number; startWidth: number } | null>(null);
 
+  const [colSettings, setColSettings] = useState<ColumnSettings>(() => {
+    return loadColumnSettings(connectionId, database, schema, table) || { order: [], hidden: new Set() };
+  });
+
+  const handleColSettingsChange = useCallback((next: ColumnSettings) => {
+    setColSettings(next);
+    saveColumnSettings(connectionId, database, schema, table, next);
+  }, [connectionId, database, schema, table]);
+
+  const visibleIndices = useMemo(() => {
+    if (!data) return [];
+    return applyColumnSettings(data.columns, colSettings).visibleIndices;
+  }, [data, colSettings]);
+
   const hasChanges =
     changes.updates.size > 0 ||
     changes.inserts.length > 0 ||
@@ -122,6 +137,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       const sorted = { ...result, columns: sortedColumns, rows: sortedRows };
       setData(sorted);
       setEditingRows(sorted.rows.map((r) => [...r]));
+      setDetailRowIdx(null);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -132,6 +148,10 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    setColSettings(loadColumnSettings(connectionId, database, schema, table) || { order: [], hidden: new Set() });
+  }, [connectionId, database, schema, table]);
 
   useEffect(() => {
     if (!rowContextMenu) return;
@@ -180,14 +200,16 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     return str.toLowerCase().includes(searchLower);
   };
 
-  const searchMatchCount = (() => {
+  const searchMatchCount = useMemo(() => {
     if (!searchQuery || !data) return 0;
     let count = 0;
-    editingRows.forEach((row) => {
-      row.forEach((val) => { if (cellMatches(val)) count++; });
-    });
+    for (const row of editingRows) {
+      for (const val of row) {
+        if (cellMatches(val)) count++;
+      }
+    }
     return count;
-  })();
+  }, [searchQuery, editingRows, data]);
 
   useEffect(() => {
     if (!searchQuery || !tableRef.current) return;
@@ -211,19 +233,19 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   };
 
   const getPkValues = (rowIndex: number): [string, unknown][] => {
-    if (!data) return [];
+    if (!data || rowIndex < 0 || rowIndex >= data.rows.length) return [];
+    const row = data.rows[rowIndex];
     return data.columns
       .filter((c) => c.is_primary_key)
       .map((c) => {
         const colIdx = data.columns.findIndex((col) => col.name === c.name);
-        return [c.name, data.rows[rowIndex][colIdx]] as [string, unknown];
+        return [c.name, colIdx >= 0 ? row[colIdx] : undefined] as [string, unknown];
       });
   };
 
   const getPkKey = (rowIndex: number): string => {
-    return getPkValues(rowIndex)
-      .map(([, v]) => String(v))
-      .join(":");
+    const values = getPkValues(rowIndex).map(([, v]) => v);
+    return JSON.stringify(values);
   };
 
   const handleCellChange = (
@@ -297,24 +319,32 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         schema,
         table,
         updates: Array.from(changes.updates.values()),
-        inserts: changes.inserts.map((ins) => {
+        inserts: changes.inserts.map((_ins, insertIdx) => {
           const lastRowIdx = editingRows.length - changes.inserts.length;
-          const insertIdx = changes.inserts.indexOf(ins);
           const row = editingRows[lastRowIdx + insertIdx];
+          if (!row) {
+            return { values: data.columns.map((c): [string, unknown] => [c.name, null]) };
+          }
           return {
             values: data.columns
               .map((c, ci): [string, unknown] => [c.name, row[ci]])
               .filter(([, v]) => v !== null),
           };
         }),
-        deletes: Array.from(changes.deletedKeys).map((key) => {
-          const parts = key.split(":");
+        deletes: Array.from(changes.deletedKeys).flatMap((key) => {
+          let pkValues: unknown[];
+          try {
+            pkValues = JSON.parse(key) as unknown[];
+          } catch {
+            return [];
+          }
           const pkCols = data.columns.filter((c) => c.is_primary_key);
-          const pkValues: [string, unknown][] = pkCols.map((c, i) => [
+          if (pkCols.length === 0 || pkValues.length !== pkCols.length) return [];
+          const primary_key_values: [string, unknown][] = pkCols.map((c, i) => [
             c.name,
-            parts[i],
+            pkValues[i],
           ]);
-          return { primary_key_values: pkValues } as DeleteRow;
+          return [{ primary_key_values } as DeleteRow];
         }),
       };
       await api.applyChanges(allChanges);
@@ -365,9 +395,8 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     }
   };
 
-  const handleCopyAsInsert = (rowIdx: number) => {
-    if (!data) return;
-    const row = editingRows[rowIdx];
+  const formatRowAsInsert = useCallback((row: unknown[]): string => {
+    if (!data) return "";
     const cols = data.columns.map((c) => `"${c.name}"`).join(", ");
     const vals = row
       .map((v) => {
@@ -377,25 +406,15 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         return `'${String(v).replace(/'/g, "''")}'`;
       })
       .join(", ");
-    const sql = `INSERT INTO "${schema}"."${table}" (${cols}) VALUES (${vals});`;
-    navigator.clipboard.writeText(sql);
+    return `INSERT INTO "${schema}"."${table}" (${cols}) VALUES (${vals});`;
+  }, [data, schema, table]);
+
+  const handleCopyAsInsert = (rowIdx: number) => {
+    navigator.clipboard.writeText(formatRowAsInsert(editingRows[rowIdx]));
   };
 
   const handleCopyAllAsInsert = () => {
-    if (!data) return;
-    const cols = data.columns.map((c) => `"${c.name}"`).join(", ");
-    const lines = editingRows.map((row) => {
-      const vals = row
-        .map((v) => {
-          if (v === null) return "NULL";
-          if (typeof v === "number") return String(v);
-          if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
-          return `'${String(v).replace(/'/g, "''")}'`;
-        })
-        .join(", ");
-      return `INSERT INTO "${schema}"."${table}" (${cols}) VALUES (${vals});`;
-    });
-    navigator.clipboard.writeText(lines.join("\n"));
+    navigator.clipboard.writeText(editingRows.map(formatRowAsInsert).join("\n"));
   };
 
   const handleResizeStart = useCallback(
@@ -494,6 +513,13 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
               </div>
             )}
           </div>
+          {data && (
+            <ColumnOrganizer
+              columns={data.columns}
+              settings={colSettings}
+              onChange={handleColSettingsChange}
+            />
+          )}
           <ExportMenu onExport={handleExport} />
           <button
             className="btn-ghost"
@@ -572,38 +598,41 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           <thead>
             <tr>
               <th className="grid-row-number">#</th>
-              {data.columns.map((col) => (
-                <th
-                  key={col.name}
-                  className={col.is_primary_key ? "pk" : ""}
-                  style={columnWidths[col.name] ? { width: columnWidths[col.name], minWidth: columnWidths[col.name] } : undefined}
-                  onClick={() => handleSort(col.name)}
-                >
-                  <div className="grid-header-content">
-                    <span className="grid-header-name">
-                      {col.is_primary_key && <span className="pk-badge">PK</span>}
-                      {col.name}
-                    </span>
-                    <span className="grid-header-type">{col.data_type}</span>
-                  </div>
-                  {sort?.column === col.name && (
-                    <span className="grid-sort-icon">
-                      {sort.direction === "asc" ? (
-                        <ArrowUp size={12} />
-                      ) : (
-                        <ArrowDown size={12} />
-                      )}
-                    </span>
-                  )}
-                  <div
-                    className="col-resize-handle"
-                    onMouseDown={(e) => {
-                      const th = e.currentTarget.parentElement as HTMLElement;
-                      handleResizeStart(e, col.name, th);
-                    }}
-                  />
-                </th>
-              ))}
+              {visibleIndices.map((colIdx) => {
+                const col = data.columns[colIdx];
+                return (
+                  <th
+                    key={col.name}
+                    className={col.is_primary_key ? "pk" : ""}
+                    style={columnWidths[col.name] ? { width: columnWidths[col.name], minWidth: columnWidths[col.name] } : undefined}
+                    onClick={() => handleSort(col.name)}
+                  >
+                    <div className="grid-header-content">
+                      <span className="grid-header-name">
+                        {col.is_primary_key && <span className="pk-badge">PK</span>}
+                        {col.name}
+                      </span>
+                      <span className="grid-header-type">{col.data_type}</span>
+                    </div>
+                    {sort?.column === col.name && (
+                      <span className="grid-sort-icon">
+                        {sort.direction === "asc" ? (
+                          <ArrowUp size={12} />
+                        ) : (
+                          <ArrowDown size={12} />
+                        )}
+                      </span>
+                    )}
+                    <div
+                      className="col-resize-handle"
+                      onMouseDown={(e) => {
+                        const th = e.currentTarget.parentElement as HTMLElement;
+                        handleResizeStart(e, col.name, th);
+                      }}
+                    />
+                  </th>
+                );
+              })}
               <th className="grid-actions-header">
                 <Trash2 size={12} />
               </th>
@@ -618,11 +647,11 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
               return (
                 <tr
                   key={rowIdx}
-                  className={`
-                    ${isDeleted ? "row-deleted" : ""}
-                    ${isInserted ? "row-inserted" : ""}
-                    ${detailRowIdx === rowIdx ? "row-selected" : ""}
-                  `}
+                  className={[
+                    isDeleted && "row-deleted",
+                    isInserted && "row-inserted",
+                    detailRowIdx === rowIdx && "row-selected",
+                  ].filter(Boolean).join(" ")}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setRowContextMenu({ x: e.clientX, y: e.clientY, rowIdx });
@@ -635,8 +664,9 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
                   >
                     {page * PAGE_SIZE + rowIdx + 1}
                   </td>
-                  {row.map((value, colIdx) => {
+                  {visibleIndices.map((colIdx) => {
                     const col = data.columns[colIdx];
+                    const value = row[colIdx];
                     const changeKey = !isInserted
                       ? `${pkKey}:${col.name}`
                       : null;

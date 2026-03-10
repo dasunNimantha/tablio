@@ -90,6 +90,11 @@ fn json_to_sql_literal(val: &serde_json::Value) -> String {
     }
 }
 
+fn filter_is_unsafe(filter: &str) -> bool {
+    let s = filter.trim();
+    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/")
+}
+
 fn format_bytes(bytes: Option<i64>) -> String {
     let bytes = match bytes {
         Some(b) if b >= 0 => b as u64,
@@ -305,6 +310,12 @@ impl DatabaseDriver for MysqlDriver {
         sort: Option<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData> {
+        if let Some(ref f) = filter {
+            if !f.trim().is_empty() && filter_is_unsafe(f) {
+                anyhow::bail!("Filter contains invalid characters (; -- /* */)");
+            }
+        }
+
         let columns = self.list_columns(database, database, table).await?;
 
         let where_clause = filter

@@ -281,6 +281,13 @@ export function RowDetailView({
   }, []);
 
   useEffect(() => {
+    setPendingEdits(new Map());
+    setEditingKey(null);
+    setEditingColIndex(-1);
+    setEditError(null);
+  }, [rowIndex]);
+
+  useEffect(() => {
     if (editingKey !== null && editRef.current) {
       editRef.current.focus();
       editRef.current.select();

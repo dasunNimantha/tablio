@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useRef, useEffect, useCallback } from "react";
+import { CustomSelect } from "../CustomSelect/CustomSelect";
 import {
   Bar,
   Line,
@@ -212,13 +213,11 @@ export function ChartView({ columns, rows }: Props) {
     );
   }
 
-  const handleYColumnsChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const selected = Array.from(
-      e.target.selectedOptions,
-      (opt) => opt.value
+  const toggleYColumn = useCallback((col: string) => {
+    setYColumns((prev) =>
+      prev.includes(col) ? prev.filter((c) => c !== col) : [...prev, col]
     );
-    setYColumns(selected);
-  };
+  }, []);
 
   return (
     <div className="chart-view">
@@ -236,36 +235,23 @@ export function ChartView({ columns, rows }: Props) {
           ))}
         </div>
         <div className="chart-axis-selectors">
-          <label>
+          <div className="chart-axis-group">
             <span className="chart-axis-label">X / Labels</span>
-            <select
+            <CustomSelect
               value={xColumn}
-              onChange={(e) => setXColumn(e.target.value)}
-            >
-              <option value="">— Auto —</option>
-              {columns.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-          </label>
+              options={[{ value: "", label: "— Auto —" }, ...columns.map((c) => ({ value: c, label: c }))]}
+              onChange={setXColumn}
+            />
+          </div>
           {chartType !== "pie" && chartType !== "scatter" && (
-            <label>
+            <div className="chart-axis-group">
               <span className="chart-axis-label">Y / Values</span>
-              <select
-                multiple
-                value={yColumns}
-                onChange={handleYColumnsChange}
-                className="chart-y-select"
-              >
-                {numericColumnNames.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </label>
+              <MultiSelect
+                selected={yColumns}
+                options={numericColumnNames}
+                onToggle={toggleYColumn}
+              />
+            </div>
           )}
         </div>
       </div>
@@ -287,6 +273,59 @@ export function ChartView({ columns, rows }: Props) {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function MultiSelect({ selected, options, onToggle }: {
+  selected: string[];
+  options: string[];
+  onToggle: (col: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const label = selected.length === 0
+    ? "— Auto —"
+    : selected.length <= 2
+      ? selected.join(", ")
+      : `${selected.length} selected`;
+
+  return (
+    <div className="cs-wrapper" ref={ref}>
+      <button
+        type="button"
+        className="cs-trigger"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="cs-value">{label}</span>
+        <svg className="cs-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+          <path d="m6 9 6 6 6-6" />
+        </svg>
+      </button>
+      {open && (
+        <div className="cs-dropdown">
+          {options.map((col) => (
+            <div
+              key={col}
+              className={`cs-option ${selected.includes(col) ? "cs-option-selected" : ""}`}
+              onClick={() => onToggle(col)}
+            >
+              <span className="cs-check">{selected.includes(col) ? "✓" : ""}</span>
+              {col}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
