@@ -1,0 +1,140 @@
+.alter-table-dialog {
+  width: 740px;
+  max-width: 90vw;
+}
+
+.dialog-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 52px 28px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.alter-table-columns {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.alter-table-columns-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.alter-table-column-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.alter-table-column-row:last-of-type {
+  border-bottom: none;
+}
+
+.alter-table-column-row.dropped {
+  opacity: 0.5;
+  background: var(--cell-deleted);
+}
+
+.alter-table-column-row.dropped .editable-cell {
+  text-decoration: line-through;
+}
+
+.alter-table-column-row.new-column {
+  background: var(--cell-inserted);
+}
+
+.alter-table-column-row input,
+.alter-table-column-row select {
+  height: 34px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
+
+.alter-table-column-row input[type="checkbox"] {
+  height: auto;
+  width: 18px;
+  accent-color: var(--accent);
+}
+
+.alter-table-cell {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+}
+
+.alter-table-cell input,
+.alter-table-cell select {
+  width: 100%;
+  min-width: 0;
+}
+
+.editable-cell {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 5px 10px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+}
+
+.editable-cell:hover {
+  background: var(--bg-hover);
+}
+
+.drop-column-btn {
+  color: var(--text-muted);
+}
+
+.drop-column-btn:hover {
+  color: var(--error);
+}
+
+.alter-table-column-row.dropped .drop-column-btn:hover {
+  color: var(--success);
+}
+
+.add-column-btn {
+  width: 100%;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  height: 38px;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.add-column-btn:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.ddl-preview {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+  padding: 16px;
+  overflow-x: auto;
+}
+
+.ddl-preview pre {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  line-height: 1.7;
+}

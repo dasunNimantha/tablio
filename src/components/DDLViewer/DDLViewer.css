@@ -1,0 +1,48 @@
+.ddl-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.ddl-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 0 18px;
+  height: var(--toolbar-height);
+  min-height: var(--toolbar-height);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  gap: 14px;
+}
+
+.ddl-object-name {
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.ddl-editor-wrapper {
+  flex: 1;
+  overflow: hidden;
+}
+
+.ddl-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 16px;
+  color: var(--text-muted);
+}
+
+.ddl-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--error);
+  padding: 40px;
+  text-align: center;
+}

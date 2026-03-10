@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capabilities for DB Studio","local":true,"windows":["*"],"permissions":["core:default","fs:default","fs:allow-read","fs:allow-write","fs:allow-exists","fs:allow-mkdir",{"identifier":"fs:scope","allow":[{"path":"$APPDATA/**"},{"path":"$HOME/.dbstudio/**"}]}]}}

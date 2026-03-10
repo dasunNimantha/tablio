@@ -1,0 +1,135 @@
+.table-info {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.table-info-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 0 18px;
+  height: var(--toolbar-height);
+  min-height: var(--toolbar-height);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.table-info-name {
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.table-info-tabs {
+  display: flex;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 0 18px;
+  gap: 2px;
+}
+
+.table-info-tab {
+  padding: 0 16px;
+  height: 38px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.table-info-tab:hover {
+  color: var(--text-secondary);
+}
+
+.table-info-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.table-info-content {
+  flex: 1;
+  overflow: auto;
+}
+
+.info-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.info-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.info-table th {
+  background: var(--bg-secondary);
+  padding: 0 var(--gutter);
+  height: 36px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 2px solid var(--border);
+  white-space: nowrap;
+}
+
+.info-table td {
+  padding: 0 var(--gutter);
+  height: 36px;
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.info-table tbody tr:hover td {
+  background: var(--bg-hover);
+}
+
+.info-cell-name {
+  font-weight: 500;
+  font-family: var(--font-mono);
+}
+
+.info-cell-type {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+.info-cell-muted {
+  color: var(--text-muted);
+}
+
+.info-empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 28px !important;
+  font-size: 14px;
+}
+
+.table-info-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 16px;
+  color: var(--text-muted);
+}
+
+.table-info-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--error);
+  padding: 40px;
+  text-align: center;
+}

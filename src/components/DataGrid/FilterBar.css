@@ -1,0 +1,56 @@
+.filter-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 10px 18px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.filter-conditions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+}
+
+.filter-condition {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.filter-condition select {
+  height: 30px;
+  font-size: 13px;
+  padding: 0 8px;
+  min-width: 90px;
+}
+
+.filter-condition input {
+  height: 30px;
+  font-size: 13px;
+  padding: 0 10px;
+  width: 130px;
+}
+
+.filter-and {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 0 5px;
+}
+
+.filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.filter-actions .btn-ghost {
+  height: 30px;
+  font-size: 13px;
+}

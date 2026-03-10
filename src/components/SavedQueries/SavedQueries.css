@@ -1,0 +1,119 @@
+.saved-queries-panel {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 400px;
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  z-index: 50;
+  box-shadow: var(--shadow-lg);
+  animation: fadeIn 0.15s ease;
+}
+
+.saved-queries-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  height: var(--tab-height);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border);
+}
+
+.saved-queries-header button {
+  font-size: 18px;
+  line-height: 1;
+  min-width: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.saved-queries-content {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.saved-queries-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 16px;
+  color: var(--text-muted);
+}
+
+.saved-queries-error {
+  padding: 24px;
+  color: var(--error);
+  font-size: 14px;
+}
+
+.saved-queries-empty {
+  padding: 32px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.saved-queries-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.saved-queries-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.saved-queries-item:hover {
+  background: var(--bg-hover);
+}
+
+.saved-queries-item-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.saved-queries-name {
+  display: block;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+  margin-bottom: 5px;
+}
+
+.saved-queries-sql {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 5px;
+}
+
+.saved-queries-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.saved-queries-delete {
+  flex-shrink: 0;
+}
+
+.saved-queries-delete:hover {
+  color: var(--error);
+}

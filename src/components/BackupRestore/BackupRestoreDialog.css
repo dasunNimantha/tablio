@@ -1,0 +1,97 @@
+.backup-restore-dialog {
+  width: 560px;
+  max-width: 90vw;
+}
+
+.backup-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 14px 18px 0;
+  border-bottom: 1px solid var(--border);
+  margin: 0 var(--gutter);
+}
+
+.backup-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  margin-bottom: -1px;
+}
+
+.backup-tab:hover {
+  color: var(--text-primary);
+}
+
+.backup-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.backup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.backup-input-disabled {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+}
+
+.backup-checkboxes {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.backup-checkboxes .checkbox-label {
+  padding-top: 0;
+}
+
+.backup-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  align-self: flex-start;
+}
+
+.backup-result-area {
+  margin-top: 10px;
+}
+
+.backup-result {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+}
+
+.backup-result.loading {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+.backup-result.success {
+  background: rgba(61, 214, 140, 0.08);
+  color: var(--success);
+  border: 1px solid rgba(61, 214, 140, 0.18);
+}
+
+.backup-result.error {
+  background: rgba(240, 100, 100, 0.08);
+  color: var(--error);
+  border: 1px solid rgba(240, 100, 100, 0.18);
+}

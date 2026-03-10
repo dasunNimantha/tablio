@@ -1,0 +1,36 @@
+.export-menu-wrapper {
+  position: relative;
+}
+
+.export-menu-dropdown {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin-top: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-dropdown);
+  padding: 5px;
+  min-width: 180px;
+  z-index: 100;
+  animation: fadeIn 0.12s ease;
+}
+
+.export-menu-dropdown button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0 14px;
+  height: 36px;
+  font-size: 14px;
+  font-weight: 400;
+  background: transparent;
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+}
+
+.export-menu-dropdown button:hover {
+  background: var(--accent-muted);
+  color: var(--accent);
+}

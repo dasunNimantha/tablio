@@ -1,0 +1,91 @@
+.chart-view {
+  display: flex;
+  flex-direction: column;
+  padding: 18px;
+  gap: 18px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.chart-controls {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.chart-type-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.chart-type-btn {
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: all 0.15s;
+}
+
+.chart-type-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.chart-type-btn.active {
+  background: var(--accent-muted);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.chart-axis-selectors {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.chart-axis-selectors label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chart-axis-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.chart-axis-selectors select {
+  height: 34px;
+  min-width: 130px;
+}
+
+.chart-y-select {
+  min-height: 76px;
+  padding: 6px 10px;
+}
+
+.chart-canvas {
+  flex: 1;
+  min-height: 320px;
+  position: relative;
+}
+
+.chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 14px;
+}

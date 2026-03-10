@@ -1,0 +1,146 @@
+.explain-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.explain-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  height: var(--statusbar-height);
+  min-height: var(--statusbar-height);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.explain-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.explain-header-right {
+  display: flex;
+  gap: 4px;
+}
+
+.explain-header-right .btn-ghost.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.explain-raw {
+  flex: 1;
+  overflow: auto;
+  padding: 18px;
+}
+
+.explain-raw pre {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+}
+
+.explain-tree {
+  flex: 1;
+  overflow: auto;
+  padding: 18px;
+}
+
+.explain-node {
+  margin-bottom: 6px;
+}
+
+.explain-node-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 18px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+
+.explain-node-card:hover {
+  border-color: var(--accent);
+}
+
+.explain-node-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.explain-chevron {
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+}
+
+.explain-node-type {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.explain-node-relation {
+  font-size: 13px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+
+.explain-node-stats {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.explain-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.explain-stat-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+}
+
+.explain-stat-value {
+  font-size: 13px;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.explain-node-filter {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.explain-node-filter code {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.explain-cost-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 3px;
+  border-radius: 0 3px 0 0;
+  transition: width 0.3s ease;
+}

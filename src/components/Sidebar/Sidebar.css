@@ -1,0 +1,276 @@
+.connection-list {
+  border-bottom: 1px solid var(--border);
+}
+
+.connection-empty {
+  padding: 28px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.connection-empty .btn-secondary {
+  margin-top: 6px;
+}
+
+.connection-item {
+  display: flex;
+  align-items: center;
+  padding: 0 14px 0 18px;
+  height: 44px;
+  gap: 12px;
+  cursor: default;
+  transition: background 0.12s;
+}
+
+.connection-item:hover {
+  background: var(--bg-hover);
+}
+
+.connection-item.active {
+  background: var(--bg-active);
+}
+
+.connection-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.connection-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.connection-name {
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+  color: var(--text-primary);
+}
+
+.connection-detail {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.2;
+}
+
+.connection-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.connection-item:hover .connection-actions {
+  opacity: 1;
+}
+
+.connection-actions .btn-icon {
+  width: 28px;
+  height: 28px;
+}
+
+/* Object tree */
+
+.tree-root {
+  border-bottom: 1px solid var(--border);
+}
+
+.tree-root-header {
+  display: flex;
+  align-items: flex-start;
+}
+
+.tree-root-header > .connection-dot {
+  width: 9px;
+  min-width: 9px;
+  height: 9px;
+  min-height: 9px;
+  max-height: 9px;
+  margin-top: 13px;
+  margin-left: 14px;
+  border-radius: 50%;
+  flex: 0 0 9px;
+}
+
+.tree-root-header > div:not(.connection-dot) {
+  flex: 1;
+  min-width: 0;
+}
+
+.tree-node {
+  display: flex;
+  align-items: center;
+  padding: 0 8px 0 0;
+  height: 34px;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.1s;
+  user-select: none;
+  -webkit-user-select: none;
+  border-radius: var(--radius-sm);
+  margin: 1px 4px;
+}
+
+.tree-node::selection,
+.tree-node *::selection {
+  background: transparent;
+}
+
+.tree-node:hover {
+  background: var(--bg-hover);
+}
+
+.tree-node.leaf:hover {
+  background: var(--bg-hover);
+}
+
+.tree-chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.tree-chevron-spacer {
+  width: 16px;
+  flex-shrink: 0;
+}
+
+.tree-icon {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  width: 20px;
+  justify-content: center;
+}
+
+.tree-label {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.tree-node:hover .tree-label {
+  color: var(--text-primary);
+}
+
+.tree-action {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.tree-node:hover .tree-action {
+  opacity: 1;
+}
+
+.tree-empty-state {
+  padding: 28px 20px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.tree-empty .tree-label {
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+.text-muted {
+  color: var(--text-muted);
+}
+
+.tree-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tree-search svg {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.tree-search input {
+  flex: 1;
+  height: 28px;
+  font-size: 13px;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.tree-search input:focus {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.connection-group {
+  border-bottom: 1px solid var(--border);
+}
+
+.connection-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 18px;
+  height: 34px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  user-select: none;
+  transition: background 0.12s;
+}
+
+.connection-group-header:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.connection-group-chevron {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+
+.connection-group-name {
+  flex: 1;
+}
+
+.connection-group-count {
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--bg-hover);
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: var(--text-muted);
+}

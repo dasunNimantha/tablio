@@ -1,0 +1,124 @@
+.import-dialog {
+  width: 660px;
+  max-width: 90vw;
+}
+
+.import-target-input {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+}
+
+.import-file-input {
+  position: relative;
+}
+
+.import-file-input input[type="file"] {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+}
+
+.import-file-label {
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  height: 40px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.import-file-label:hover {
+  border-color: var(--accent);
+}
+
+.import-loading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.import-column-mapping {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.import-mapping-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.import-mapping-row:last-child {
+  border-bottom: none;
+}
+
+.import-mapping-csv {
+  flex: 1;
+  min-width: 100px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.import-mapping-arrow {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.import-mapping-row select {
+  flex: 2;
+  min-width: 140px;
+  height: 34px;
+  font-size: 13px;
+}
+
+.import-preview {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: auto;
+  max-height: 220px;
+}
+
+.import-preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.import-preview-table th,
+.import-preview-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+}
+
+.import-preview-table th {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-weight: 600;
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+}
+
+.import-preview-table td {
+  color: var(--text-primary);
+}
+
+.import-preview-table tbody tr:hover td {
+  background: var(--bg-hover);
+}

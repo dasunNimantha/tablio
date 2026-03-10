@@ -1,0 +1,91 @@
+.activity-dashboard {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.activity-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 0 18px;
+  height: var(--toolbar-height);
+  min-height: var(--toolbar-height);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  gap: 14px;
+}
+
+.activity-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.activity-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-hover);
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-weight: 500;
+}
+
+.activity-toolbar .btn-ghost.active {
+  color: var(--success);
+}
+
+.activity-error {
+  padding: 10px 18px;
+  background: rgba(240, 100, 100, 0.07);
+  border-bottom: 1px solid rgba(240, 100, 100, 0.12);
+  color: var(--error);
+  font-size: 13px;
+}
+
+.activity-content {
+  flex: 1;
+  overflow: auto;
+}
+
+.activity-query {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-secondary);
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-state {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 12px;
+  text-transform: capitalize;
+}
+
+.activity-state.active {
+  background: rgba(61, 214, 140, 0.10);
+  color: var(--success);
+}
+
+.activity-state.idle {
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+
+.activity-state.idle-in-transaction {
+  background: rgba(245, 183, 49, 0.10);
+  color: var(--warning);
+}
+
+.activity-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 16px;
+  color: var(--text-muted);
+}
