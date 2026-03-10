@@ -9,7 +9,7 @@ import { SavedQueries } from "../SavedQueries/SavedQueries";
 import { ChartView } from "../ChartView/ChartView";
 import { format as formatSQL } from "sql-formatter";
 import { save } from "@tauri-apps/plugin-dialog";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
+import { useToastStore } from "../../stores/toastStore";
 import "./QueryConsole.css";
 
 interface Props {
@@ -28,6 +28,7 @@ interface HistoryEntry {
 type ResultMode = "results" | "explain" | "chart";
 
 export function QueryConsole({ connectionId, database }: Props) {
+  const addToast = useToastStore((s) => s.addToast);
   const [sql, setSql] = useState("SELECT 1;");
   const [result, setResult] = useState<QueryResult | null>(null);
   const [explainResult, setExplainResult] = useState<ExplainResult | null>(null);
@@ -155,16 +156,15 @@ export function QueryConsole({ connectionId, database }: Props) {
       });
       if (!filePath) return;
 
-      const content = await api.exportQueryResult({
+      await api.exportQueryResultToFile({
         columns: result.columns,
         rows: result.rows as unknown[][],
         format,
         table_name: null,
-      });
-
-      await writeTextFile(filePath, content);
+      }, filePath);
+      addToast(`Exported query result as ${format.toUpperCase()}`);
     } catch (e) {
-      setError(String(e));
+      addToast(String(e), "error");
     }
   };
 

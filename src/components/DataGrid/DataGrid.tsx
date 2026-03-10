@@ -13,6 +13,7 @@ import { EditableCell } from "./EditableCell";
 import { FilterBar } from "./FilterBar";
 import { RowDetailView } from "./RowDetailView";
 import { ExportMenu } from "../ExportMenu";
+import { useToastStore } from "../../stores/toastStore";
 import {
   Save,
   Undo2,
@@ -32,7 +33,6 @@ import {
   X,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
 import "./DataGrid.css";
 
 interface Props {
@@ -59,6 +59,7 @@ const REFRESH_OPTIONS = [
 ];
 
 export function DataGrid({ connectionId, database, schema, table }: Props) {
+  const addToast = useToastStore((s) => s.addToast);
   const [data, setData] = useState<TableData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -106,8 +107,21 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         sort,
         filter: activeFilter,
       });
-      setData(result);
-      setEditingRows(result.rows.map((r) => [...r]));
+      const pkIndices = result.columns
+        .map((c, i) => ({ col: c, idx: i }))
+        .filter((x) => x.col.is_primary_key)
+        .map((x) => x.idx);
+      const nonPkIndices = result.columns
+        .map((_, i) => i)
+        .filter((i) => !result.columns[i].is_primary_key);
+      const reorder = [...pkIndices, ...nonPkIndices];
+
+      const sortedColumns = reorder.map((i) => result.columns[i]);
+      const sortedRows = result.rows.map((row) => reorder.map((i) => row[i]));
+
+      const sorted = { ...result, columns: sortedColumns, rows: sortedRows };
+      setData(sorted);
+      setEditingRows(sorted.rows.map((r) => [...r]));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -337,18 +351,17 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       });
       if (!filePath) return;
 
-      const content = await api.exportTableData({
+      await api.exportTableToFile({
         connection_id: connectionId,
         database,
         schema,
         table,
         format,
         filter: activeFilter,
-      });
-
-      await writeTextFile(filePath, content);
+      }, filePath);
+      addToast(`Exported ${table} as ${format.toUpperCase()}`);
     } catch (e) {
-      setError(String(e));
+      addToast(String(e), "error");
     }
   };
 

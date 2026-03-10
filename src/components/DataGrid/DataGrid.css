@@ -62,16 +62,11 @@
 
 .grid-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 13px;
   font-family: var(--font-mono);
   table-layout: auto;
-}
-
-.grid-table thead {
-  position: sticky;
-  top: 0;
-  z-index: 10;
 }
 
 .grid-table th {
@@ -86,7 +81,9 @@
   white-space: nowrap;
   cursor: pointer;
   user-select: none;
-  position: relative;
+  position: sticky;
+  top: 0;
+  z-index: 10;
   color: var(--text-secondary);
   letter-spacing: 0.01em;
 }
@@ -145,6 +142,15 @@
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   user-select: none;
+  position: sticky;
+  left: 0;
+  z-index: 2;
+}
+
+th.grid-row-number {
+  z-index: 12;
+  top: 0;
+  left: 0;
 }
 
 .grid-table td {
@@ -164,6 +170,10 @@
 
 .grid-table tbody tr:hover td {
   background: var(--bg-hover);
+}
+
+.grid-table tbody tr:hover td.grid-row-number {
+  background: var(--bg-elevated);
 }
 
 .grid-table tbody tr.row-selected td {

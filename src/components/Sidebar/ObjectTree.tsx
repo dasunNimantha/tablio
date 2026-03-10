@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { api, DatabaseInfo, SchemaInfo, TableInfo, FunctionInfo, ConnectionConfig } from "../../lib/tauri";
@@ -17,6 +17,7 @@ import {
   Zap,
   SearchIcon,
   Plus,
+  Filter,
 } from "lucide-react";
 import "./Sidebar.css";
 
@@ -59,6 +60,9 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
   const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [showTypeFilter, setShowTypeFilter] = useState(false);
+  const [typeFilters, setTypeFilters] = useState({ tables: true, views: true, functions: true });
+  const typeFilterRef = useRef<HTMLDivElement>(null);
 
   const [confirmAction, setConfirmAction] = useState<{
     title: string;
@@ -67,6 +71,16 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
     node: TreeNode;
   } | null>(null);
 
+  useEffect(() => {
+    if (!showTypeFilter) return;
+    const handleClick = (e: MouseEvent) => {
+      if (typeFilterRef.current && !typeFilterRef.current.contains(e.target as Node)) {
+        setShowTypeFilter(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [showTypeFilter]);
 
   const toggleExpand = useCallback(
     async (node: TreeNode) => {
@@ -452,10 +466,13 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
   };
 
   const renderNode = (node: TreeNode, depth: number) => {
-    const isExpanded = expanded.has(node.id);
-    const isLoading = loadingNodes.has(node.id);
     const children = childrenMap[node.id];
     const isLeaf = node.type === "table" || node.type === "view" || node.type === "function";
+    const q = searchQuery.trim().toLowerCase();
+    const selfMatches = hasActiveFilter && q && node.label.toLowerCase().includes(q);
+    const descendantMatches = hasActiveFilter && !selfMatches && children?.some((c) => nodeMatchesFilter(c, q));
+    const isExpanded = expanded.has(node.id) || (hasActiveFilter && !!descendantMatches);
+    const isLoading = loadingNodes.has(node.id);
 
     const Icon = () => {
       if (isLoading) return <Loader2 size={14} className="spin" />;
@@ -482,8 +499,14 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
         <div
           className={`tree-node ${isLeaf ? "leaf" : ""}`}
           style={{ paddingLeft: depth * 12 + 6 }}
-          onClick={() => !isLeaf && toggleExpand(node)}
-          onDoubleClick={() => handleDoubleClick(node)}
+          onClick={() => {
+            if (isLeaf) {
+              handleDoubleClick(node);
+            } else {
+              toggleExpand(node);
+            }
+          }}
+          onDoubleClick={() => !isLeaf && handleDoubleClick(node)}
           onContextMenu={(e) => handleContextMenu(e, node)}
         >
           {!isLeaf && (
@@ -700,10 +723,38 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
     );
   };
 
+  const isTypeVisible = useCallback(
+    (node: TreeNode): boolean => {
+      if (node.type === "table" || node.type === "table-group") return typeFilters.tables;
+      if (node.type === "view" || node.type === "view-group") return typeFilters.views;
+      if (node.type === "function" || node.type === "function-group") return typeFilters.functions;
+      return true;
+    },
+    [typeFilters]
+  );
+
+  const nodeMatchesFilter = useCallback(
+    (node: TreeNode, q: string): boolean => {
+      if (!isTypeVisible(node)) return false;
+      const textMatch = !q || node.label.toLowerCase().includes(q);
+      if (textMatch && (node.type === "table" || node.type === "view" || node.type === "function")) return true;
+      if (textMatch && !q && node.type !== "table" && node.type !== "view" && node.type !== "function") return true;
+      const children = childrenMap[node.id];
+      if (children) {
+        return children.some((child) => nodeMatchesFilter(child, q));
+      }
+      return !q;
+    },
+    [childrenMap, isTypeVisible]
+  );
+
+  const allTypesEnabled = typeFilters.tables && typeFilters.views && typeFilters.functions;
+  const hasActiveFilter = !!searchQuery.trim() || !allTypesEnabled;
+
   const filterNodes = (nodes: TreeNode[]): TreeNode[] => {
-    if (!searchQuery.trim()) return nodes;
-    const q = searchQuery.toLowerCase();
-    return nodes.filter((n) => n.label.toLowerCase().includes(q));
+    if (!hasActiveFilter) return nodes;
+    const q = searchQuery.trim().toLowerCase();
+    return nodes.filter((n) => nodeMatchesFilter(n, q));
   };
 
   return (
@@ -727,10 +778,50 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
             <div className="tree-search">
               <SearchIcon size={13} />
               <input
-                placeholder="Search objects..."
+                placeholder="Filter objects..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
+              <div className="tree-type-filter-wrapper" ref={typeFilterRef}>
+                <button
+                  className={`btn-icon tree-filter-btn ${!allTypesEnabled ? "tree-filter-active" : ""}`}
+                  onClick={() => setShowTypeFilter((v) => !v)}
+                  title="Filter by type"
+                >
+                  <Filter size={13} />
+                </button>
+                {showTypeFilter && (
+                  <div className="tree-type-filter-dropdown">
+                    <label className="tree-type-filter-item">
+                      <input
+                        type="checkbox"
+                        checked={typeFilters.tables}
+                        onChange={(e) => setTypeFilters((f) => ({ ...f, tables: e.target.checked }))}
+                      />
+                      <Table2 size={13} />
+                      <span>Tables</span>
+                    </label>
+                    <label className="tree-type-filter-item">
+                      <input
+                        type="checkbox"
+                        checked={typeFilters.views}
+                        onChange={(e) => setTypeFilters((f) => ({ ...f, views: e.target.checked }))}
+                      />
+                      <Eye size={13} />
+                      <span>Views</span>
+                    </label>
+                    <label className="tree-type-filter-item">
+                      <input
+                        type="checkbox"
+                        checked={typeFilters.functions}
+                        onChange={(e) => setTypeFilters((f) => ({ ...f, functions: e.target.checked }))}
+                      />
+                      <Zap size={13} />
+                      <span>Functions</span>
+                    </label>
+                  </div>
+                )}
+              </div>
             </div>
             {connections.map((conn) => {
               const isActive = activeConnections.has(conn.id);

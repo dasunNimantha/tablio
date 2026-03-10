@@ -8,6 +8,7 @@ import { AlterTableDialog } from "./components/AlterTable/AlterTableDialog";
 import { ImportDialog } from "./components/ImportDialog/ImportDialog";
 import { BackupRestoreDialog } from "./components/BackupRestore/BackupRestoreDialog";
 import { KeyboardShortcuts } from "./components/KeyboardShortcuts/KeyboardShortcuts";
+import { ToastContainer } from "./components/Toast/Toast";
 import { useConnectionStore } from "./stores/connectionStore";
 import { useTabStore } from "./stores/tabStore";
 import { Database, Plus, Sun, Moon, Keyboard } from "lucide-react";
@@ -202,6 +203,7 @@ export default function App() {
       {showShortcuts && (
         <KeyboardShortcuts onClose={() => setShowShortcuts(false)} />
       )}
+      <ToastContainer />
     </div>
   );
 }
