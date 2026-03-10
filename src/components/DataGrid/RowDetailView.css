@@ -3,8 +3,6 @@
   right: 0;
   top: 0;
   bottom: 0;
-  width: 440px;
-  max-width: 55%;
   background: var(--bg-surface);
   border-left: 1px solid var(--border);
   display: flex;
@@ -12,6 +10,22 @@
   z-index: 50;
   box-shadow: var(--shadow-lg);
   animation: fadeIn 0.15s ease;
+}
+
+.row-detail-resize-handle {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 51;
+}
+
+.row-detail-resize-handle:hover,
+.row-detail-resize-handle:active {
+  background: var(--accent);
+  opacity: 0.4;
 }
 
 .row-detail-header {
@@ -34,7 +48,8 @@
 
 .row-detail-header-actions {
   display: flex;
-  gap: 2px;
+  align-items: center;
+  gap: 6px;
 }
 
 .row-detail-filter {
@@ -51,54 +66,6 @@
   border-radius: var(--radius-md);
   padding: 0 12px;
   font-family: var(--font-mono);
-}
-
-/* Edit bar */
-
-.row-detail-edit-bar {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-secondary);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.row-detail-edit-label {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.row-detail-edit-label strong {
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-}
-
-.row-detail-edit-textarea {
-  width: 100%;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.6;
-  padding: 8px 12px;
-  background: var(--bg-tertiary);
-  border: 2px solid var(--accent);
-  border-radius: var(--radius-md);
-  color: var(--text-primary);
-  resize: vertical;
-  outline: none;
-  height: auto;
-}
-
-.row-detail-edit-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.row-detail-edit-hint {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-left: auto;
 }
 
 /* JSON body */
@@ -130,27 +97,115 @@
 
 .json-row:hover {
   background: var(--bg-hover);
-}
-
-.json-row-actions {
-  opacity: 0;
-  transition: opacity 0.12s;
-  margin-left: 6px;
-  display: inline-flex;
-}
-
-.json-row:hover .json-row-actions {
-  opacity: 1;
-}
-
-.json-edit-btn {
-  width: 20px !important;
-  height: 20px !important;
-  min-width: 0;
+  cursor: pointer;
 }
 
 .json-value-inline {
   display: inline;
+  cursor: default;
+}
+
+.json-row-modified {
+  border-left: 2px solid #22c55e;
+  padding-left: 16px !important;
+}
+
+.json-inline-input {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.8;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  caret-color: var(--accent);
+  min-width: 20px;
+  width: 100%;
+  height: auto;
+  resize: none;
+  overflow: hidden;
+  word-break: break-all;
+  white-space: pre-wrap;
+  display: inline;
+  field-sizing: content;
+}
+
+.json-inline-input.json-string { color: #8cc790; }
+.json-inline-input.json-number { color: #e5c07b; }
+.json-inline-input.json-bool { color: #56b6c2; }
+.json-inline-input.json-null { color: var(--text-muted); font-style: italic; }
+
+[data-theme="light"] .json-inline-input.json-string { color: #16a34a; }
+[data-theme="light"] .json-inline-input.json-number { color: #d97706; }
+[data-theme="light"] .json-inline-input.json-bool { color: #0891b2; }
+
+.json-inline-input-error {
+  text-decoration: wavy underline #ef4444;
+}
+
+.json-inline-error {
+  font-size: 11px;
+  color: #ef4444;
+  margin-left: 6px;
+}
+
+.json-row-pk {
+  opacity: 0.7;
+}
+
+.json-value-readonly {
+  cursor: not-allowed !important;
+}
+
+.json-pk-icon {
+  display: inline;
+  vertical-align: middle;
+  margin-right: 4px;
+  color: #eab308;
+  opacity: 0.7;
+}
+
+.json-save-all-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px !important;
+  padding: 0 10px !important;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 4px;
+  border: none;
+  background: #22c55e;
+  color: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.json-save-all-btn:hover {
+  background: #16a34a;
+}
+
+.json-discard-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px !important;
+  height: 26px !important;
+  min-width: 26px;
+  max-width: 26px;
+  padding: 0 !important;
+  border-radius: 4px;
+  border: 1px solid #ef4444;
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.json-discard-btn:hover {
+  background: #ef4444;
+  color: #fff;
 }
 
 .json-toggle {

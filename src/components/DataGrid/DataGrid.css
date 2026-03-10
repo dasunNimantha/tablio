@@ -322,3 +322,103 @@
   padding: 40px;
   text-align: center;
 }
+
+.grid-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  animation: fadeIn 0.1s ease;
+}
+
+.grid-search-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.grid-search-input {
+  flex: 1;
+  height: 28px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0 10px;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.grid-search-input:focus {
+  border-color: var(--accent);
+}
+
+.grid-search-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.grid-search-close {
+  flex-shrink: 0;
+}
+
+.cell-search-match {
+  background: rgba(234, 179, 8, 0.08) !important;
+}
+
+.cell-search-highlight {
+  background: rgba(234, 179, 8, 0.4);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.search-match-header {
+  background: rgba(234, 179, 8, 0.15) !important;
+}
+
+.refresh-interval-wrapper {
+  position: relative;
+}
+
+.refresh-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 100;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-dropdown);
+  padding: 4px;
+  min-width: 90px;
+  margin-top: 4px;
+  animation: fadeIn 0.1s ease;
+}
+
+.refresh-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0 12px;
+  height: 30px;
+  font-size: 13px;
+  background: transparent;
+  color: var(--text-primary);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.refresh-menu-item:hover {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.refresh-menu-active {
+  color: var(--accent);
+  font-weight: 600;
+}

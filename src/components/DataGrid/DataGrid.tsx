@@ -27,6 +27,9 @@ import {
   Loader2,
   Filter,
   Copy,
+  Timer,
+  Search,
+  X,
 } from "lucide-react";
 import "./DataGrid.css";
 
@@ -44,6 +47,14 @@ interface PendingChanges {
 }
 
 const PAGE_SIZE = 100;
+const REFRESH_OPTIONS = [
+  { label: "Off", value: 0 },
+  { label: "5s", value: 5 },
+  { label: "10s", value: 10 },
+  { label: "30s", value: 30 },
+  { label: "1m", value: 60 },
+  { label: "5m", value: 300 },
+];
 
 export function DataGrid({ connectionId, database, schema, table }: Props) {
   const [data, setData] = useState<TableData | null>(null);
@@ -64,6 +75,13 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   const [editingRows, setEditingRows] = useState<unknown[][]>([]);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const [detailRowIdx, setDetailRowIdx] = useState<number | null>(null);
+  const [rowContextMenu, setRowContextMenu] = useState<{ x: number; y: number; rowIdx: number } | null>(null);
+  const [refreshInterval, setRefreshInterval] = useState(10);
+  const [showRefreshMenu, setShowRefreshMenu] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [showSearch, setShowSearch] = useState(false);
+  const refreshBtnRef = useRef<HTMLButtonElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const tableRef = useRef<HTMLDivElement>(null);
   const resizingRef = useRef<{ col: string; startX: number; startWidth: number } | null>(null);
 
@@ -98,6 +116,70 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    if (!rowContextMenu) return;
+    const close = () => setRowContextMenu(null);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [rowContextMenu]);
+
+  useEffect(() => {
+    if (refreshInterval <= 0 || hasChanges) return;
+    const id = setInterval(() => {
+      fetchData();
+    }, refreshInterval * 1000);
+    return () => clearInterval(id);
+  }, [refreshInterval, fetchData, hasChanges]);
+
+  useEffect(() => {
+    if (!showRefreshMenu) return;
+    const close = () => setShowRefreshMenu(false);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [showRefreshMenu]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        e.preventDefault();
+        setShowSearch(true);
+        setTimeout(() => searchInputRef.current?.focus(), 0);
+      }
+      if (e.key === "Escape" && showSearch) {
+        setShowSearch(false);
+        setSearchQuery("");
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [showSearch]);
+
+  const searchLower = searchQuery.toLowerCase();
+
+  const cellMatches = (value: unknown): boolean => {
+    if (!searchQuery) return false;
+    if (value === null || value === undefined) return "null".includes(searchLower);
+    const str = typeof value === "object" ? JSON.stringify(value) : String(value);
+    return str.toLowerCase().includes(searchLower);
+  };
+
+  const searchMatchCount = (() => {
+    if (!searchQuery || !data) return 0;
+    let count = 0;
+    editingRows.forEach((row) => {
+      row.forEach((val) => { if (cellMatches(val)) count++; });
+    });
+    return count;
+  })();
+
+  useEffect(() => {
+    if (!searchQuery || !tableRef.current) return;
+    const firstMatch = tableRef.current.querySelector(".cell-search-match");
+    if (firstMatch) {
+      firstMatch.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    }
+  }, [searchQuery]);
 
   const totalPages = data ? Math.ceil(data.total_rows / PAGE_SIZE) : 0;
 
@@ -370,6 +452,29 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           >
             <Filter size={14} /> Filter{activeFilter ? " (active)" : ""}
           </button>
+          <div className="refresh-interval-wrapper">
+            <button
+              ref={refreshBtnRef}
+              className={`btn-ghost ${refreshInterval > 0 ? "active-filter" : ""}`}
+              onClick={(e) => { e.stopPropagation(); setShowRefreshMenu((v) => !v); }}
+              title="Auto-refresh interval"
+            >
+              <Timer size={14} /> {refreshInterval > 0 ? (refreshInterval >= 60 ? `${refreshInterval / 60}m` : `${refreshInterval}s`) : "Off"}
+            </button>
+            {showRefreshMenu && (
+              <div className="refresh-menu" onClick={(e) => e.stopPropagation()}>
+                {REFRESH_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    className={`refresh-menu-item ${refreshInterval === opt.value ? "refresh-menu-active" : ""}`}
+                    onClick={() => { setRefreshInterval(opt.value); setShowRefreshMenu(false); }}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <ExportMenu onExport={handleExport} />
           <button
             className="btn-ghost"
@@ -414,6 +519,33 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
 
       {error && (
         <div className="grid-error-banner">{error}</div>
+      )}
+
+      {showSearch && (
+        <div className="grid-search-bar">
+          <Search size={14} className="grid-search-icon" />
+          <input
+            ref={searchInputRef}
+            className="grid-search-input"
+            placeholder="Search columns and values..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); }
+            }}
+          />
+          {searchQuery && (
+            <span className="grid-search-count">
+              {searchMatchCount} match{searchMatchCount !== 1 ? "es" : ""}
+            </span>
+          )}
+          <button
+            className="btn-icon grid-search-close"
+            onClick={() => { setShowSearch(false); setSearchQuery(""); }}
+          >
+            <X size={14} />
+          </button>
+        </div>
       )}
 
       <div className="grid-table-wrapper" ref={tableRef}>
@@ -472,9 +604,16 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
                     ${isInserted ? "row-inserted" : ""}
                     ${detailRowIdx === rowIdx ? "row-selected" : ""}
                   `}
-                  onClick={() => setDetailRowIdx(rowIdx)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setRowContextMenu({ x: e.clientX, y: e.clientY, rowIdx });
+                  }}
                 >
-                  <td className="grid-row-number">
+                  <td
+                    className="grid-row-number"
+                    onClick={() => setDetailRowIdx(rowIdx)}
+                    title="Click to open row detail"
+                  >
                     {page * PAGE_SIZE + rowIdx + 1}
                   </td>
                   {row.map((value, colIdx) => {
@@ -492,6 +631,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
                         column={col}
                         isModified={isModified}
                         isInserted={isInserted}
+                        searchQuery={searchQuery}
                         onChange={(newVal) =>
                           handleCellChange(rowIdx, colIdx, newVal)
                         }
@@ -560,6 +700,47 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           </button>
         </div>
       </div>
+
+      {rowContextMenu && data && editingRows[rowContextMenu.rowIdx] && (
+        <div
+          className="context-menu"
+          style={{ left: rowContextMenu.x, top: rowContextMenu.y }}
+        >
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              setDetailRowIdx(rowContextMenu.rowIdx);
+              setRowContextMenu(null);
+            }}
+          >
+            View as JSON
+          </button>
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const obj: Record<string, unknown> = {};
+              data.columns.forEach((col, i) => {
+                obj[col.name] = editingRows[rowContextMenu.rowIdx][i];
+              });
+              navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
+              setRowContextMenu(null);
+            }}
+          >
+            Copy row as JSON
+          </button>
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const rIdx = rowContextMenu.rowIdx;
+              const isInserted = rIdx >= originalRowCount;
+              if (!isInserted) handleDeleteRow(rIdx);
+              setRowContextMenu(null);
+            }}
+          >
+            {changes.deletedKeys.has(getPkKey(rowContextMenu.rowIdx)) ? "Undo delete" : "Delete row"}
+          </button>
+        </div>
+      )}
 
       {detailRowIdx !== null && data && editingRows[detailRowIdx] && (
         <RowDetailView

@@ -285,7 +285,9 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
     const tab: TabInfo = {
       id: tabId,
       type: "table",
-      title: `${node.database}.${node.schema}.${node.tableName}`,
+      title: node.database === node.schema
+        ? `${node.schema}.${node.tableName}`
+        : `${node.database}.${node.schema}.${node.tableName}`,
       connectionId: node.connectionId,
       connectionColor: node.connectionColor,
       database: node.database!,

@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect, useMemo } from "react";
-import { X, ChevronDown, ChevronRight, Copy, Check, Pencil } from "lucide-react";
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import { X, ChevronDown, ChevronRight, Copy, Check, Save, Lock } from "lucide-react";
 import type { ColumnInfo } from "../../lib/tauri";
 import "./RowDetailView.css";
 
@@ -21,10 +21,136 @@ function tryParseJson(value: unknown): { parsed: unknown; isJson: boolean } {
   return { parsed: value, isJson: false };
 }
 
-interface EditState {
-  colIndex: number;
-  colName: string;
-  value: string;
+function getValueColorForOriginal(value: unknown): string {
+  if (value === null || value === undefined) return "json-null";
+  if (typeof value === "boolean") return "json-bool";
+  if (typeof value === "number") return "json-number";
+  return "json-string";
+}
+
+function getEditColorClass(col: ColumnInfo): string {
+  const cat = getTypeCategory(col.data_type);
+  switch (cat) {
+    case "integer":
+    case "number":
+      return "json-number";
+    case "boolean":
+      return "json-bool";
+    default:
+      return "json-string";
+  }
+}
+
+function needsQuotes(value: unknown, col: ColumnInfo): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "boolean") return false;
+  if (typeof value === "number") return false;
+  const cat = getTypeCategory(col.data_type);
+  if (cat === "integer" || cat === "number" || cat === "boolean") return false;
+  return true;
+}
+
+function getTypeCategory(dataType: string): string {
+  const t = dataType.toLowerCase();
+  if (/^(smallint|integer|int2|int4|int8|bigint|smallserial|serial|bigserial|tinyint|mediumint)/.test(t)) return "integer";
+  if (/^(real|double|float|numeric|decimal|money|double precision)/.test(t)) return "number";
+  if (/^(bool)/.test(t)) return "boolean";
+  if (/^(json|jsonb)/.test(t)) return "json";
+  if (/^(uuid)/.test(t)) return "uuid";
+  if (/^(date)$/.test(t)) return "date";
+  if (/^(time)/.test(t)) return "time";
+  if (/^(timestamp|timestamptz)/.test(t)) return "timestamp";
+  if (/^(inet|cidr)/.test(t)) return "inet";
+  if (/^(character varying|varchar)/.test(t)) return "varchar";
+  if (/^(char|character)\b/.test(t)) return "char";
+  return "text";
+}
+
+function parseMaxLength(dataType: string): number | null {
+  const m = dataType.match(/\((\d+)\)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function validateValue(value: string, dataType: string, isNullable: boolean): string | null {
+  const trimmed = value.trim();
+
+  if (trimmed === "" || trimmed.toLowerCase() === "null") {
+    return isNullable ? null : "This field is NOT NULL — value required";
+  }
+
+  const category = getTypeCategory(dataType);
+
+  switch (category) {
+    case "integer": {
+      if (!/^-?\d+$/.test(trimmed)) return `Expected integer, got "${trimmed}"`;
+      try {
+        const n = BigInt(trimmed);
+        const dt = dataType.toLowerCase();
+        if (/^(smallint|int2)/.test(dt) && (n < -32768n || n > 32767n))
+          return "smallint range: -32768 to 32767";
+        if (/^(integer|int4|serial)/.test(dt) && (n < -2147483648n || n > 2147483647n))
+          return "integer range: -2147483648 to 2147483647";
+      } catch {
+        return `Invalid integer: "${trimmed}"`;
+      }
+      break;
+    }
+    case "number": {
+      if (isNaN(Number(trimmed))) return `Expected number, got "${trimmed}"`;
+      break;
+    }
+    case "boolean":
+      if (!["true", "false", "t", "f", "1", "0", "yes", "no"].includes(trimmed.toLowerCase()))
+        return "Expected boolean (true/false/t/f/1/0)";
+      break;
+    case "json":
+      try { JSON.parse(trimmed); } catch { return "Invalid JSON syntax"; }
+      break;
+    case "uuid":
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed))
+        return "Invalid UUID (expected xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)";
+      break;
+    case "date":
+      if (isNaN(Date.parse(trimmed))) return "Invalid date format";
+      break;
+    case "timestamp":
+      if (isNaN(Date.parse(trimmed))) return "Invalid timestamp format";
+      break;
+    case "varchar":
+    case "char": {
+      const maxLen = parseMaxLength(dataType);
+      if (maxLen !== null && trimmed.length > maxLen)
+        return `Max length is ${maxLen}, got ${trimmed.length}`;
+      break;
+    }
+  }
+
+  return null;
+}
+
+function coerceForSave(value: string, col: ColumnInfo): unknown {
+  const trimmed = value.trim();
+  if ((trimmed === "" || trimmed.toLowerCase() === "null") && col.is_nullable) return null;
+
+  const cat = getTypeCategory(col.data_type);
+  switch (cat) {
+    case "integer": {
+      const n = parseInt(trimmed, 10);
+      return isNaN(n) ? trimmed : n;
+    }
+    case "number": {
+      const n = parseFloat(trimmed);
+      return isNaN(n) ? trimmed : n;
+    }
+    case "boolean": {
+      const lower = trimmed.toLowerCase();
+      return ["true", "t", "1", "yes"].includes(lower);
+    }
+    case "json":
+      try { return JSON.parse(trimmed); } catch { return trimmed; }
+    default:
+      return trimmed;
+  }
 }
 
 function JsonValue({ value, depth, filterQ }: { value: unknown; depth: number; filterQ: string }) {
@@ -136,15 +262,55 @@ export function RowDetailView({
   onCellChange,
 }: Props) {
   const [filterText, setFilterText] = useState("");
-  const [editState, setEditState] = useState<EditState | null>(null);
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [editingColIndex, setEditingColIndex] = useState(-1);
+  const [editValue, setEditValue] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
+  const [pendingEdits, setPendingEdits] = useState<Map<number, unknown>>(new Map());
   const [copied, setCopied] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(440);
   const editRef = useRef<HTMLTextAreaElement>(null);
+  const resizeRef = useRef<{ startX: number; startW: number } | null>(null);
+  const blurCommitRef = useRef(true);
+
+  const resizeTextarea = useCallback(() => {
+    if (editRef.current) {
+      editRef.current.style.height = "0";
+      editRef.current.style.height = editRef.current.scrollHeight + "px";
+    }
+  }, []);
 
   useEffect(() => {
-    if (editState && editRef.current) {
+    if (editingKey !== null && editRef.current) {
       editRef.current.focus();
+      editRef.current.select();
+      resizeTextarea();
     }
-  }, [editState]);
+  }, [editingKey, resizeTextarea]);
+
+  useEffect(() => {
+    return () => {
+      resizeRef.current = null;
+    };
+  }, []);
+
+  const handlePanelResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    resizeRef.current = { startX: e.clientX, startW: panelWidth };
+    const onMove = (ev: MouseEvent) => {
+      if (!resizeRef.current) return;
+      const delta = resizeRef.current.startX - ev.clientX;
+      const newW = Math.max(280, Math.min(resizeRef.current.startW + delta, window.innerWidth * 0.7));
+      setPanelWidth(newW);
+    };
+    const onUp = () => {
+      resizeRef.current = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [panelWidth]);
 
   const rowObj = useMemo(() => {
     const entries: { key: string; value: unknown; colIndex: number; col: ColumnInfo }[] = [];
@@ -157,54 +323,128 @@ export function RowDetailView({
   const filtered = useMemo(() => {
     if (!filterText) return rowObj;
     const q = filterText.toLowerCase();
-    return rowObj.filter(({ key, value }) => {
+    return rowObj.filter(({ key, value, colIndex }) => {
+      const displayVal = pendingEdits.has(colIndex) ? pendingEdits.get(colIndex) : value;
       if (key.toLowerCase().includes(q)) return true;
-      if (value === null || value === undefined) return "null".includes(q);
-      const str = typeof value === "object" ? JSON.stringify(value) : String(value);
+      if (displayVal === null || displayVal === undefined) return "null".includes(q);
+      const str = typeof displayVal === "object" ? JSON.stringify(displayVal) : String(displayVal);
       return str.toLowerCase().includes(q);
     });
-  }, [rowObj, filterText]);
+  }, [rowObj, filterText, pendingEdits]);
 
   const handleCopyAll = () => {
     const obj: Record<string, unknown> = {};
-    columns.forEach((col, i) => { obj[col.name] = row[i]; });
+    columns.forEach((col, i) => {
+      obj[col.name] = pendingEdits.has(i) ? pendingEdits.get(i) : row[i];
+    });
     navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
 
-  const handleStartEdit = (colIndex: number, colName: string, value: unknown) => {
+  const handleStartEdit = (colIndex: number, key: string, value: unknown, col: ColumnInfo) => {
+    if (col.is_primary_key) return;
+
     const str = value === null || value === undefined
       ? ""
       : typeof value === "object"
         ? JSON.stringify(value, null, 2)
         : String(value);
-    setEditState({ colIndex, colName, value: str });
+    setEditingKey(key);
+    setEditingColIndex(colIndex);
+    setEditValue(str);
+    setEditError(null);
+    blurCommitRef.current = true;
   };
 
-  const handleSaveEdit = () => {
-    if (!editState) return;
-    const v = editState.value.trim();
-    const col = columns[editState.colIndex];
-    if (v === "" && col.is_nullable) {
-      onCellChange(editState.colIndex, null);
-    } else {
-      onCellChange(editState.colIndex, v);
+  const commitField = useCallback(() => {
+    if (editingColIndex < 0) return;
+    const col = columns[editingColIndex];
+    const v = editValue.trim();
+
+    const error = validateValue(v, col.data_type, col.is_nullable);
+    if (error) {
+      setEditError(error);
+      blurCommitRef.current = false;
+      return;
     }
-    setEditState(null);
+
+    const coerced = coerceForSave(editValue, col);
+    const origVal = row[editingColIndex];
+
+    const isSame = coerced === null && origVal === null
+      || coerced === null && origVal === undefined
+      || JSON.stringify(coerced) === JSON.stringify(origVal);
+
+    if (!isSame) {
+      setPendingEdits((prev) => {
+        const next = new Map(prev);
+        next.set(editingColIndex, coerced);
+        return next;
+      });
+    } else {
+      setPendingEdits((prev) => {
+        if (!prev.has(editingColIndex)) return prev;
+        const next = new Map(prev);
+        next.delete(editingColIndex);
+        return next;
+      });
+    }
+
+    setEditingKey(null);
+    setEditingColIndex(-1);
+    setEditError(null);
+  }, [editValue, editingColIndex, columns, row]);
+
+  const handleCancel = () => {
+    blurCommitRef.current = false;
+    setEditingKey(null);
+    setEditingColIndex(-1);
+    setEditError(null);
   };
 
-  const formatValueStr = (value: unknown): string => {
-    if (value === null || value === undefined) return "null";
-    if (typeof value === "object") return JSON.stringify(value);
-    return String(value);
+  const handleBlur = useCallback(() => {
+    setTimeout(() => {
+      if (blurCommitRef.current) {
+        commitField();
+      }
+    }, 0);
+  }, [commitField]);
+
+  const handleSaveAll = () => {
+    pendingEdits.forEach((value, colIndex) => {
+      onCellChange(colIndex, value);
+    });
+    setPendingEdits(new Map());
   };
+
+  const handleDiscardAll = () => {
+    blurCommitRef.current = false;
+    setPendingEdits(new Map());
+    setEditingKey(null);
+    setEditingColIndex(-1);
+    setEditError(null);
+  };
+
+  const hasPendingEdits = pendingEdits.size > 0;
 
   return (
-    <div className="row-detail-panel">
+    <div className="row-detail-panel" style={{ width: panelWidth }}>
+      <div className="row-detail-resize-handle" onMouseDown={handlePanelResizeStart} />
       <div className="row-detail-header">
         <h2>JSON VIEWER</h2>
         <div className="row-detail-header-actions">
+          {hasPendingEdits && (
+            <button className="json-save-all-btn" onClick={handleSaveAll}>
+              <Save size={13} />
+              Save {pendingEdits.size} change{pendingEdits.size > 1 ? "s" : ""}
+            </button>
+          )}
+          {(hasPendingEdits || editError) && (
+            <button className="json-discard-btn" onClick={handleDiscardAll} title="Discard all changes">
+              <X size={13} />
+            </button>
+          )}
           <button className="btn-icon" onClick={handleCopyAll} title="Copy as JSON">
             {copied ? <Check size={14} /> : <Copy size={14} />}
           </button>
@@ -215,35 +455,11 @@ export function RowDetailView({
       </div>
       <div className="row-detail-filter">
         <input
-          placeholder="Filter keys by text or /regex/"
+          placeholder="Filter by key or value..."
           value={filterText}
           onChange={(e) => setFilterText(e.target.value)}
         />
       </div>
-
-      {editState && (
-        <div className="row-detail-edit-bar">
-          <div className="row-detail-edit-label">
-            Editing <strong>{editState.colName}</strong>
-          </div>
-          <textarea
-            ref={editRef}
-            className="row-detail-edit-textarea"
-            value={editState.value}
-            onChange={(e) => setEditState({ ...editState, value: e.target.value })}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") setEditState(null);
-              if (e.key === "Enter" && e.ctrlKey) { e.preventDefault(); handleSaveEdit(); }
-            }}
-            rows={Math.min(Math.max(editState.value.split("\n").length, 2), 8)}
-          />
-          <div className="row-detail-edit-actions">
-            <button className="btn-primary" onClick={handleSaveEdit} style={{ height: 28, fontSize: 12 }}>Save</button>
-            <button className="btn-ghost" onClick={() => setEditState(null)} style={{ height: 28, fontSize: 12 }}>Cancel</button>
-            <span className="row-detail-edit-hint">Ctrl+Enter</span>
-          </div>
-        </div>
-      )}
 
       <div className="row-detail-body">
         <div className="json-tree">
@@ -251,28 +467,69 @@ export function RowDetailView({
             <span className="json-bracket">{"{"}</span>
           </div>
           {filtered.map(({ key, value, colIndex, col }, i) => {
-            const valStr = formatValueStr(value);
             const isLast = i === filtered.length - 1;
+            const isEditing = editingKey === key;
+            const isPending = pendingEdits.has(colIndex);
+            const displayValue = isPending ? pendingEdits.get(colIndex) : value;
+            const isPk = col.is_primary_key;
+
+            if (isEditing) {
+              const editColorClass = getEditColorClass(col);
+              const showQuotes = getTypeCategory(col.data_type) !== "integer"
+                && getTypeCategory(col.data_type) !== "number"
+                && getTypeCategory(col.data_type) !== "boolean";
+
+              return (
+                <div
+                  key={key}
+                  className={`json-row ${isPending ? "json-row-modified" : ""}`}
+                  style={{ paddingLeft: 18 }}
+                >
+                  <span className="json-key">
+                    "{filterText ? highlightMatch(key, filterText) : key}"
+                  </span>
+                  <span className="json-colon">: </span>
+                  {showQuotes && <span className={editColorClass}>"</span>}
+                  <textarea
+                    ref={editRef}
+                    className={`json-inline-input ${editColorClass} ${editError ? "json-inline-input-error" : ""}`}
+                    value={editValue}
+                    onChange={(e) => { setEditValue(e.target.value); setEditError(null); blurCommitRef.current = true; resizeTextarea(); }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") { handleCancel(); }
+                      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); blurCommitRef.current = false; commitField(); }
+                    }}
+                    onBlur={handleBlur}
+                  />
+                  {showQuotes && <span className={editColorClass}>"</span>}
+                  {editError && <span className="json-inline-error">{editError}</span>}
+                  {!isLast && <span className="json-comma">,</span>}
+                </div>
+              );
+            }
+
+            const colorClass = getValueColorForOriginal(displayValue);
+            const showQuotes = needsQuotes(displayValue, col);
 
             return (
-              <div key={key} className="json-row" style={{ paddingLeft: 18 }}>
+              <div
+                key={key}
+                className={`json-row ${isPending ? "json-row-modified" : ""} ${isPk ? "json-row-pk" : ""}`}
+                style={{ paddingLeft: 18 }}
+              >
                 <span className="json-key">
                   "{filterText ? highlightMatch(key, filterText) : key}"
                 </span>
                 <span className="json-colon">: </span>
-                <span className="json-value-inline">
-                  <JsonValue value={value} depth={1} filterQ={filterText} />
+                <span
+                  className={`json-value-inline ${isPk ? "json-value-readonly" : ""}`}
+                  onDoubleClick={() => handleStartEdit(colIndex, key, displayValue, col)}
+                  title={isPk ? "Primary key — not editable" : "Double-click to edit"}
+                >
+                  {isPk && <Lock size={10} className="json-pk-icon" />}
+                  <JsonValue value={displayValue} depth={1} filterQ={filterText} />
                 </span>
                 {!isLast && <span className="json-comma">,</span>}
-                <span className="json-row-actions">
-                  <button
-                    className="btn-icon json-edit-btn"
-                    onClick={() => handleStartEdit(colIndex, key, value)}
-                    title={`Edit ${key}`}
-                  >
-                    <Pencil size={11} />
-                  </button>
-                </span>
               </div>
             );
           })}

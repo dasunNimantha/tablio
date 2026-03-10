@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { ColumnInfo } from "../../lib/tauri";
 import "./DataGrid.css";
 
@@ -7,6 +7,7 @@ interface Props {
   column: ColumnInfo;
   isModified: boolean;
   isInserted: boolean;
+  searchQuery?: string;
   onChange: (newValue: unknown) => void;
 }
 
@@ -15,6 +16,7 @@ export function EditableCell({
   column,
   isModified,
   isInserted,
+  searchQuery,
   onChange,
 }: Props) {
   const [editing, setEditing] = useState(false);
@@ -57,12 +59,35 @@ export function EditableCell({
     }
   }, [editing]);
 
+  const isSearchMatch = (() => {
+    if (!searchQuery) return false;
+    const q = searchQuery.toLowerCase();
+    if (isNull) return "null".includes(q);
+    const str = typeof value === "object" ? JSON.stringify(value) : String(value);
+    return str.toLowerCase().includes(q);
+  })();
+
+  const highlightText = (text: string): React.ReactNode => {
+    if (!searchQuery) return text;
+    const q = searchQuery.toLowerCase();
+    const idx = text.toLowerCase().indexOf(q);
+    if (idx === -1) return text;
+    return (
+      <>
+        {text.slice(0, idx)}
+        <mark className="cell-search-highlight">{text.slice(idx, idx + searchQuery.length)}</mark>
+        {text.slice(idx + searchQuery.length)}
+      </>
+    );
+  };
+
   const cellClass = [
     "grid-cell",
     isNull ? "cell-null" : "",
     isModified ? "cell-modified" : "",
     isInserted ? "cell-inserted" : "",
     editing ? "cell-editing" : "",
+    isSearchMatch ? "cell-search-match" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -84,7 +109,7 @@ export function EditableCell({
 
   return (
     <td className={cellClass} onDoubleClick={handleDoubleClick}>
-      <span className="cell-value">{displayValue}</span>
+      <span className="cell-value">{isSearchMatch ? highlightText(displayValue) : displayValue}</span>
     </td>
   );
 }
