@@ -1,18 +1,9 @@
 import { useState } from "react";
 import { Plus, X, Play } from "lucide-react";
 import { ColumnInfo } from "../../lib/tauri";
+import { buildWhereClause as buildWhereClauseFromConditions, NO_VALUE_OPS, type FilterCondition } from "../../lib/filterBuilder";
 import { CustomSelect } from "../CustomSelect/CustomSelect";
 import "./FilterBar.css";
-
-type JoinType = "AND" | "OR";
-
-interface FilterCondition {
-  id: string;
-  column: string;
-  operator: string;
-  value: string;
-  join: JoinType;
-}
 
 interface Props {
   columns: ColumnInfo[];
@@ -32,8 +23,6 @@ const OPERATORS = [
   { value: "IS NULL", label: "IS NULL" },
   { value: "IS NOT NULL", label: "IS NOT NULL" },
 ];
-
-const NO_VALUE_OPS = ["IS NULL", "IS NOT NULL"];
 
 export function FilterBar({ columns, onApply, onClose }: Props) {
   const [conditions, setConditions] = useState<FilterCondition[]>([
@@ -72,66 +61,8 @@ export function FilterBar({ columns, onApply, onClose }: Props) {
     );
   };
 
-  const buildWhereClause = (): string | null => {
-    const valid = conditions.filter((c) => {
-      if (NO_VALUE_OPS.includes(c.operator)) return c.column;
-      return c.column && c.value;
-    });
-
-    if (valid.length === 0) return null;
-
-    const toClause = (c: FilterCondition): string => {
-      const col = `"${c.column.replace(/"/g, '""')}"`;
-      if (NO_VALUE_OPS.includes(c.operator)) {
-        return `${col} ${c.operator}`;
-      }
-      if (c.operator === "LIKE" || c.operator === "ILIKE") {
-        return `${col} ${c.operator} '${c.value.replace(/'/g, "''")}'`;
-      }
-      const colInfo = columns.find((ci) => ci.name === c.column);
-      const isNum = colInfo && /int|float|double|decimal|numeric|real|serial/i.test(colInfo.data_type);
-      if (isNum && !isNaN(Number(c.value))) {
-        return `${col} ${c.operator} ${c.value}`;
-      }
-      return `${col} ${c.operator} '${c.value.replace(/'/g, "''")}'`;
-    };
-
-    if (valid.length === 1) return toClause(valid[0]);
-
-    const groups: { join: JoinType; clauses: string[] }[] = [];
-    let currentGroup: { join: JoinType; clauses: string[] } = { join: "AND", clauses: [toClause(valid[0])] };
-
-    for (let i = 1; i < valid.length; i++) {
-      if (valid[i].join === currentGroup.join) {
-        currentGroup.clauses.push(toClause(valid[i]));
-      } else {
-        groups.push(currentGroup);
-        currentGroup = { join: valid[i].join, clauses: [toClause(valid[i])] };
-      }
-    }
-    groups.push(currentGroup);
-
-    if (groups.length === 1) {
-      return groups[0].clauses.join(` ${groups[0].join} `);
-    }
-
-    let result = groups[0].clauses.length > 1
-      ? `(${groups[0].clauses.join(` ${groups[0].join} `)})`
-      : groups[0].clauses[0];
-
-    for (let i = 1; i < groups.length; i++) {
-      const g = groups[i];
-      const part = g.clauses.length > 1
-        ? `(${g.clauses.join(` ${g.join} `)})`
-        : g.clauses[0];
-      result = `${result} ${g.join} ${part}`;
-    }
-
-    return result;
-  };
-
   const handleApply = () => {
-    onApply(buildWhereClause());
+    onApply(buildWhereClauseFromConditions(conditions, columns));
   };
 
   const handleClear = () => {

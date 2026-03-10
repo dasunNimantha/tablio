@@ -75,3 +75,40 @@ fn escape_csv(s: &str) -> String {
         s.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_csv() {
+        let cols = ["a".to_string(), "b".to_string()];
+        let rows = vec![
+            vec![Value::Number(1i64.into()), Value::String("x".into())],
+            vec![Value::Null, Value::String("with,comma".into())],
+        ];
+        let out = to_csv(&cols, &rows);
+        assert!(out.contains("a,b"));
+        assert!(out.contains("1,x"));
+        assert!(out.contains(r#""with,comma""#));
+    }
+
+    #[test]
+    fn test_to_json() {
+        let cols = ["id".to_string()];
+        let rows = vec![vec![Value::Number(1i64.into())]];
+        let out = to_json(&cols, &rows);
+        assert!(out.contains("\"id\""));
+        assert!(out.contains("1"));
+    }
+
+    #[test]
+    fn test_to_sql_inserts() {
+        let cols = ["name".to_string()];
+        let rows = vec![vec![Value::String("O'Brien".into())]];
+        let out = to_sql_inserts("users", &cols, &rows);
+        assert!(out.contains("INSERT INTO"));
+        assert!(out.contains("\"users\""));
+        assert!(out.contains("'O''Brien'"));
+    }
+}

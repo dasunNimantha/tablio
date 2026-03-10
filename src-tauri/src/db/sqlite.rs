@@ -749,3 +749,16 @@ impl DatabaseDriver for SqliteDriver {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_is_unsafe() {
+        assert!(!filter_is_unsafe(""));
+        assert!(!filter_is_unsafe(r#""id" = 1"#));
+        assert!(filter_is_unsafe("x; DROP TABLE t"));
+        assert!(filter_is_unsafe("x -- comment"));
+    }
+}

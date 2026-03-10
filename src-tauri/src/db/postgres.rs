@@ -1136,3 +1136,48 @@ fn parse_pg_plan_node(plan: &serde_json::Value) -> ExplainNode {
         children,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_quote_ident() {
+        assert_eq!(quote_ident("col"), r#""col""#);
+        assert_eq!(quote_ident(r#"col"umn"#), r#""col""umn""#);
+    }
+
+    #[test]
+    fn test_filter_is_unsafe() {
+        assert!(!filter_is_unsafe(""));
+        assert!(!filter_is_unsafe(r#""id" = 1"#));
+        assert!(filter_is_unsafe("x; DROP TABLE t"));
+        assert!(filter_is_unsafe("x -- comment"));
+        assert!(filter_is_unsafe("x /* comment */"));
+    }
+
+    #[test]
+    fn test_sql_fragment_is_unsafe() {
+        assert!(!sql_fragment_is_unsafe("integer"));
+        assert!(!sql_fragment_is_unsafe("varchar(255)"));
+        assert!(sql_fragment_is_unsafe("int); DROP TABLE t; --"));
+        assert!(sql_fragment_is_unsafe("default 'x'"));
+    }
+
+    #[test]
+    fn test_json_to_sql_literal() {
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Null), "NULL");
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::Bool(true)),
+            "true"
+        );
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::Number(42i64.into())),
+            "42"
+        );
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::String("O'Brien".into())),
+            "'O''Brien'"
+        );
+    }
+}
