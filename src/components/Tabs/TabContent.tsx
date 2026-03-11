@@ -6,6 +6,7 @@ import { TableInfo } from "../TableInfo/TableInfo";
 import { ActivityDashboard } from "../Activity/ActivityDashboard";
 import { TableStats } from "../TableStats/TableStats";
 import { RoleManager } from "../RoleManager/RoleManager";
+import { ERDView } from "../ERD/ERDView";
 
 export function TabContent() {
   const { tabs, activeTabId } = useTabStore();
@@ -68,6 +69,13 @@ export function TabContent() {
           )}
           {tab.type === "roles" && (
             <RoleManager connectionId={tab.connectionId} />
+          )}
+          {tab.type === "erd" && (
+            <ERDView
+              connectionId={tab.connectionId}
+              database={tab.database}
+              schema={tab.schema}
+            />
           )}
         </div>
       ))}

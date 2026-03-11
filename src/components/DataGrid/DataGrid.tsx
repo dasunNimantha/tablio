@@ -137,7 +137,11 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       const sorted = { ...result, columns: sortedColumns, rows: sortedRows };
       setData(sorted);
       setEditingRows(sorted.rows.map((r) => [...r]));
-      setDetailRowIdx(null);
+      setDetailRowIdx((prev) => {
+        if (prev == null) return null;
+        if (prev >= sorted.rows.length) return null;
+        return prev;
+      });
     } catch (e) {
       setError(String(e));
     } finally {

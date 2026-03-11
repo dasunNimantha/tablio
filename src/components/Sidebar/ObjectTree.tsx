@@ -45,12 +45,14 @@ interface ObjectTreeProps {
   onAlterTable?: (connectionId: string, connectionColor: string, database: string, schema: string, tableName: string) => void;
   onImportData?: (connectionId: string, connectionColor: string, database: string, schema: string, tableName: string) => void;
   onBackupRestore?: (connectionId: string, connectionColor: string, database: string) => void;
+  onDumpRestore?: (connectionId: string, database: string) => void;
 }
 
-export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImportData, onBackupRestore }: ObjectTreeProps) {
+export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImportData, onBackupRestore, onDumpRestore }: ObjectTreeProps) {
   const { connections, activeConnections, connectTo, disconnectFrom, removeConnection } = useConnectionStore();
   const { openTab } = useTabStore();
   const [editingConn, setEditingConn] = useState<import("../../lib/tauri").ConnectionConfig | null>(null);
+  const [duplicatingConn, setDuplicatingConn] = useState<import("../../lib/tauri").ConnectionConfig | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<import("../../lib/tauri").ConnectionConfig | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -614,6 +616,22 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
 
     if (node.type === "schema" || node.type === "table-group") {
       items.push({
+        label: "View ERD",
+        action: () => {
+          const tabId = `erd:${node.connectionId}:${node.database}:${node.schema}`;
+          const tab: TabInfo = {
+            id: tabId,
+            type: "erd",
+            title: `ERD: ${node.schema}`,
+            connectionId: node.connectionId,
+            connectionColor: node.connectionColor,
+            database: node.database!,
+            schema: node.schema!,
+          };
+          openTab(tab);
+        },
+      });
+      items.push({
         label: "Create Table",
         action: () => {
           onCreateTable?.(
@@ -673,6 +691,10 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
           action: () => setEditingConn(conn),
         });
         items.push({
+          label: "Duplicate Connection",
+          action: () => setDuplicatingConn(conn),
+        });
+        items.push({
           label: "Delete Connection",
           action: () => setDeleteTarget(conn),
         });
@@ -688,6 +710,10 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
       items.push({
         label: "Backup / Restore",
         action: () => onBackupRestore?.(node.connectionId, node.connectionColor, node.database!),
+      });
+      items.push({
+        label: "Dump & Restore To…",
+        action: () => onDumpRestore?.(node.connectionId, node.database!),
       });
     }
 
@@ -892,6 +918,13 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
         <ConnectionDialog
           editConfig={editingConn}
           onClose={() => setEditingConn(null)}
+        />
+      )}
+      {duplicatingConn && (
+        <ConnectionDialog
+          editConfig={duplicatingConn}
+          duplicate
+          onClose={() => setDuplicatingConn(null)}
         />
       )}
       {deleteTarget && (

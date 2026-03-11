@@ -1,7 +1,110 @@
 use crate::db::pool::PoolManager;
 use crate::models::*;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
+
+fn emit_log(app: &AppHandle, line: &str) {
+    let _ = app.emit("dump-restore-log", line.to_string());
+}
+
+async fn stream_stderr(app: &AppHandle, child: &mut tokio::process::Child) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    if let Some(stderr) = child.stderr.take() {
+        let mut reader = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            emit_log(app, &line);
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn dump_and_restore(
+    app: AppHandle,
+    pool: State<'_, Arc<PoolManager>>,
+    request: DumpRestoreRequest,
+) -> Result<String, String> {
+    let src_config = pool.get_config(&request.source_connection_id).await.map_err(|e| e.to_string())?;
+    let tgt_config = pool.get_config(&request.target_connection_id).await.map_err(|e| e.to_string())?;
+
+    if !matches!(src_config.db_type, DbType::Postgres) || !matches!(tgt_config.db_type, DbType::Postgres) {
+        return Err("Dump & Restore currently only supports PostgreSQL connections".to_string());
+    }
+
+    if request.source_connection_id == request.target_connection_id
+        && request.source_database == request.target_database
+    {
+        return Err("Source and target database cannot be the same".to_string());
+    }
+
+    let tmp_path = std::env::temp_dir().join(format!(
+        "dbstudio-dump-{}-{}.backup",
+        request.source_database,
+        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    ));
+    let tmp_str = tmp_path.to_string_lossy().to_string();
+
+    emit_log(&app, &format!("Starting pg_dump from {} / {}…", src_config.host, request.source_database));
+
+    // pg_dump with --verbose to get progress output on stderr
+    let dump_status = {
+        let mut cmd = tokio::process::Command::new("pg_dump");
+        cmd.arg("-h").arg(&src_config.host)
+            .arg("-p").arg(src_config.port.to_string())
+            .arg("-U").arg(&src_config.user)
+            .arg("-d").arg(&request.source_database)
+            .arg("-Fc")
+            .arg("--clean")
+            .arg("--no-owner")
+            .arg("--no-privileges")
+            .arg("--verbose")
+            .arg("-f").arg(&tmp_str);
+        cmd.env("PGPASSWORD", &src_config.password);
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to run pg_dump: {}. Is it installed?", e))?;
+        stream_stderr(&app, &mut child).await;
+        child.wait().await.map_err(|e| format!("pg_dump process error: {}", e))?
+    };
+
+    if !dump_status.success() {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err("pg_dump failed — see logs above for details".to_string());
+    }
+
+    emit_log(&app, "Dump complete. Starting pg_restore…");
+
+    // pg_restore with --verbose for progress
+    let restore_status = {
+        let mut cmd = tokio::process::Command::new("pg_restore");
+        cmd.arg("-h").arg(&tgt_config.host)
+            .arg("-p").arg(tgt_config.port.to_string())
+            .arg("-U").arg(&tgt_config.user)
+            .arg("-d").arg(&request.target_database)
+            .arg("--clean")
+            .arg("--if-exists")
+            .arg("--single-transaction")
+            .arg("--no-owner")
+            .arg("--no-privileges")
+            .arg("--verbose")
+            .arg(&tmp_str);
+        cmd.env("PGPASSWORD", &tgt_config.password);
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to run pg_restore: {}", e))?;
+        stream_stderr(&app, &mut child).await;
+        child.wait().await.map_err(|e| format!("pg_restore process error: {}", e))?
+    };
+
+    let _ = tokio::fs::remove_file(&tmp_path).await;
+
+    if restore_status.success() {
+        emit_log(&app, "Restore complete.");
+        Ok(format!(
+            "Successfully dumped '{}' and restored to '{}'",
+            request.source_database, request.target_database
+        ))
+    } else {
+        Err("pg_restore failed — see logs above for details".to_string())
+    }
+}
 
 #[tauri::command]
 pub async fn backup_database(

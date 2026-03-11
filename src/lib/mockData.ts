@@ -146,9 +146,33 @@ function generateOrderRows(count: number): unknown[][] {
   ]);
 }
 
+const productsColumns: ColumnInfo[] = [
+  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: null, ordinal_position: 1 },
+  { name: "name", data_type: "varchar(255)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2 },
+  { name: "category_id", data_type: "integer", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 3 },
+];
+const categoriesColumns: ColumnInfo[] = [
+  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: null, ordinal_position: 1 },
+  { name: "name", data_type: "varchar(100)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2 },
+];
+const orderItemsColumns: ColumnInfo[] = [
+  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: null, ordinal_position: 1 },
+  { name: "order_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2 },
+  { name: "product_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 3 },
+];
+const reviewsColumns: ColumnInfo[] = [
+  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: null, ordinal_position: 1 },
+  { name: "user_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2 },
+  { name: "product_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 3 },
+];
+
 const columnsMap: Record<string, ColumnInfo[]> = {
   users: usersColumns,
   orders: ordersColumns,
+  products: productsColumns,
+  categories: categoriesColumns,
+  order_items: orderItemsColumns,
+  reviews: reviewsColumns,
 };
 
 const rowsMap: Record<string, (count: number) => unknown[][]> = {
@@ -166,6 +190,12 @@ export const mockIndexes: IndexInfo[] = [
 export const mockForeignKeys: ForeignKeyInfo[] = [
   { name: "orders_user_id_fkey", column: "user_id", referenced_table: "users", referenced_column: "id", on_delete: "CASCADE", on_update: "NO ACTION" },
 ];
+
+/** Returns FKs for the given table (table that owns the FK column). */
+export function getTableForeignKeys(table: string): ForeignKeyInfo[] {
+  if (table === "orders") return mockForeignKeys;
+  return [];
+}
 
 export const mockFunctions: FunctionInfo[] = [
   { name: "get_user_orders", schema: "public", return_type: "SETOF orders", language: "sql", kind: "function" },

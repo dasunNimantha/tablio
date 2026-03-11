@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type TabType = "table" | "query" | "ddl" | "structure" | "activity" | "stats" | "roles" | "chart";
+export type TabType = "table" | "query" | "ddl" | "structure" | "activity" | "stats" | "roles" | "chart" | "erd";
 
 export interface TabInfo {
   id: string;

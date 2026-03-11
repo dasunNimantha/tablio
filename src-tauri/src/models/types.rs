@@ -419,3 +419,11 @@ pub struct RestoreRequest {
     pub input_path: String,
     pub format: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DumpRestoreRequest {
+    pub source_connection_id: String,
+    pub source_database: String,
+    pub target_connection_id: String,
+    pub target_database: String,
+}

@@ -12,9 +12,10 @@ interface Props {
   onChange: (value: string) => void;
   className?: string;
   searchable?: boolean;
+  placeholder?: string;
 }
 
-export function CustomSelect({ value, options, onChange, className, searchable }: Props) {
+export function CustomSelect({ value, options, onChange, className, searchable, placeholder }: Props) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const ref = useRef<HTMLDivElement>(null);
@@ -51,7 +52,9 @@ export function CustomSelect({ value, options, onChange, className, searchable }
         className="cs-trigger"
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="cs-value">{selected?.label ?? value}</span>
+        <span className={`cs-value ${!selected && placeholder ? "cs-placeholder" : ""}`}>
+          {selected?.label ?? placeholder ?? value}
+        </span>
         <svg className="cs-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
           <path d="m6 9 6 6 6-6" />
         </svg>

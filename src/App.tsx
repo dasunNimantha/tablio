@@ -7,6 +7,7 @@ import { CreateTableDialog } from "./components/CreateTable/CreateTableDialog";
 import { AlterTableDialog } from "./components/AlterTable/AlterTableDialog";
 import { ImportDialog } from "./components/ImportDialog/ImportDialog";
 import { BackupRestoreDialog } from "./components/BackupRestore/BackupRestoreDialog";
+import { DumpRestoreDialog } from "./components/DumpRestore/DumpRestoreDialog";
 import { KeyboardShortcuts } from "./components/KeyboardShortcuts/KeyboardShortcuts";
 import { ToastContainer } from "./components/Toast/Toast";
 import { useConnectionStore } from "./stores/connectionStore";
@@ -41,6 +42,11 @@ interface BackupTarget {
   database: string;
 }
 
+interface DumpRestoreTarget {
+  connectionId: string;
+  database: string;
+}
+
 export default function App() {
   const { loadConnections } = useConnectionStore();
   const { tabs } = useTabStore();
@@ -49,6 +55,7 @@ export default function App() {
   const [alterTableTarget, setAlterTableTarget] = useState<AlterTableTarget | null>(null);
   const [importTarget, setImportTarget] = useState<ImportTarget | null>(null);
   const [backupTarget, setBackupTarget] = useState<BackupTarget | null>(null);
+  const [dumpRestoreTarget, setDumpRestoreTarget] = useState<DumpRestoreTarget | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     return (localStorage.getItem("dbstudio-theme") as "dark" | "light") || "dark";
@@ -117,6 +124,9 @@ export default function App() {
           }
           onBackupRestore={(connectionId, _connectionColor, database) =>
             setBackupTarget({ connectionId, database })
+          }
+          onDumpRestore={(connectionId, database) =>
+            setDumpRestoreTarget({ connectionId, database })
           }
         />
       </div>
@@ -198,6 +208,13 @@ export default function App() {
           connectionId={backupTarget.connectionId}
           database={backupTarget.database}
           onClose={() => setBackupTarget(null)}
+        />
+      )}
+      {dumpRestoreTarget && (
+        <DumpRestoreDialog
+          sourceConnectionId={dumpRestoreTarget.connectionId}
+          sourceDatabase={dumpRestoreTarget.database}
+          onClose={() => setDumpRestoreTarget(null)}
         />
       )}
       {showShortcuts && (

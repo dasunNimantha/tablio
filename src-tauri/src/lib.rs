@@ -63,6 +63,7 @@ pub fn run() {
             alter_role,
             backup_database,
             restore_database,
+            dump_and_restore,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -57,8 +57,10 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       return undefined as T;
     case "list_indexes":
       return mock.mockIndexes as T;
-    case "list_foreign_keys":
-      return mock.mockForeignKeys as T;
+    case "list_foreign_keys": {
+      const table = (args?.table as string) || "";
+      return mock.getTableForeignKeys(table) as T;
+    }
     case "drop_object":
       return undefined as T;
     case "truncate_table":
@@ -103,6 +105,8 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       return "Backup completed successfully to /tmp/backup.sql" as T;
     case "restore_database":
       return "Restore completed successfully" as T;
+    case "dump_and_restore":
+      return "Successfully dumped source and restored to target" as T;
     default:
       throw new Error(`Unknown mock command: ${cmd}`);
   }
@@ -447,6 +451,13 @@ export interface RestoreRequest {
   format: string;
 }
 
+export interface DumpRestoreRequest {
+  source_connection_id: string;
+  source_database: string;
+  target_connection_id: string;
+  target_database: string;
+}
+
 export const api = {
   testConnection: (config: ConnectionConfig): Promise<boolean> =>
     invoke("test_connection", { config }),
@@ -600,4 +611,7 @@ export const api = {
 
   restoreDatabase: (request: RestoreRequest): Promise<string> =>
     invoke("restore_database", { request }),
+
+  dumpAndRestore: (request: DumpRestoreRequest): Promise<string> =>
+    invoke("dump_and_restore", { request }),
 };

@@ -1,0 +1,118 @@
+.erd-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-secondary, #f8fafc);
+}
+
+.erd-loading,
+.erd-error {
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  color: var(--text-secondary, #64748b);
+}
+
+.erd-loading .spin {
+  animation: erd-spin 0.8s linear infinite;
+}
+
+@keyframes erd-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.erd-error button {
+  margin-top: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: var(--accent, #3b82f6);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.erd-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-primary, #fff);
+  border-bottom: 1px solid var(--border, #e2e8f0);
+  flex-shrink: 0;
+}
+
+.erd-zoom {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.erd-zoom button,
+.erd-toolbar > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: var(--bg-secondary, #f1f5f9);
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-primary, #334155);
+}
+
+.erd-zoom button:hover,
+.erd-toolbar > button:hover {
+  background: var(--bg-hover, #e2e8f0);
+}
+
+.erd-zoom span {
+  min-width: 2.5rem;
+  font-size: 0.8125rem;
+  color: var(--text-secondary, #64748b);
+}
+
+.erd-canvas {
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.erd-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.erd-table-rect {
+  fill: #fefce8;
+  stroke: #ca8a04;
+  stroke-width: 1;
+}
+
+.erd-table-name {
+  font-size: 13px;
+  font-weight: 600;
+  fill: var(--text-primary, #1e293b);
+}
+
+.erd-col-name {
+  font-size: 12px;
+  fill: var(--text-primary, #334155);
+}
+
+.erd-col-type {
+  font-size: 11px;
+  fill: var(--text-secondary, #64748b);
+}
+
+.erd-key-pk {
+  fill: #3b82f6;
+}
+
+.erd-key-fk {
+  fill: #eab308;
+}
