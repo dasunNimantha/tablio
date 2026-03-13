@@ -241,3 +241,63 @@ pub async fn cancel_query(
         .await
         .map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub async fn get_database_stats(
+    pool: State<'_, Arc<PoolManager>>,
+    request: ServerActivityRequest,
+) -> Result<DatabaseStats, String> {
+    let driver = pool
+        .get_driver(&request.connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    driver
+        .get_database_stats()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_locks(
+    pool: State<'_, Arc<PoolManager>>,
+    request: ServerActivityRequest,
+) -> Result<Vec<LockInfo>, String> {
+    let driver = pool
+        .get_driver(&request.connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    driver
+        .get_locks()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_server_config(
+    pool: State<'_, Arc<PoolManager>>,
+    request: ServerActivityRequest,
+) -> Result<Vec<ServerConfigEntry>, String> {
+    let driver = pool
+        .get_driver(&request.connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    driver
+        .get_server_config()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_query_stats(
+    pool: State<'_, Arc<PoolManager>>,
+    request: QueryStatsRequest,
+) -> Result<QueryStatsResponse, String> {
+    let driver = pool
+        .get_driver(&request.connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    driver
+        .get_query_stats()
+        .await
+        .map_err(|e| e.to_string())
+}

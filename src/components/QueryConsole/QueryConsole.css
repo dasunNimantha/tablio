@@ -16,7 +16,7 @@
 .query-toolbar {
   display: flex;
   align-items: center;
-  padding: 0 var(--gutter) 0 18px;
+  padding: 0 var(--gutter) 0 var(--gutter-lg);
   gap: 10px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
@@ -25,14 +25,14 @@
 }
 
 .query-toolbar .btn-primary {
-  height: 32px;
-  font-size: 13px;
+  height: 34px;
+  font-size: 15px;
   padding: 0 14px;
   border-radius: var(--radius-md);
 }
 
 .query-hint {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
   margin-left: auto;
 }
@@ -53,21 +53,21 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 18px;
+  padding: 0 var(--gutter-lg);
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   height: var(--statusbar-height);
   min-height: var(--statusbar-height);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-muted);
 }
 
 .query-error {
-  padding: 14px 18px;
+  padding: 14px var(--gutter-lg);
   background: rgba(240, 100, 100, 0.05);
   border-bottom: 1px solid rgba(240, 100, 100, 0.10);
   color: var(--error);
-  font-size: 13px;
+  font-size: 15px;
   font-family: var(--font-mono);
   white-space: pre-wrap;
   word-break: break-word;
@@ -80,7 +80,7 @@
   justify-content: center;
   height: 100%;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .result-table-wrapper {
@@ -115,15 +115,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px;
+  padding: 0 var(--gutter-lg);
   height: var(--tab-height);
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   border-bottom: 1px solid var(--border);
 }
 
 .query-history-header button {
-  font-size: 18px;
+  font-size: 20px;
   line-height: 1;
   min-width: 0;
   width: 28px;
@@ -140,11 +140,11 @@
   padding: 32px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .query-history-item {
-  padding: 14px 18px;
+  padding: 14px var(--gutter-lg);
   border-bottom: 1px solid var(--border);
   cursor: pointer;
   transition: background 0.12s;
@@ -161,7 +161,7 @@
 .query-history-sql {
   display: block;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
@@ -172,6 +172,6 @@
 .query-history-meta {
   display: flex;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
 }

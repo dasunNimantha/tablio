@@ -71,18 +71,19 @@
 }
 
 :root {
-  --bg-primary: #1c1c20;
-  --bg-secondary: #232328;
-  --bg-tertiary: #18181c;
-  --bg-surface: #2a2a30;
-  --bg-elevated: #323238;
+  --bg-primary: #1e1e22;
+  --bg-secondary: #212126;
+  --bg-tertiary: #1a1a1e;
+  --bg-surface: #28282e;
+  --bg-elevated: #303036;
   --bg-hover: rgba(255, 255, 255, 0.07);
   --bg-active: rgba(255, 255, 255, 0.12);
-  --bg-selected: rgba(99, 152, 255, 0.16);
+  --bg-header: #2a2a30;
+  --bg-selected: rgba(99, 152, 255, 0.14);
 
-  --text-primary: #e8e8ec;
-  --text-secondary: #b0b0bb;
-  --text-muted: #7c7c8a;
+  --text-primary: #e4e4e9;
+  --text-secondary: #a8a8b4;
+  --text-muted: #6e6e7c;
   --text-inverse: #111114;
 
   --border: rgba(255, 255, 255, 0.12);
@@ -114,6 +115,7 @@
   --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace,
     Menlo, Monaco, "Cascadia Mono", monospace;
 
+  --radius-xs: 3px;
   --radius-sm: 5px;
   --radius-md: 8px;
   --radius-lg: 12px;
@@ -129,11 +131,13 @@
   --cell-deleted: rgba(240, 100, 100, 0.13);
   --cell-null: #7c7c8a;
 
-  --gutter: 14px;
+  --gutter-xs: 4px;
   --gutter-sm: 8px;
+  --gutter: 14px;
+  --gutter-lg: 18px;
 
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1.55;
   color: var(--text-primary);
   background-color: var(--bg-primary);
@@ -141,8 +145,12 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+[data-theme="dark"] {
+  font-weight: 300;
+}
+
 [data-theme="dark"] .grid-table {
-  font-weight: 250;
+  font-weight: 200;
 }
 
 * {
@@ -170,12 +178,12 @@ body,
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.09);
-  border-radius: 10px;
+  background: var(--border-subtle);
+  border-radius: var(--radius-lg);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--bg-active);
 }
 
 input,
@@ -193,18 +201,18 @@ textarea {
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 0 14px;
+  padding: 0 var(--gutter);
   height: 38px;
   color: var(--text-primary);
   outline: none;
   transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
-  font-size: 14px;
+  font-size: 15px;
 }
 
 input:hover,
 select:hover,
 textarea:hover {
-  border-color: rgba(255, 255, 255, 0.14);
+  border-color: var(--border);
 }
 
 input:focus,
@@ -212,7 +220,7 @@ select:focus,
 textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
-  background: rgba(99, 152, 255, 0.03);
+  background: var(--accent-soft);
 }
 
 input::placeholder {
@@ -221,16 +229,16 @@ input::placeholder {
 
 textarea {
   height: auto;
-  padding: 10px 14px;
+  padding: var(--gutter-sm) var(--gutter);
 }
 
 button {
   cursor: pointer;
   border: none;
   border-radius: var(--radius-md);
-  padding: 0 18px;
+  padding: 0 var(--gutter-lg);
   height: 36px;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 500;
   transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
   display: inline-flex;
@@ -242,19 +250,19 @@ button {
 
 .btn-primary {
   background: var(--accent);
-  color: #fff;
+  color: var(--text-inverse);
   font-weight: 600;
-  box-shadow: 0 1px 3px rgba(99, 152, 255, 0.25);
+  box-shadow: 0 1px 3px var(--accent-muted);
 }
 
 .btn-primary:hover {
   background: var(--accent-hover);
-  box-shadow: 0 2px 8px rgba(99, 152, 255, 0.35);
+  box-shadow: 0 2px 8px var(--accent-muted);
   transform: translateY(-0.5px);
 }
 
 .btn-primary:active {
-  background: #5284e0;
+  background: var(--accent);
   transform: translateY(0);
 }
 
@@ -266,17 +274,18 @@ button {
 
 .btn-secondary:hover {
   background: var(--bg-active);
-  border-color: rgba(255, 255, 255, 0.14);
+  border-color: var(--border);
 }
 
 .btn-danger {
   background: var(--error);
-  color: #fff;
+  color: var(--text-inverse);
   font-weight: 600;
 }
 
 .btn-danger:hover {
-  background: #e85555;
+  background: var(--error);
+  opacity: 0.85;
 }
 
 .btn-ghost {
@@ -285,7 +294,7 @@ button {
   padding: 0 10px;
   height: 32px;
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .btn-ghost:hover {
@@ -360,9 +369,9 @@ button {
 }
 
 .sidebar-header {
-  padding: 0 var(--gutter) 0 18px;
+  padding: 0 var(--gutter) 0 var(--gutter-lg);
   height: 48px;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
@@ -403,13 +412,13 @@ button {
 }
 
 .empty-state-text h2 {
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .empty-state p {
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.7;
   color: var(--text-secondary);
   max-width: 340px;
@@ -436,10 +445,10 @@ button {
 }
 
 .zoom-indicator {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-secondary);
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-hover);
   cursor: pointer;
   animation: zoomFadeIn 0.15s ease;
@@ -537,7 +546,7 @@ textarea,
 }
 
 .theme-picker-group-label {
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -554,7 +563,7 @@ textarea,
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 14px;
   border-radius: var(--radius-sm);
   cursor: pointer;
 }

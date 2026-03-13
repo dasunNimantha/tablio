@@ -23,7 +23,7 @@
   min-width: 130px;
   max-width: 240px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 400;
   color: var(--text-muted);
   background: transparent;
@@ -121,7 +121,7 @@
   text-align: left;
   padding: 0 14px;
   height: 36px;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 400;
   background: transparent;
   color: var(--text-primary);

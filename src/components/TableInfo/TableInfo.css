@@ -7,7 +7,7 @@
 .table-info-toolbar {
   display: flex;
   align-items: center;
-  padding: 0 18px;
+  padding: 0 var(--gutter-lg);
   height: var(--toolbar-height);
   min-height: var(--toolbar-height);
   background: var(--bg-secondary);
@@ -15,7 +15,7 @@
 }
 
 .table-info-name {
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   font-family: var(--font-mono);
   color: var(--text-primary);
@@ -25,14 +25,14 @@
   display: flex;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
-  padding: 0 18px;
+  padding: 0 var(--gutter-lg);
   gap: 2px;
 }
 
 .table-info-tab {
   padding: 0 16px;
   height: 38px;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 500;
   color: var(--text-muted);
   background: transparent;
@@ -60,7 +60,7 @@
 .info-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .info-table thead {
@@ -75,7 +75,7 @@
   height: 36px;
   text-align: left;
   font-weight: 600;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-secondary);
   border-bottom: 2px solid var(--border);
   white-space: nowrap;
@@ -111,7 +111,7 @@
   text-align: center;
   color: var(--text-muted);
   padding: 28px !important;
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .table-info-loading {

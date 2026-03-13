@@ -25,7 +25,7 @@
   justify-content: space-between;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-secondary);
   text-transform: uppercase;
@@ -51,10 +51,10 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 32px;
+  height: 34px;
   padding: 0 8px;
   border-radius: var(--radius-sm);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-primary);
   cursor: grab;
   transition: background 0.1s;
@@ -121,15 +121,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .col-organizer-badge {
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   color: var(--accent);
   background: var(--accent-muted);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   flex-shrink: 0;
 }

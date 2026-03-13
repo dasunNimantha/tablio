@@ -17,16 +17,16 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px;
+  padding: 0 var(--gutter-lg);
   height: var(--tab-height);
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
   border-bottom: 1px solid var(--border);
 }
 
 .saved-queries-header button {
-  font-size: 18px;
+  font-size: 20px;
   line-height: 1;
   min-width: 0;
   width: 28px;
@@ -52,14 +52,14 @@
 .saved-queries-error {
   padding: 24px;
   color: var(--error);
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .saved-queries-empty {
   padding: 32px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .saved-queries-list {
@@ -71,7 +71,7 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 14px 18px;
+  padding: 14px var(--gutter-lg);
   border-bottom: 1px solid var(--border);
   cursor: pointer;
   transition: background 0.12s;
@@ -89,7 +89,7 @@
 .saved-queries-name {
   display: block;
   font-weight: 600;
-  font-size: 14px;
+  font-size: 16px;
   color: var(--text-primary);
   margin-bottom: 5px;
 }
@@ -97,7 +97,7 @@
 .saved-queries-sql {
   display: block;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -106,7 +106,7 @@
 }
 
 .saved-queries-meta {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
 }
 

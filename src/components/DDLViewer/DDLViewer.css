@@ -7,7 +7,7 @@
 .ddl-toolbar {
   display: flex;
   align-items: center;
-  padding: 0 18px;
+  padding: 0 var(--gutter-lg);
   height: var(--toolbar-height);
   min-height: var(--toolbar-height);
   background: var(--bg-secondary);
@@ -16,7 +16,7 @@
 }
 
 .ddl-object-name {
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   font-family: var(--font-mono);
   color: var(--text-primary);

@@ -7,6 +7,7 @@ import { ActivityDashboard } from "../Activity/ActivityDashboard";
 import { TableStats } from "../TableStats/TableStats";
 import { RoleManager } from "../RoleManager/RoleManager";
 import { ERDView } from "../ERD/ERDView";
+import { QueryStats } from "../QueryStats/QueryStats";
 
 export function TabContent() {
   const { tabs, activeTabId } = useTabStore();
@@ -76,6 +77,9 @@ export function TabContent() {
               database={tab.database}
               schema={tab.schema}
             />
+          )}
+          {tab.type === "querystats" && (
+            <QueryStats connectionId={tab.connectionId} />
           )}
         </div>
       ))}

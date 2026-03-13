@@ -10,7 +10,7 @@
   gap: 14px;
   padding: 52px 28px;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .alter-table-columns {
@@ -26,7 +26,7 @@
   padding: 10px 14px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -61,7 +61,7 @@
 .alter-table-column-row input,
 .alter-table-column-row select {
   height: 34px;
-  font-size: 13px;
+  font-size: 15px;
   font-family: var(--font-mono);
 }
 
@@ -85,7 +85,7 @@
 
 .editable-cell {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 15px;
   padding: 5px 10px;
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -114,7 +114,7 @@
   border-radius: 0;
   height: 38px;
   justify-content: center;
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-secondary);
 }
 
@@ -133,7 +133,7 @@
 
 .ddl-preview pre {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-secondary);
   white-space: pre-wrap;
   line-height: 1.7;

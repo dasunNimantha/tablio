@@ -7,7 +7,7 @@
 .table-stats-toolbar {
   display: flex;
   align-items: center;
-  padding: 0 18px;
+  padding: 0 var(--gutter-lg);
   height: var(--toolbar-height);
   min-height: var(--toolbar-height);
   background: var(--bg-secondary);
@@ -15,7 +15,7 @@
 }
 
 .table-stats-name {
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   font-family: var(--font-mono);
   color: var(--text-primary);
@@ -52,7 +52,7 @@
 }
 
 .table-stats-label {
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -60,7 +60,7 @@
 }
 
 .table-stats-value {
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 600;
   font-family: var(--font-mono);
   color: var(--text-primary);
@@ -85,7 +85,7 @@
 }
 
 .stats-chart-title {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--text-primary);
   margin: 0;
@@ -106,7 +106,7 @@
 }
 
 .stats-bar-label {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 500;
   color: var(--text-secondary);
   width: 70px;
@@ -117,18 +117,18 @@
   flex: 1;
   height: 8px;
   background: var(--bg-elevated);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
 }
 
 .stats-bar-fill {
   height: 100%;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   transition: width 0.4s ease;
 }
 
 .stats-bar-value {
-  font-size: 13px;
+  font-size: 15px;
   font-family: var(--font-mono);
   color: var(--text-primary);
   font-weight: 500;
@@ -138,7 +138,7 @@
 }
 
 .stats-size-total {
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-muted);
   padding-top: 4px;
   border-top: 1px solid var(--border-subtle);
@@ -172,7 +172,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-secondary);
   font-family: var(--font-mono);
 }

@@ -28,7 +28,7 @@
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  font-size: 14px;
+  font-size: 16px;
   color: var(--text-secondary);
   cursor: pointer;
   transition: border-color 0.15s;
@@ -42,9 +42,9 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 18px;
+  padding: var(--gutter-lg);
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .import-column-mapping {
@@ -69,20 +69,20 @@
   flex: 1;
   min-width: 100px;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-primary);
 }
 
 .import-mapping-arrow {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .import-mapping-row select {
   flex: 2;
   min-width: 140px;
   height: 34px;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .import-preview {
@@ -95,7 +95,7 @@
 .import-preview-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .import-preview-table th,

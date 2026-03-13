@@ -9,7 +9,7 @@
 }
 
 .keyboard-shortcuts-body {
-  padding: 18px 28px 28px;
+  padding: var(--gutter-lg) 28px 28px;
 }
 
 .keyboard-shortcuts-table {
@@ -36,7 +36,7 @@
 
 .keyboard-shortcuts-desc {
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .keyboard-key {
@@ -47,7 +47,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-primary);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }

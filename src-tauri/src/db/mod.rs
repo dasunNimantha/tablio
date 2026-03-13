@@ -38,6 +38,10 @@ pub trait DatabaseDriver: Send + Sync {
     async fn truncate_table(&self, database: &str, schema: &str, table_name: &str) -> Result<()>;
     async fn import_data(&self, database: &str, schema: &str, table: &str, columns: &[String], rows: &[Vec<serde_json::Value>]) -> Result<u64>;
     async fn get_server_activity(&self) -> Result<Vec<ServerActivity>>;
+    async fn get_database_stats(&self) -> Result<DatabaseStats>;
+    async fn get_locks(&self) -> Result<Vec<LockInfo>>;
+    async fn get_server_config(&self) -> Result<Vec<ServerConfigEntry>>;
+    async fn get_query_stats(&self) -> Result<QueryStatsResponse>;
     async fn cancel_query(&self, pid: &str) -> Result<()>;
     async fn list_roles(&self) -> Result<Vec<RoleInfo>>;
     async fn create_role(&self, req: &CreateRoleRequest) -> Result<()>;

@@ -9,7 +9,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px;
+  padding: 0 var(--gutter-lg);
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   height: var(--toolbar-height);
@@ -28,23 +28,23 @@
 }
 
 .role-toolbar-title {
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .role-toolbar .btn-sm {
-  height: 32px;
+  height: 34px;
   padding: 0 14px;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .role-error-banner {
-  padding: 10px 18px;
+  padding: 10px var(--gutter-lg);
   background: rgba(240, 100, 100, 0.07);
   border-bottom: 1px solid rgba(240, 100, 100, 0.12);
   color: var(--error);
-  font-size: 13px;
+  font-size: 15px;
   font-family: var(--font-mono);
 }
 
@@ -61,13 +61,13 @@
   height: 100%;
   gap: 16px;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .role-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 15px;
   font-family: var(--font-mono);
   table-layout: auto;
 }
@@ -84,7 +84,7 @@
   height: 38px;
   text-align: left;
   font-weight: 600;
-  font-size: 12px;
+  font-size: 14px;
   border-bottom: 2px solid var(--border);
   border-right: 1px solid var(--border-subtle);
   white-space: nowrap;
@@ -180,7 +180,7 @@
 .role-empty span {
   display: block;
   margin-top: 14px;
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .role-empty svg {
@@ -192,7 +192,7 @@
 }
 
 .role-form .form-group label {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-secondary);
   text-transform: uppercase;
@@ -215,6 +215,6 @@
   border: 1px solid rgba(240, 100, 100, 0.18);
   border-radius: var(--radius-md);
   color: var(--error);
-  font-size: 13px;
+  font-size: 15px;
   font-family: var(--font-mono);
 }

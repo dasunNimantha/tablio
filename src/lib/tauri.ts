@@ -330,6 +330,72 @@ export interface CancelQueryRequest {
   pid: string;
 }
 
+export interface QueryStatsRequest {
+  connection_id: string;
+}
+
+export interface QueryStatEntry {
+  query: string;
+  queryid: number | null;
+  calls: number;
+  total_exec_time_ms: number;
+  mean_exec_time_ms: number;
+  min_exec_time_ms: number;
+  max_exec_time_ms: number;
+  rows: number;
+  shared_blks_hit: number;
+  shared_blks_read: number;
+  cache_hit_ratio: number;
+  total_plan_time_ms: number | null;
+  mean_plan_time_ms: number | null;
+}
+
+export interface QueryStatsResponse {
+  available: boolean;
+  message: string | null;
+  entries: QueryStatEntry[];
+}
+
+export interface DatabaseStats {
+  active_connections: number;
+  idle_connections: number;
+  idle_in_transaction: number;
+  total_connections: number;
+  xact_commit: number;
+  xact_rollback: number;
+  tup_inserted: number;
+  tup_updated: number;
+  tup_deleted: number;
+  tup_fetched: number;
+  blks_read: number;
+  blks_hit: number;
+  timestamp_ms: number;
+}
+
+export interface LockInfo {
+  pid: number;
+  locktype: string;
+  database: string;
+  relation: string;
+  mode: string;
+  granted: boolean;
+  query: string;
+  user: string;
+  state: string;
+  duration_ms: number | null;
+}
+
+export interface ServerConfigEntry {
+  name: string;
+  setting: string;
+  unit: string | null;
+  category: string;
+  description: string;
+  context: string;
+  source: string;
+  pending_restart: boolean;
+}
+
 export interface AlterTableOperation {
   op: string;
   column?: ColumnDefinition;
@@ -544,6 +610,18 @@ export const api = {
 
   cancelQuery: (request: CancelQueryRequest): Promise<void> =>
     invoke("cancel_query", { request }),
+
+  getDatabaseStats: (request: ServerActivityRequest): Promise<DatabaseStats> =>
+    invoke("get_database_stats", { request }),
+
+  getLocks: (request: ServerActivityRequest): Promise<LockInfo[]> =>
+    invoke("get_locks", { request }),
+
+  getServerConfig: (request: ServerActivityRequest): Promise<ServerConfigEntry[]> =>
+    invoke("get_server_config", { request }),
+
+  getQueryStats: (request: QueryStatsRequest): Promise<QueryStatsResponse> =>
+    invoke("get_query_stats", { request }),
 
   exportTableData: (request: ExportRequest): Promise<string> =>
     invoke("export_table_data", { request }),

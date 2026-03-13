@@ -39,7 +39,7 @@
 }
 
 .row-detail-header h2 {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--text-primary);
   margin: 0;
@@ -59,8 +59,8 @@
 
 .row-detail-filter input {
   width: 100%;
-  height: 32px;
-  font-size: 13px;
+  height: 34px;
+  font-size: 15px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -78,7 +78,7 @@
 
 .json-tree {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.8;
 }
 
@@ -88,7 +88,7 @@
 
 .json-row {
   padding: 0 4px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   position: relative;
   display: flex;
   align-items: baseline;
@@ -106,13 +106,13 @@
 }
 
 .json-row-modified {
-  border-left: 2px solid #22c55e;
+  border-left: 2px solid var(--success);
   padding-left: 16px !important;
 }
 
 .json-inline-input {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.8;
   padding: 0;
   margin: 0;
@@ -131,22 +131,22 @@
   field-sizing: content;
 }
 
-.json-inline-input.json-string { color: #8cc790; }
-.json-inline-input.json-number { color: #e5c07b; }
-.json-inline-input.json-bool { color: #56b6c2; }
+.json-inline-input.json-string { color: var(--success); }
+.json-inline-input.json-number { color: var(--warning); }
+.json-inline-input.json-bool { color: var(--info); }
 .json-inline-input.json-null { color: var(--text-muted); font-style: italic; }
 
-[data-theme="light"] .json-inline-input.json-string { color: #16a34a; }
-[data-theme="light"] .json-inline-input.json-number { color: #d97706; }
-[data-theme="light"] .json-inline-input.json-bool { color: #0891b2; }
+[data-theme="light"] .json-inline-input.json-string { color: var(--success); }
+[data-theme="light"] .json-inline-input.json-number { color: var(--warning); }
+[data-theme="light"] .json-inline-input.json-bool { color: var(--info); }
 
 .json-inline-input-error {
-  text-decoration: wavy underline #ef4444;
+  text-decoration: wavy underline var(--error);
 }
 
 .json-inline-error {
-  font-size: 11px;
-  color: #ef4444;
+  font-size: 13px;
+  color: var(--error);
   margin-left: 6px;
 }
 
@@ -162,7 +162,7 @@
   display: inline;
   vertical-align: middle;
   margin-right: 4px;
-  color: #eab308;
+  color: var(--warning);
   opacity: 0.7;
 }
 
@@ -172,18 +172,18 @@
   gap: 5px;
   height: 26px !important;
   padding: 0 10px !important;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   border: none;
-  background: #22c55e;
-  color: #fff;
+  background: var(--success);
+  color: var(--text-inverse);
   cursor: pointer;
   white-space: nowrap;
 }
 
 .json-save-all-btn:hover {
-  background: #16a34a;
+  background: var(--success);
 }
 
 .json-discard-btn {
@@ -195,17 +195,17 @@
   min-width: 26px;
   max-width: 26px;
   padding: 0 !important;
-  border-radius: 4px;
-  border: 1px solid #ef4444;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--error);
   background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
+  color: var(--error);
   cursor: pointer;
   flex-shrink: 0;
 }
 
 .json-discard-btn:hover {
-  background: #ef4444;
-  color: #fff;
+  background: var(--error);
+  color: var(--text-inverse);
 }
 
 .json-toggle {
@@ -218,7 +218,7 @@
 }
 
 .json-key {
-  color: #c4a7f7;
+  color: var(--purple);
 }
 
 .json-colon {
@@ -226,16 +226,16 @@
 }
 
 .json-string {
-  color: #8cc790;
+  color: var(--success);
   word-break: break-all;
 }
 
 .json-number {
-  color: #e5c07b;
+  color: var(--warning);
 }
 
 .json-bool {
-  color: #56b6c2;
+  color: var(--info);
 }
 
 .json-null {
@@ -253,35 +253,35 @@
 
 .json-collapsed-hint {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 14px;
   font-style: italic;
   cursor: pointer;
   margin-left: 4px;
 }
 
 .json-highlight {
-  background: rgba(245, 183, 49, 0.3);
+  background: var(--cell-modified);
   color: inherit;
   border-radius: 2px;
   padding: 0 1px;
 }
 
 [data-theme="light"] .json-key {
-  color: #7c3aed;
+  color: var(--purple);
 }
 
 [data-theme="light"] .json-string {
-  color: #16a34a;
+  color: var(--success);
 }
 
 [data-theme="light"] .json-number {
-  color: #d97706;
+  color: var(--warning);
 }
 
 [data-theme="light"] .json-bool {
-  color: #0891b2;
+  color: var(--info);
 }
 
 [data-theme="light"] .json-highlight {
-  background: rgba(234, 179, 8, 0.3);
+  background: var(--cell-modified);
 }

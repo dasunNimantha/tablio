@@ -9,12 +9,12 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px;
+  padding: 0 var(--gutter-lg);
   height: var(--statusbar-height);
   min-height: var(--statusbar-height);
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-muted);
 }
 
@@ -37,12 +37,12 @@
 .explain-raw {
   flex: 1;
   overflow: auto;
-  padding: 18px;
+  padding: var(--gutter-lg);
 }
 
 .explain-raw pre {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -52,7 +52,7 @@
 .explain-tree {
   flex: 1;
   overflow: auto;
-  padding: 18px;
+  padding: var(--gutter-lg);
 }
 
 .explain-node {
@@ -63,7 +63,7 @@
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 14px 18px;
+  padding: 14px var(--gutter-lg);
   cursor: pointer;
   position: relative;
   overflow: hidden;
@@ -89,19 +89,19 @@
 
 .explain-node-type {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 16px;
   color: var(--text-primary);
 }
 
 .explain-node-relation {
-  font-size: 13px;
+  font-size: 15px;
   color: var(--accent);
   font-family: var(--font-mono);
 }
 
 .explain-node-stats {
   display: flex;
-  gap: 18px;
+  gap: var(--gutter-lg);
   flex-wrap: wrap;
 }
 
@@ -112,7 +112,7 @@
 }
 
 .explain-stat-label {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -120,20 +120,20 @@
 }
 
 .explain-stat-value {
-  font-size: 13px;
+  font-size: 15px;
   font-family: var(--font-mono);
   color: var(--text-primary);
 }
 
 .explain-node-filter {
   margin-top: 8px;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .explain-node-filter code {
   font-family: var(--font-mono);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .explain-cost-bar {

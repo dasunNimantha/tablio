@@ -1021,6 +1021,208 @@ impl DatabaseDriver for PostgresDriver {
             .collect())
     }
 
+    async fn get_database_stats(&self) -> Result<DatabaseStats> {
+        let conn_row = sqlx::query(
+            "SELECT \
+                count(*) FILTER (WHERE state = 'active') AS active, \
+                count(*) FILTER (WHERE state = 'idle') AS idle, \
+                count(*) FILTER (WHERE state = 'idle in transaction') AS idle_tx, \
+                count(*) AS total \
+            FROM pg_stat_activity"
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        let db_row = sqlx::query(
+            "SELECT COALESCE(xact_commit, 0) AS xact_commit, \
+                    COALESCE(xact_rollback, 0) AS xact_rollback, \
+                    COALESCE(tup_inserted, 0) AS tup_inserted, \
+                    COALESCE(tup_updated, 0) AS tup_updated, \
+                    COALESCE(tup_deleted, 0) AS tup_deleted, \
+                    COALESCE(tup_fetched, 0) AS tup_fetched, \
+                    COALESCE(blks_read, 0) AS blks_read, \
+                    COALESCE(blks_hit, 0) AS blks_hit \
+            FROM pg_stat_database WHERE datname = current_database()"
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        let ts_row = sqlx::query("SELECT EXTRACT(EPOCH FROM now()) * 1000 AS ts")
+            .fetch_one(&self.pool)
+            .await?;
+
+        use sqlx::Row;
+        Ok(DatabaseStats {
+            active_connections: conn_row.get::<i64, _>("active"),
+            idle_connections: conn_row.get::<i64, _>("idle"),
+            idle_in_transaction: conn_row.get::<i64, _>("idle_tx"),
+            total_connections: conn_row.get::<i64, _>("total"),
+            xact_commit: db_row.get::<i64, _>("xact_commit"),
+            xact_rollback: db_row.get::<i64, _>("xact_rollback"),
+            tup_inserted: db_row.get::<i64, _>("tup_inserted"),
+            tup_updated: db_row.get::<i64, _>("tup_updated"),
+            tup_deleted: db_row.get::<i64, _>("tup_deleted"),
+            tup_fetched: db_row.get::<i64, _>("tup_fetched"),
+            blks_read: db_row.get::<i64, _>("blks_read"),
+            blks_hit: db_row.get::<i64, _>("blks_hit"),
+            timestamp_ms: ts_row.get::<f64, _>("ts"),
+        })
+    }
+
+    async fn get_locks(&self) -> Result<Vec<LockInfo>> {
+        let rows = sqlx::query(
+            "SELECT l.pid, l.locktype, \
+                    COALESCE(l.relation::regclass::text, '') AS relation, \
+                    l.mode, l.granted, \
+                    COALESCE(d.datname, '') AS database, \
+                    COALESCE(a.usename, '') AS username, \
+                    COALESCE(a.state, '') AS state, \
+                    COALESCE(a.query, '') AS query, \
+                    EXTRACT(EPOCH FROM (now() - a.query_start)) * 1000 AS duration_ms \
+            FROM pg_locks l \
+            LEFT JOIN pg_stat_activity a ON l.pid = a.pid \
+            LEFT JOIN pg_database d ON l.database = d.oid \
+            ORDER BY l.granted, l.pid"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        use sqlx::Row;
+        let mut locks = Vec::new();
+        for row in rows {
+            locks.push(LockInfo {
+                pid: row.get::<i32, _>("pid"),
+                locktype: row.get::<String, _>("locktype"),
+                database: row.get::<String, _>("database"),
+                relation: row.get::<String, _>("relation"),
+                mode: row.get::<String, _>("mode"),
+                granted: row.get::<bool, _>("granted"),
+                query: row.get::<String, _>("query"),
+                user: row.get::<String, _>("username"),
+                state: row.get::<String, _>("state"),
+                duration_ms: row.try_get::<f64, _>("duration_ms").ok(),
+            });
+        }
+        Ok(locks)
+    }
+
+    async fn get_server_config(&self) -> Result<Vec<ServerConfigEntry>> {
+        let rows = sqlx::query(
+            "SELECT name, setting, unit, category, short_desc, context, source, pending_restart \
+            FROM pg_settings ORDER BY category, name"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        use sqlx::Row;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(ServerConfigEntry {
+                name: row.get::<String, _>("name"),
+                setting: row.get::<String, _>("setting"),
+                unit: row.try_get::<String, _>("unit").ok(),
+                category: row.get::<String, _>("category"),
+                description: row.get::<String, _>("short_desc"),
+                context: row.get::<String, _>("context"),
+                source: row.get::<String, _>("source"),
+                pending_restart: row.get::<bool, _>("pending_restart"),
+            });
+        }
+        Ok(entries)
+    }
+
+    async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
+        let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
+            .fetch_optional(&self.pool)
+            .await?;
+
+        if ext_check.is_none() {
+            return Ok(QueryStatsResponse {
+                available: false,
+                message: Some(
+                    "The pg_stat_statements extension is not installed. To enable it:\n\n\
+                     1. Add to postgresql.conf:\n   shared_preload_libraries = 'pg_stat_statements'\n\n\
+                     2. Restart PostgreSQL\n\n\
+                     3. Run in your database:\n   CREATE EXTENSION pg_stat_statements;"
+                        .to_string(),
+                ),
+                entries: vec![],
+            });
+        }
+
+        let version_row = sqlx::query("SHOW server_version_num")
+            .fetch_one(&self.pool)
+            .await?;
+        let version_num: i32 = version_row
+            .try_get::<String, _>("server_version_num")
+            .unwrap_or_default()
+            .parse()
+            .unwrap_or(0);
+
+        let sql = if version_num >= 130000 {
+            "SELECT \
+                query, queryid, calls, \
+                total_exec_time as total_exec_time_ms, \
+                mean_exec_time as mean_exec_time_ms, \
+                min_exec_time as min_exec_time_ms, \
+                max_exec_time as max_exec_time_ms, \
+                rows, \
+                shared_blks_hit, shared_blks_read, \
+                CASE WHEN (shared_blks_hit + shared_blks_read) > 0 \
+                     THEN shared_blks_hit::float / (shared_blks_hit + shared_blks_read) * 100 \
+                     ELSE 0 END as cache_hit_ratio, \
+                total_plan_time as total_plan_time_ms, \
+                mean_plan_time as mean_plan_time_ms \
+             FROM pg_stat_statements \
+             ORDER BY total_exec_time DESC"
+        } else {
+            "SELECT \
+                query, queryid, calls, \
+                total_time as total_exec_time_ms, \
+                mean_time as mean_exec_time_ms, \
+                min_time as min_exec_time_ms, \
+                max_time as max_exec_time_ms, \
+                rows, \
+                shared_blks_hit, shared_blks_read, \
+                CASE WHEN (shared_blks_hit + shared_blks_read) > 0 \
+                     THEN shared_blks_hit::float / (shared_blks_hit + shared_blks_read) * 100 \
+                     ELSE 0 END as cache_hit_ratio, \
+                0::float as total_plan_time_ms, \
+                0::float as mean_plan_time_ms \
+             FROM pg_stat_statements \
+             ORDER BY total_time DESC"
+        };
+
+        let rows = sqlx::query(sql)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let entries = rows
+            .iter()
+            .map(|r| QueryStatEntry {
+                query: r.try_get::<String, _>("query").unwrap_or_default(),
+                queryid: r.try_get::<i64, _>("queryid").ok(),
+                calls: r.try_get::<i64, _>("calls").unwrap_or(0),
+                total_exec_time_ms: r.try_get::<f64, _>("total_exec_time_ms").unwrap_or(0.0),
+                mean_exec_time_ms: r.try_get::<f64, _>("mean_exec_time_ms").unwrap_or(0.0),
+                min_exec_time_ms: r.try_get::<f64, _>("min_exec_time_ms").unwrap_or(0.0),
+                max_exec_time_ms: r.try_get::<f64, _>("max_exec_time_ms").unwrap_or(0.0),
+                rows: r.try_get::<i64, _>("rows").unwrap_or(0),
+                shared_blks_hit: r.try_get::<i64, _>("shared_blks_hit").unwrap_or(0),
+                shared_blks_read: r.try_get::<i64, _>("shared_blks_read").unwrap_or(0),
+                cache_hit_ratio: r.try_get::<f64, _>("cache_hit_ratio").unwrap_or(0.0),
+                total_plan_time_ms: r.try_get::<f64, _>("total_plan_time_ms").ok(),
+                mean_plan_time_ms: r.try_get::<f64, _>("mean_plan_time_ms").ok(),
+            })
+            .collect();
+
+        Ok(QueryStatsResponse {
+            available: true,
+            message: None,
+            entries,
+        })
+    }
+
     async fn cancel_query(&self, pid: &str) -> Result<()> {
         let pid_int: i32 = pid.parse()?;
         sqlx::query("SELECT pg_cancel_backend($1)")

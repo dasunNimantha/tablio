@@ -18,6 +18,10 @@ import {
   SearchIcon,
   Plus,
   Filter,
+  Power,
+  PowerOff,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 import "./Sidebar.css";
 
@@ -276,6 +280,22 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
     [expanded, childrenMap]
   );
 
+  const handleConnectDirect = async (conn: import("../../lib/tauri").ConnectionConfig) => {
+    setConnectingId(conn.id);
+    try {
+      await connectTo(conn);
+      openTab({
+        id: `activity:${conn.id}`,
+        type: "activity",
+        title: `Activity: ${conn.name || conn.database}`,
+        connectionId: conn.id,
+        connectionColor: conn.color || "#5284e0",
+        database: conn.database,
+        schema: "",
+      });
+    } catch {} finally { setConnectingId(null); }
+  };
+
   const handleDoubleClick = async (node: TreeNode) => {
     if (node.type === "connection") {
       const isActive = activeConnections.has(node.connectionId);
@@ -285,6 +305,15 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
           setConnectingId(conn.id);
           try {
             await connectTo(conn);
+            openTab({
+              id: `activity:${conn.id}`,
+              type: "activity",
+              title: `Activity: ${conn.name || conn.database}`,
+              connectionId: conn.id,
+              connectionColor: conn.color || "#5284e0",
+              database: conn.database,
+              schema: "",
+            });
             setTimeout(() => toggleExpand(node), 100);
           } catch {}
           finally { setConnectingId(null); }
@@ -659,6 +688,22 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
           action: () => handleOpenActivity(node),
         });
         items.push({
+          label: "Query Statistics",
+          action: () => {
+            const tabId = `querystats:${node.connectionId}:${Date.now()}`;
+            const tab: TabInfo = {
+              id: tabId,
+              type: "querystats",
+              title: `Query Stats: ${node.label}`,
+              connectionId: node.connectionId,
+              connectionColor: node.connectionColor,
+              database: "",
+              schema: "",
+            };
+            openTab(tab);
+          },
+        });
+        items.push({
           label: "Manage Roles",
           action: () => {
             const tabId = `roles:${node.connectionId}`;
@@ -680,7 +725,18 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
           action: async () => {
             if (conn) {
               setConnectingId(conn.id);
-              try { await connectTo(conn); } catch {} finally { setConnectingId(null); }
+              try {
+                await connectTo(conn);
+                openTab({
+                  id: `activity:${conn.id}`,
+                  type: "activity",
+                  title: `Activity: ${conn.name || conn.database}`,
+                  connectionId: conn.id,
+                  connectionColor: conn.color || "#5284e0",
+                  database: conn.database,
+                  schema: "",
+                });
+              } catch {} finally { setConnectingId(null); }
             }
           },
         });
@@ -880,10 +936,43 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
                     />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       {isActive ? (
-                        renderNode(node, 0)
+                        <div className="tree-conn-row">
+                          {renderNode(node, 0)}
+                          <div className="tree-conn-actions">
+                            <button
+                              className="btn-icon tree-action"
+                              onClick={(e) => { e.stopPropagation(); disconnectFrom(conn.id); }}
+                              title="Disconnect"
+                            >
+                              <PowerOff size={12} />
+                            </button>
+                            <button
+                              className="btn-icon tree-action"
+                              onClick={(e) => { e.stopPropagation(); setEditingConn(conn); }}
+                              title="Edit"
+                            >
+                              <Pencil size={12} />
+                            </button>
+                            <button
+                              className="btn-icon tree-action tree-action-danger"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmAction({
+                                  title: "Delete Connection",
+                                  message: `Delete "${conn.name || conn.database}"? This cannot be undone.`,
+                                  action: () => removeConnection(conn.id),
+                                  node,
+                                });
+                              }}
+                              title="Delete"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </div>
                       ) : (
                         <div
-                          className="tree-node"
+                          className="tree-node tree-conn-row"
                           style={{ paddingLeft: 6 }}
                           onDoubleClick={() => handleDoubleClick(node)}
                           onContextMenu={(e) => handleContextMenu(e, node)}
@@ -896,6 +985,37 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
                           <span className="tree-label" style={{ color: "var(--text-muted)" }}>
                             {conn.name || conn.database}
                           </span>
+                          <div className="tree-conn-actions">
+                            <button
+                              className="btn-icon tree-action"
+                              onClick={(e) => { e.stopPropagation(); handleConnectDirect(conn); }}
+                              title="Connect"
+                            >
+                              <Power size={12} />
+                            </button>
+                            <button
+                              className="btn-icon tree-action"
+                              onClick={(e) => { e.stopPropagation(); setEditingConn(conn); }}
+                              title="Edit"
+                            >
+                              <Pencil size={12} />
+                            </button>
+                            <button
+                              className="btn-icon tree-action tree-action-danger"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmAction({
+                                  title: "Delete Connection",
+                                  message: `Delete "${conn.name || conn.database}"? This cannot be undone.`,
+                                  action: () => removeConnection(conn.id),
+                                  node,
+                                });
+                              }}
+                              title="Delete"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>

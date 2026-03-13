@@ -1,31 +1,42 @@
 .backup-restore-dialog {
-  width: 560px;
+  width: 520px;
   max-width: 90vw;
 }
 
+.backup-restore-dialog > .dialog-header {
+  border-bottom: none;
+  padding-bottom: 12px;
+}
+
+/* ── Segmented tab switcher ────────────────────────── */
+
 .backup-tabs {
   display: flex;
-  gap: 4px;
-  padding: 14px 18px 0;
-  border-bottom: 1px solid var(--border);
-  margin: 0 var(--gutter);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  padding: 3px;
+  margin: 0 28px 4px;
+  gap: 2px;
 }
 
 .backup-tab {
+  flex: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 18px;
-  background: transparent;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 16px;
+  background: none;
   border: none;
-  border-bottom: 2px solid transparent;
-  color: var(--text-secondary);
-  font-size: 14px;
+  border-radius: var(--radius-sm);
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
-  margin-bottom: -1px;
+  transition: color 0.15s, background 0.15s, box-shadow 0.15s;
   outline: none;
+  height: auto;
 }
 
 .backup-tab:hover {
@@ -33,14 +44,44 @@
 }
 
 .backup-tab.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
+  background: var(--accent);
+  color: var(--text-inverse);
+  box-shadow: var(--shadow-sm);
 }
+
+/* ── Form layout ───────────────────────────────────── */
 
 .backup-form {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 20px;
+}
+
+.backup-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: -10px;
+}
+
+.backup-db-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-family: var(--font-mono);
+}
+
+.backup-db-badge svg {
+  color: var(--accent);
+  flex-shrink: 0;
 }
 
 .backup-input-disabled {
@@ -48,35 +89,55 @@
   color: var(--text-muted);
 }
 
+/* ── Options row ───────────────────────────────────── */
+
+.backup-options-row {
+  display: flex;
+  gap: 20px;
+  align-items: flex-end;
+}
+
+.backup-options-row .form-group {
+  flex: 1;
+}
+
 .backup-checkboxes {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  gap: 20px;
 }
 
 .backup-checkboxes .checkbox-label {
   padding-top: 0;
+  font-size: 14px;
+  color: var(--text-secondary);
 }
+
+/* ── Action button ─────────────────────────────────── */
 
 .backup-action-btn {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  align-self: flex-start;
+  width: 100%;
+  height: 40px;
+  font-size: 14px;
 }
 
+/* ── Result banners ────────────────────────────────── */
+
 .backup-result-area {
-  margin-top: 10px;
+  margin-top: 4px;
 }
 
 .backup-result {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 14px 18px;
+  gap: 10px;
+  padding: 12px 14px;
   border-radius: var(--radius-md);
-  font-size: 14px;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .backup-result.loading {
@@ -95,4 +156,11 @@
   background: rgba(240, 100, 100, 0.08);
   color: var(--error);
   border: 1px solid rgba(240, 100, 100, 0.18);
+}
+
+/* ── Footer ────────────────────────────────────────── */
+
+.backup-restore-dialog > .dialog-footer {
+  border-top: none;
+  padding-top: 0;
 }

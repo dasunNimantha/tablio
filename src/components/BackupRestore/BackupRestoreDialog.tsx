@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, BackupRequest, RestoreRequest } from "../../lib/tauri";
-import { X, Loader2, Database, Upload, Download } from "lucide-react";
+import { X, Loader2, Database, Upload, Download, HardDrive } from "lucide-react";
 import "./BackupRestoreDialog.css";
 
 interface Props {
@@ -148,17 +148,13 @@ export function BackupRestoreDialog({
         </div>
 
         <div className="dialog-body">
+          <div className="backup-db-badge">
+            <HardDrive size={15} />
+            {database}
+          </div>
+
           {tab === "backup" && (
             <div className="backup-form">
-              <div className="form-group">
-                <label>Target Database</label>
-                <input
-                  type="text"
-                  value={database}
-                  disabled
-                  className="backup-input-disabled"
-                />
-              </div>
               <div className="form-group">
                 <label>Output file path</label>
                 <input
@@ -172,52 +168,54 @@ export function BackupRestoreDialog({
                   disabled={loading}
                 />
               </div>
-              <div className="form-group">
-                <label>Format</label>
-                <select
-                  value={backupFormat}
-                  onChange={(e) => setBackupFormat(e.target.value)}
-                  disabled={loading}
-                >
-                  {BACKUP_FORMATS.map((f) => (
-                    <option key={f.value} value={f.value}>
-                      {f.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="backup-checkboxes">
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={schemaOnly}
-                    onChange={(e) => {
-                      setSchemaOnly(e.target.checked);
-                      if (e.target.checked) setDataOnly(false);
-                    }}
+              <div className="backup-options-row">
+                <div className="form-group">
+                  <label>Format</label>
+                  <select
+                    value={backupFormat}
+                    onChange={(e) => setBackupFormat(e.target.value)}
                     disabled={loading}
-                  />
-                  Schema only
-                </label>
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={dataOnly}
-                    onChange={(e) => {
-                      setDataOnly(e.target.checked);
-                      if (e.target.checked) setSchemaOnly(false);
-                    }}
-                    disabled={loading}
-                  />
-                  Data only
-                </label>
+                  >
+                    {BACKUP_FORMATS.map((f) => (
+                      <option key={f.value} value={f.value}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="backup-checkboxes">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={schemaOnly}
+                      onChange={(e) => {
+                        setSchemaOnly(e.target.checked);
+                        if (e.target.checked) setDataOnly(false);
+                      }}
+                      disabled={loading}
+                    />
+                    Schema only
+                  </label>
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={dataOnly}
+                      onChange={(e) => {
+                        setDataOnly(e.target.checked);
+                        if (e.target.checked) setSchemaOnly(false);
+                      }}
+                      disabled={loading}
+                    />
+                    Data only
+                  </label>
+                </div>
               </div>
               <button
                 className="btn-primary backup-action-btn"
                 onClick={handleBackup}
                 disabled={loading}
               >
-                {loading && <Loader2 size={14} className="spin" />}
+                {loading ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
                 Start Backup
               </button>
             </div>
@@ -225,15 +223,6 @@ export function BackupRestoreDialog({
 
           {tab === "restore" && (
             <div className="backup-form">
-              <div className="form-group">
-                <label>Target Database</label>
-                <input
-                  type="text"
-                  value={database}
-                  disabled
-                  className="backup-input-disabled"
-                />
-              </div>
               <div className="form-group">
                 <label>Input file path</label>
                 <input
@@ -266,7 +255,7 @@ export function BackupRestoreDialog({
                 onClick={handleRestore}
                 disabled={loading}
               >
-                {loading && <Loader2 size={14} className="spin" />}
+                {loading ? <Loader2 size={14} className="spin" /> : <Upload size={14} />}
                 Start Restore
               </button>
             </div>
@@ -276,10 +265,8 @@ export function BackupRestoreDialog({
             <div className="backup-result-area">
               {loading && (
                 <div className="backup-result loading">
-                  <Loader2 size={18} className="spin" />
-                  <span>
-                    {tab === "backup" ? "Backing up database..." : "Restoring database..."}
-                  </span>
+                  <Loader2 size={16} className="spin" />
+                  {tab === "backup" ? "Backing up database..." : "Restoring database..."}
                 </div>
               )}
               {result && !loading && (

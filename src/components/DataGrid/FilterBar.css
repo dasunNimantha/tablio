@@ -2,7 +2,7 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  padding: 10px 18px;
+  padding: var(--gutter-sm) var(--gutter-lg);
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   gap: 10px;
@@ -23,21 +23,21 @@
 }
 
 .filter-condition select {
-  height: 30px;
-  font-size: 13px;
+  height: 28px;
+  font-size: 15px;
   padding: 0 8px;
   min-width: 90px;
 }
 
 .filter-condition input {
-  height: 30px;
-  font-size: 13px;
+  height: 28px;
+  font-size: 15px;
   padding: 0 10px;
   width: 130px;
 }
 
 .filter-join-btn {
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
   color: var(--accent);
   background: var(--accent-muted);
@@ -63,6 +63,6 @@
 }
 
 .filter-actions .btn-ghost {
-  height: 30px;
-  font-size: 13px;
+  height: 28px;
+  font-size: 15px;
 }

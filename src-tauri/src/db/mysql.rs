@@ -843,6 +843,31 @@ impl DatabaseDriver for MysqlDriver {
             .collect())
     }
 
+    async fn get_database_stats(&self) -> Result<DatabaseStats> {
+        Ok(DatabaseStats {
+            active_connections: 0, idle_connections: 0, idle_in_transaction: 0,
+            total_connections: 0, xact_commit: 0, xact_rollback: 0,
+            tup_inserted: 0, tup_updated: 0, tup_deleted: 0, tup_fetched: 0,
+            blks_read: 0, blks_hit: 0, timestamp_ms: 0.0,
+        })
+    }
+
+    async fn get_locks(&self) -> Result<Vec<LockInfo>> {
+        Ok(vec![])
+    }
+
+    async fn get_server_config(&self) -> Result<Vec<ServerConfigEntry>> {
+        Ok(vec![])
+    }
+
+    async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
+        Ok(QueryStatsResponse {
+            available: false,
+            message: Some("Query statistics are not supported for MySQL. Use performance_schema for similar functionality.".to_string()),
+            entries: vec![],
+        })
+    }
+
     async fn cancel_query(&self, pid: &str) -> Result<()> {
         let sql = format!("KILL QUERY {}", pid);
         sqlx::query(&sql).execute(&self.pool).await?;

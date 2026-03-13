@@ -9,7 +9,7 @@
   align-items: center;
   gap: 14px;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .connection-empty .btn-secondary {
@@ -19,7 +19,7 @@
 .connection-item {
   display: flex;
   align-items: center;
-  padding: 0 14px 0 18px;
+  padding: 0 var(--gutter) 0 var(--gutter-lg);
   height: 44px;
   gap: 12px;
   cursor: default;
@@ -50,7 +50,7 @@
 }
 
 .connection-name {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
@@ -60,7 +60,7 @@
 }
 
 .connection-detail {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -119,7 +119,7 @@
   height: 34px;
   gap: 6px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 15px;
   transition: background 0.1s;
   border-radius: var(--radius-sm);
   margin: 1px 4px;
@@ -163,7 +163,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .tree-node:hover .tree-label {
@@ -179,11 +179,44 @@
   opacity: 1;
 }
 
+.tree-conn-row {
+  position: relative;
+}
+
+.tree-conn-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.tree-conn-row:hover .tree-conn-actions,
+.tree-root-header:hover .tree-conn-actions {
+  opacity: 1;
+}
+
+.tree-conn-actions .btn-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-xs);
+}
+
+.tree-conn-actions .btn-icon:hover {
+  background: var(--bg-active);
+}
+
+.tree-action-danger:hover {
+  color: var(--error) !important;
+}
+
 .tree-empty-state {
   padding: 28px 20px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.6;
 }
 
@@ -212,7 +245,7 @@
 .tree-search input {
   flex: 1;
   height: 28px;
-  font-size: 13px;
+  font-size: 15px;
   background: transparent;
   border: none;
   padding: 0;
@@ -263,8 +296,8 @@
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  height: 32px;
-  font-size: 13px;
+  height: 34px;
+  font-size: 15px;
   color: var(--text-primary);
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -284,7 +317,7 @@
   max-width: 14px;
   max-height: 14px;
   border: 1.5px solid var(--text-muted);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   background: transparent;
   cursor: pointer;
   margin: 0;
@@ -331,10 +364,10 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 18px;
+  padding: 0 var(--gutter-lg);
   height: 34px;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -358,10 +391,10 @@
 }
 
 .connection-group-count {
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
   background: var(--bg-hover);
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   color: var(--text-muted);
 }

@@ -234,6 +234,49 @@ pub struct ServerActivity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseStats {
+    pub active_connections: i64,
+    pub idle_connections: i64,
+    pub idle_in_transaction: i64,
+    pub total_connections: i64,
+    pub xact_commit: i64,
+    pub xact_rollback: i64,
+    pub tup_inserted: i64,
+    pub tup_updated: i64,
+    pub tup_deleted: i64,
+    pub tup_fetched: i64,
+    pub blks_read: i64,
+    pub blks_hit: i64,
+    pub timestamp_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockInfo {
+    pub pid: i32,
+    pub locktype: String,
+    pub database: String,
+    pub relation: String,
+    pub mode: String,
+    pub granted: bool,
+    pub query: String,
+    pub user: String,
+    pub state: String,
+    pub duration_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerConfigEntry {
+    pub name: String,
+    pub setting: String,
+    pub unit: Option<String>,
+    pub category: String,
+    pub description: String,
+    pub context: String,
+    pub source: String,
+    pub pending_restart: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportRequest {
     pub connection_id: String,
     pub database: String,
@@ -277,6 +320,35 @@ pub struct ServerActivityRequest {
 pub struct CancelQueryRequest {
     pub connection_id: String,
     pub pid: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryStatsRequest {
+    pub connection_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryStatEntry {
+    pub query: String,
+    pub queryid: Option<i64>,
+    pub calls: i64,
+    pub total_exec_time_ms: f64,
+    pub mean_exec_time_ms: f64,
+    pub min_exec_time_ms: f64,
+    pub max_exec_time_ms: f64,
+    pub rows: i64,
+    pub shared_blks_hit: i64,
+    pub shared_blks_read: i64,
+    pub cache_hit_ratio: f64,
+    pub total_plan_time_ms: Option<f64>,
+    pub mean_plan_time_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryStatsResponse {
+    pub available: bool,
+    pub message: Option<String>,
+    pub entries: Vec<QueryStatEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

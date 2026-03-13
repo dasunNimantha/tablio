@@ -10,7 +10,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 var(--gutter) 0 18px;
+  padding: 0 var(--gutter) 0 var(--gutter-lg);
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   height: var(--toolbar-height);
@@ -25,18 +25,18 @@
 }
 
 .grid-table-name {
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   font-family: var(--font-mono);
   color: var(--text-primary);
 }
 
 .grid-row-count {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
   background: var(--bg-hover);
   padding: 3px 10px;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   font-weight: 500;
 }
 
@@ -47,11 +47,11 @@
 }
 
 .grid-error-banner {
-  padding: 10px 18px;
+  padding: var(--gutter-sm) var(--gutter-lg);
   background: rgba(240, 100, 100, 0.07);
   border-bottom: 1px solid rgba(240, 100, 100, 0.12);
   color: var(--error);
-  font-size: 13px;
+  font-size: 15px;
   font-family: var(--font-mono);
 }
 
@@ -64,19 +64,19 @@
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
-  font-size: 13px;
+  font-size: 15px;
   font-family: var(--font-mono);
   font-weight: 400;
   table-layout: auto;
 }
 
 .grid-table th {
-  background: var(--bg-secondary);
+  background: var(--bg-header);
   padding: 0 var(--gutter);
   height: 38px;
   text-align: left;
-  font-weight: 600;
-  font-size: 12px;
+  font-weight: 400;
+  font-size: 14px;
   border-bottom: 2px solid var(--border);
   border-right: 1px solid var(--border-subtle);
   white-space: nowrap;
@@ -89,7 +89,7 @@
 }
 
 .grid-table th:hover {
-  background: var(--bg-hover);
+  background: var(--bg-active);
   color: var(--text-primary);
 }
 
@@ -104,12 +104,12 @@
   align-items: center;
   gap: 5px;
   color: var(--text-primary);
-  font-weight: 600;
+  font-weight: 400;
   line-height: 1.3;
 }
 
 .grid-header-type {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
   font-weight: 400;
   line-height: 1.2;
@@ -124,19 +124,19 @@
 }
 
 .pk-badge {
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   color: var(--accent);
   background: var(--accent-muted);
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   letter-spacing: 0.03em;
 }
 
 .grid-row-number {
   text-align: center;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 13px;
   width: 54px;
   min-width: 54px;
   border-right: 1px solid var(--border);
@@ -216,7 +216,7 @@ th.grid-row-number {
 .cell-auto-label {
   color: var(--text-muted);
   font-style: italic;
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .cell-editing {
@@ -228,10 +228,10 @@ th.grid-row-number {
   height: 100%;
   padding: 0 var(--gutter);
   border: 2px solid var(--accent);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   background: var(--bg-primary);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 15px;
   outline: none;
 }
 
@@ -292,18 +292,25 @@ th.grid-row-number {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px;
+  padding: 0 var(--gutter-lg);
   background: var(--bg-secondary);
   border-top: 1px solid var(--border);
   height: var(--statusbar-height);
   min-height: var(--statusbar-height);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-secondary);
 }
 
 .grid-pagination-info {
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: var(--gutter-sm);
+}
+
+.grid-pagination-range {
+  opacity: 0.7;
 }
 
 .grid-pagination-controls {
@@ -319,7 +326,7 @@ th.grid-row-number {
 
 .grid-page-info {
   padding: 0 12px;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .grid-loading {
@@ -362,7 +369,7 @@ th.grid-row-number {
 .grid-search-input {
   flex: 1;
   height: 28px;
-  font-size: 13px;
+  font-size: 15px;
   font-family: var(--font-mono);
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
@@ -377,7 +384,7 @@ th.grid-row-number {
 }
 
 .grid-search-count {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
   white-space: nowrap;
 }
@@ -421,8 +428,8 @@ th.grid-row-number {
   width: 100%;
   text-align: left;
   padding: 0 12px;
-  height: 30px;
-  font-size: 13px;
+  height: 28px;
+  font-size: 15px;
   background: transparent;
   color: var(--text-primary);
   border: none;

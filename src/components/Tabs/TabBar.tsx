@@ -1,5 +1,5 @@
 import { useTabStore } from "../../stores/tabStore";
-import { X, Table2, Terminal, Code, Columns3, Activity, BarChart3, Shield } from "lucide-react";
+import { X, Table2, Terminal, Code, Columns3, Activity, BarChart3, Shield, TrendingUp } from "lucide-react";
 import { useState, useRef } from "react";
 import "./Tabs.css";
 
@@ -68,6 +68,8 @@ export function TabBar() {
                 <BarChart3 size={12} />
               ) : tab.type === "roles" ? (
                 <Shield size={12} />
+              ) : tab.type === "querystats" ? (
+                <TrendingUp size={12} />
               ) : (
                 <Terminal size={12} />
               )}

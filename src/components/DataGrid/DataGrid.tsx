@@ -158,6 +158,13 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   }, [connectionId, database, schema, table]);
 
   useEffect(() => {
+    if (error && data) {
+      const timer = setTimeout(() => setError(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [error, data]);
+
+  useEffect(() => {
     if (!rowContextMenu) return;
     const close = () => setRowContextMenu(null);
     document.addEventListener("click", close);
@@ -486,12 +493,6 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     <div className="data-grid-container">
       <div className="grid-toolbar">
         <div className="grid-toolbar-left">
-          <span className="grid-table-name">
-            {schema}.{table}
-          </span>
-          <span className="grid-row-count">
-            {data.total_rows.toLocaleString()} rows
-          </span>
         </div>
         <div className="grid-toolbar-right">
           <button
@@ -727,9 +728,13 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
 
       <div className="grid-pagination">
         <div className="grid-pagination-info">
-          Showing {page * PAGE_SIZE + 1} -{" "}
-          {Math.min((page + 1) * PAGE_SIZE, data.total_rows)} of{" "}
-          {data.total_rows.toLocaleString()}
+          {data.total_rows.toLocaleString()} rows
+          {totalPages > 1 && (
+            <span className="grid-pagination-range">
+              {" · "}Showing {page * PAGE_SIZE + 1} -{" "}
+              {Math.min((page + 1) * PAGE_SIZE, data.total_rows)}
+            </span>
+          )}
         </div>
         <div className="grid-pagination-controls">
           <button

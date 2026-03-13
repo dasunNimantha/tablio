@@ -59,7 +59,7 @@
   padding: 0;
   background: var(--bg-secondary, #f1f5f9);
   border: 1px solid var(--border, #e2e8f0);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
   color: var(--text-primary, #334155);
 }
@@ -94,18 +94,18 @@
 }
 
 .erd-table-name {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   fill: var(--text-primary, #1e293b);
 }
 
 .erd-col-name {
-  font-size: 12px;
+  font-size: 14px;
   fill: var(--text-primary, #334155);
 }
 
 .erd-col-type {
-  font-size: 11px;
+  font-size: 13px;
   fill: var(--text-secondary, #64748b);
 }
 

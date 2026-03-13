@@ -1,4 +1,5 @@
 import { useConnectionStore } from "../../stores/connectionStore";
+import { useTabStore } from "../../stores/tabStore";
 import {
   Plus,
   Power,
@@ -29,10 +30,21 @@ export function ConnectionList({ onAddConnection }: Props) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<ConnectionConfig | null>(null);
 
+  const openTab = useTabStore((s) => s.openTab);
+
   const handleConnect = async (config: ConnectionConfig) => {
     setConnectingId(config.id);
     try {
       await connectTo(config);
+      openTab({
+        id: `activity:${config.id}`,
+        type: "activity",
+        title: `Activity: ${config.name || config.database}`,
+        connectionId: config.id,
+        connectionColor: config.color || "#5284e0",
+        database: config.database,
+        schema: "",
+      });
     } catch {
     } finally {
       setConnectingId(null);

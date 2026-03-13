@@ -1,8 +1,8 @@
 .chart-view {
   display: flex;
   flex-direction: column;
-  padding: 18px;
-  gap: 18px;
+  padding: var(--gutter-lg);
+  gap: var(--gutter-lg);
   flex: 1;
   min-height: 0;
   overflow: auto;
@@ -24,7 +24,7 @@
 
 .chart-type-btn {
   padding: 7px 14px;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 500;
   background: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -58,7 +58,7 @@
 }
 
 .chart-axis-label {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -68,7 +68,7 @@
 
 .chart-axis-selectors .cs-trigger {
   min-width: 140px;
-  height: 32px;
+  height: 34px;
 }
 
 .chart-canvas {
@@ -83,5 +83,5 @@
   justify-content: center;
   flex: 1;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 15px;
 }
