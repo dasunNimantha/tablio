@@ -262,7 +262,7 @@ export function QueryStats({ connectionId }: Props) {
                 const globalIdx = page * PAGE_SIZE + localIdx;
                 return (
                   <QueryRow
-                    key={entry.queryid ?? globalIdx}
+                    key={`${entry.queryid ?? "q"}-${globalIdx}`}
                     entry={entry}
                     expanded={expandedIdx === globalIdx}
                     onToggle={() => toggleExpand(globalIdx)}

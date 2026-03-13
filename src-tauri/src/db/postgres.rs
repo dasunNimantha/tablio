@@ -1033,7 +1033,7 @@ impl DatabaseDriver for PostgresDriver {
         .fetch_one(&self.pool)
         .await?;
 
-        let db_row = sqlx::query(
+        let db_row_opt = sqlx::query(
             "SELECT COALESCE(xact_commit, 0) AS xact_commit, \
                     COALESCE(xact_rollback, 0) AS xact_rollback, \
                     COALESCE(tup_inserted, 0) AS tup_inserted, \
@@ -1044,7 +1044,7 @@ impl DatabaseDriver for PostgresDriver {
                     COALESCE(blks_hit, 0) AS blks_hit \
             FROM pg_stat_database WHERE datname = current_database()"
         )
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await?;
 
         let ts_row = sqlx::query("SELECT EXTRACT(EPOCH FROM now()) * 1000 AS ts")
@@ -1052,19 +1052,35 @@ impl DatabaseDriver for PostgresDriver {
             .await?;
 
         use sqlx::Row;
+        let (xact_commit, xact_rollback, tup_inserted, tup_updated, tup_deleted, tup_fetched, blks_read, blks_hit) =
+            if let Some(db_row) = db_row_opt {
+                (
+                    db_row.get::<i64, _>("xact_commit"),
+                    db_row.get::<i64, _>("xact_rollback"),
+                    db_row.get::<i64, _>("tup_inserted"),
+                    db_row.get::<i64, _>("tup_updated"),
+                    db_row.get::<i64, _>("tup_deleted"),
+                    db_row.get::<i64, _>("tup_fetched"),
+                    db_row.get::<i64, _>("blks_read"),
+                    db_row.get::<i64, _>("blks_hit"),
+                )
+            } else {
+                (0, 0, 0, 0, 0, 0, 0, 0)
+            };
+
         Ok(DatabaseStats {
             active_connections: conn_row.get::<i64, _>("active"),
             idle_connections: conn_row.get::<i64, _>("idle"),
             idle_in_transaction: conn_row.get::<i64, _>("idle_tx"),
             total_connections: conn_row.get::<i64, _>("total"),
-            xact_commit: db_row.get::<i64, _>("xact_commit"),
-            xact_rollback: db_row.get::<i64, _>("xact_rollback"),
-            tup_inserted: db_row.get::<i64, _>("tup_inserted"),
-            tup_updated: db_row.get::<i64, _>("tup_updated"),
-            tup_deleted: db_row.get::<i64, _>("tup_deleted"),
-            tup_fetched: db_row.get::<i64, _>("tup_fetched"),
-            blks_read: db_row.get::<i64, _>("blks_read"),
-            blks_hit: db_row.get::<i64, _>("blks_hit"),
+            xact_commit,
+            xact_rollback,
+            tup_inserted,
+            tup_updated,
+            tup_deleted,
+            tup_fetched,
+            blks_read,
+            blks_hit,
             timestamp_ms: ts_row.get::<f64, _>("ts"),
         })
     }
@@ -1072,7 +1088,7 @@ impl DatabaseDriver for PostgresDriver {
     async fn get_locks(&self) -> Result<Vec<LockInfo>> {
         let rows = sqlx::query(
             "SELECT l.pid, l.locktype, \
-                    COALESCE(l.relation::regclass::text, '') AS relation, \
+                    COALESCE(c.relname, '') AS relation, \
                     l.mode, l.granted, \
                     COALESCE(d.datname, '') AS database, \
                     COALESCE(a.usename, '') AS username, \
@@ -1080,6 +1096,7 @@ impl DatabaseDriver for PostgresDriver {
                     COALESCE(a.query, '') AS query, \
                     EXTRACT(EPOCH FROM (now() - a.query_start)) * 1000 AS duration_ms \
             FROM pg_locks l \
+            LEFT JOIN pg_class c ON l.relation = c.oid \
             LEFT JOIN pg_stat_activity a ON l.pid = a.pid \
             LEFT JOIN pg_database d ON l.database = d.oid \
             ORDER BY l.granted, l.pid"

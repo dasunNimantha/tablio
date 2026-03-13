@@ -135,10 +135,8 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
         }
       });
       chartRef.current.update("none");
-      return;
-    }
-
-    chartRef.current = new ChartJS(ctx, {
+    } else {
+      chartRef.current = new ChartJS(ctx, {
       type: "line",
       data: { labels, datasets: chartDatasets },
       options: {
@@ -252,7 +250,8 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
           drawCtx.restore();
         },
       }],
-    });
+      });
+    }
 
     return () => {
       if (chartRef.current) {

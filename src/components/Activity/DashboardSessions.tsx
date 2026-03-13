@@ -69,7 +69,8 @@ export function DashboardSessions({ connectionId, paused }: Props) {
         a.user.toLowerCase().includes(q) ||
         a.database.toLowerCase().includes(q) ||
         a.query.toLowerCase().includes(q) ||
-        a.state.toLowerCase().includes(q)
+        a.state.toLowerCase().includes(q) ||
+        (a.client_addr && a.client_addr.toLowerCase().includes(q))
     );
   }, [activities, search]);
 

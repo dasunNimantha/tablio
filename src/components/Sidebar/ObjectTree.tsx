@@ -281,6 +281,7 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
   );
 
   const handleConnectDirect = async (conn: import("../../lib/tauri").ConnectionConfig) => {
+    if (connectingId) return;
     setConnectingId(conn.id);
     try {
       await connectTo(conn);
@@ -293,7 +294,9 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
         database: conn.database,
         schema: "",
       });
-    } catch {} finally { setConnectingId(null); }
+    } catch (e) {
+      console.error("Connection failed:", e);
+    } finally { setConnectingId(null); }
   };
 
   const handleDoubleClick = async (node: TreeNode) => {
