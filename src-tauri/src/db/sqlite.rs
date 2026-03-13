@@ -171,9 +171,11 @@ impl DatabaseDriver for SqliteDriver {
             .iter()
             .map(|r| {
                 let pk: i32 = r.get("pk");
+                let col_type: String = r.get("type");
+                let is_rowid_alias = pk > 0 && col_type.to_uppercase().contains("INTEGER");
                 ColumnInfo {
                     name: r.get("name"),
-                    data_type: r.get("type"),
+                    data_type: col_type,
                     is_nullable: {
                         let notnull: i32 = r.get("notnull");
                         notnull == 0
@@ -181,6 +183,7 @@ impl DatabaseDriver for SqliteDriver {
                     is_primary_key: pk > 0,
                     default_value: r.try_get::<String, _>("dflt_value").ok(),
                     ordinal_position: r.get("cid"),
+                    is_auto_generated: is_rowid_alias,
                 }
             })
             .collect())
@@ -271,7 +274,17 @@ impl DatabaseDriver for SqliteDriver {
                 };
                 format!("ORDER BY {} {}", quote_ident(&s.column), dir)
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                let pk_cols: Vec<String> = columns.iter()
+                    .filter(|c| c.is_primary_key)
+                    .map(|c| quote_ident(&c.name))
+                    .collect();
+                if pk_cols.is_empty() {
+                    String::new()
+                } else {
+                    format!("ORDER BY {}", pk_cols.join(", "))
+                }
+            });
 
         let count_sql = format!("SELECT COUNT(*) as cnt FROM {} {}", quote_ident(table), where_clause);
         let count_row = sqlx::query(&count_sql).fetch_one(&self.pool).await?;

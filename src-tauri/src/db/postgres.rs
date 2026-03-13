@@ -286,6 +286,7 @@ impl DatabaseDriver for PostgresDriver {
     ) -> Result<Vec<ColumnInfo>> {
         let rows = sqlx::query(
             "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, c.ordinal_position, \
+                    c.is_identity, c.identity_generation, c.is_generated, \
                     CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_pk \
              FROM information_schema.columns c \
              LEFT JOIN ( \
@@ -309,13 +310,21 @@ impl DatabaseDriver for PostgresDriver {
             .iter()
             .map(|r| {
                 let nullable_str: String = r.get("is_nullable");
+                let default_val: Option<String> = r.try_get("column_default").ok();
+                let is_identity: String = r.get("is_identity");
+                let is_generated: String = r.get("is_generated");
+                let has_serial_default = default_val
+                    .as_deref()
+                    .map(|d| d.starts_with("nextval("))
+                    .unwrap_or(false);
                 ColumnInfo {
                     name: r.get("column_name"),
                     data_type: r.get("data_type"),
                     is_nullable: nullable_str == "YES",
                     is_primary_key: r.get("is_pk"),
-                    default_value: r.try_get("column_default").ok(),
+                    default_value: default_val,
                     ordinal_position: r.get("ordinal_position"),
+                    is_auto_generated: is_identity == "YES" || is_generated == "ALWAYS" || has_serial_default,
                 }
             })
             .collect())
@@ -429,7 +438,17 @@ impl DatabaseDriver for PostgresDriver {
                 };
                 format!("ORDER BY {} {}", quote_ident(&s.column), dir)
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                let pk_cols: Vec<String> = columns.iter()
+                    .filter(|c| c.is_primary_key)
+                    .map(|c| quote_ident(&c.name))
+                    .collect();
+                if pk_cols.is_empty() {
+                    String::new()
+                } else {
+                    format!("ORDER BY {}", pk_cols.join(", "))
+                }
+            });
 
         let count_sql = format!(
             "SELECT COUNT(*) as cnt FROM {}.{} {}",

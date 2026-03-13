@@ -29,7 +29,6 @@
   background: transparent;
   border-radius: var(--radius-md) var(--radius-md) 0 0;
   transition: all 0.12s;
-  user-select: none;
   flex-shrink: 0;
   border: 1px solid transparent;
   border-bottom: none;

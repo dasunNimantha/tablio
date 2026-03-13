@@ -57,7 +57,6 @@
   font-size: 13px;
   color: var(--text-primary);
   cursor: grab;
-  user-select: none;
   transition: background 0.1s;
 }
 

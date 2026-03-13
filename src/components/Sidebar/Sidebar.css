@@ -121,15 +121,8 @@
   cursor: pointer;
   font-size: 13px;
   transition: background 0.1s;
-  user-select: none;
-  -webkit-user-select: none;
   border-radius: var(--radius-sm);
   margin: 1px 4px;
-}
-
-.tree-node::selection,
-.tree-node *::selection {
-  background: transparent;
 }
 
 .tree-node:hover {
@@ -346,7 +339,6 @@
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-muted);
-  user-select: none;
   transition: background 0.12s;
 }
 

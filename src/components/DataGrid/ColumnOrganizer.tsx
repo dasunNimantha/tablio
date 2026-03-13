@@ -150,7 +150,14 @@ export function ColumnOrganizer({ columns, settings, onChange }: Props) {
     setDragIdx(idx);
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", String(idx));
-  }, []);
+
+    const ghost = document.createElement("div");
+    ghost.textContent = nonPkOrder[idx];
+    ghost.style.cssText = "position:fixed;top:-1000px;padding:6px 12px;background:var(--bg-surface,#fff);border:1px solid rgba(0,0,0,0.15);border-radius:6px;font-size:13px;font-family:inherit;color:var(--text-primary,#111);box-shadow:0 2px 8px rgba(0,0,0,0.12);white-space:nowrap;";
+    document.body.appendChild(ghost);
+    e.dataTransfer.setDragImage(ghost, 0, 0);
+    requestAnimationFrame(() => document.body.removeChild(ghost));
+  }, [nonPkOrder]);
 
   const handleDragOver = useCallback((e: React.DragEvent, idx: number) => {
     e.preventDefault();

@@ -80,7 +80,6 @@
   border-right: 1px solid var(--border-subtle);
   white-space: nowrap;
   cursor: pointer;
-  user-select: none;
   position: sticky;
   top: 0;
   z-index: 10;
@@ -141,7 +140,6 @@
   min-width: 54px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
-  user-select: none;
   position: sticky;
   left: 0;
   z-index: 2;
@@ -203,6 +201,18 @@ th.grid-row-number {
 
 .cell-inserted {
   background: var(--cell-inserted) !important;
+}
+
+.cell-auto {
+  background: var(--cell-inserted) !important;
+  opacity: 0.7;
+  cursor: default;
+}
+
+.cell-auto-label {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 11px;
 }
 
 .cell-editing {

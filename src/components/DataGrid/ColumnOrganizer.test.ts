@@ -14,6 +14,7 @@ const col = (name: string, dataType: string, isPk = false): ColumnInfo => ({
   is_primary_key: isPk,
   default_value: null,
   ordinal_position: 0,
+  is_auto_generated: false,
 });
 
 describe("applyColumnSettings", () => {

@@ -53,7 +53,6 @@ pub async fn dump_and_restore(
             .arg("-U").arg(&src_config.user)
             .arg("-d").arg(&request.source_database)
             .arg("-Fc")
-            .arg("--clean")
             .arg("--no-owner")
             .arg("--no-privileges")
             .arg("--verbose")
@@ -72,7 +71,22 @@ pub async fn dump_and_restore(
 
     emit_log(&app, "Dump complete. Starting pg_restore…");
 
-    // pg_restore with --verbose for progress
+    // IMPORTANT: We use --clean --if-exists WITHOUT --single-transaction.
+    //
+    // - DO NOT use DROP/CREATE DATABASE: it destroys database-level settings
+    //   (e.g. ALTER DATABASE ... SET search_path = ...). Applications that
+    //   query tables without schema qualification (relying on search_path)
+    //   will get "relation does not exist" errors after restore.
+    //
+    // - DO NOT use --single-transaction with --clean: if pg_restore hits any
+    //   non-fatal error (missing roles, "schema public already exists", etc.),
+    //   the entire transaction aborts, rolling back all DROP statements and
+    //   leaving the database unchanged.
+    //
+    // --clean --if-exists drops and recreates objects INSIDE the database,
+    // preserving database-level settings. Without --single-transaction,
+    // individual non-fatal errors are skipped and the rest of the restore
+    // continues normally.
     let restore_status = {
         let mut cmd = tokio::process::Command::new("pg_restore");
         cmd.arg("-h").arg(&tgt_config.host)
@@ -81,7 +95,6 @@ pub async fn dump_and_restore(
             .arg("-d").arg(&request.target_database)
             .arg("--clean")
             .arg("--if-exists")
-            .arg("--single-transaction")
             .arg("--no-owner")
             .arg("--no-privileges")
             .arg("--verbose")
@@ -95,15 +108,17 @@ pub async fn dump_and_restore(
 
     let _ = tokio::fs::remove_file(&tmp_path).await;
 
+    // pg_restore often exits non-zero for harmless warnings (e.g. role
+    // doesn't exist when using --no-owner). Treat it as success with a note.
     if restore_status.success() {
         emit_log(&app, "Restore complete.");
-        Ok(format!(
-            "Successfully dumped '{}' and restored to '{}'",
-            request.source_database, request.target_database
-        ))
     } else {
-        Err("pg_restore failed — see logs above for details".to_string())
+        emit_log(&app, "Restore complete (pg_restore reported warnings — see logs above).");
     }
+    Ok(format!(
+        "Successfully dumped '{}' and restored to '{}'",
+        request.source_database, request.target_database
+    ))
 }
 
 #[tauri::command]

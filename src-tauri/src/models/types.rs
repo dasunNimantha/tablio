@@ -63,6 +63,7 @@ pub struct ColumnInfo {
     pub is_primary_key: bool,
     pub default_value: Option<String>,
     pub ordinal_position: i32,
+    pub is_auto_generated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

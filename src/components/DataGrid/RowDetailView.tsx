@@ -243,13 +243,22 @@ function JsonValue({ value, depth, filterQ }: { value: unknown; depth: number; f
 
 function highlightMatch(text: string, query: string): React.ReactNode {
   if (!query) return text;
-  const idx = text.toLowerCase().indexOf(query.toLowerCase());
-  if (idx === -1) return text;
+  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return text;
+  const escaped = tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const regex = new RegExp(`(${escaped.join("|")})`, "gi");
+  const parts = text.split(regex);
+  if (parts.length === 1) return text;
+  const test = new RegExp(`^(?:${escaped.join("|")})$`, "i");
   return (
     <>
-      {text.slice(0, idx)}
-      <mark className="json-highlight">{text.slice(idx, idx + query.length)}</mark>
-      {text.slice(idx + query.length)}
+      {parts.map((part, i) =>
+        test.test(part) ? (
+          <mark key={i} className="json-highlight">{part}</mark>
+        ) : (
+          part
+        )
+      )}
     </>
   );
 }
@@ -329,13 +338,16 @@ export function RowDetailView({
 
   const filtered = useMemo(() => {
     if (!filterText) return rowObj;
-    const q = filterText.toLowerCase();
+    const tokens = filterText.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!tokens.length) return rowObj;
     return rowObj.filter(({ key, value, colIndex }) => {
       const displayVal = pendingEdits.has(colIndex) ? pendingEdits.get(colIndex) : value;
-      if (key.toLowerCase().includes(q)) return true;
-      if (displayVal === null || displayVal === undefined) return "null".includes(q);
-      const str = typeof displayVal === "object" ? JSON.stringify(displayVal) : String(displayVal);
-      return str.toLowerCase().includes(q);
+      const keyLower = key.toLowerCase();
+      const valStr = (displayVal === null || displayVal === undefined)
+        ? "null"
+        : typeof displayVal === "object" ? JSON.stringify(displayVal) : String(displayVal);
+      const valLower = valStr.toLowerCase();
+      return tokens.every((t) => keyLower.includes(t) || valLower.includes(t));
     });
   }, [rowObj, filterText, pendingEdits]);
 

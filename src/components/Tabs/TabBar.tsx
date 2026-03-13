@@ -96,6 +96,16 @@ export function TabBar() {
           <div
             className="context-menu"
             style={{ left: contextMenu.x, top: contextMenu.y }}
+            ref={(el) => {
+              if (!el) return;
+              const rect = el.getBoundingClientRect();
+              if (rect.bottom > window.innerHeight) {
+                el.style.top = `${contextMenu.y - rect.height}px`;
+              }
+              if (rect.right > window.innerWidth) {
+                el.style.left = `${contextMenu.x - rect.width}px`;
+              }
+            }}
           >
             <button
               onClick={() => {

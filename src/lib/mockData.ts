@@ -84,16 +84,16 @@ export const mockTables: TableInfo[] = [
 ];
 
 const usersColumns: ColumnInfo[] = [
-  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: "nextval('users_id_seq')", ordinal_position: 1 },
-  { name: "email", data_type: "varchar(255)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2 },
-  { name: "username", data_type: "varchar(100)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 3 },
-  { name: "full_name", data_type: "varchar(255)", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 4 },
-  { name: "password_hash", data_type: "varchar(255)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 5 },
-  { name: "is_active", data_type: "boolean", is_nullable: false, is_primary_key: false, default_value: "true", ordinal_position: 6 },
-  { name: "role", data_type: "varchar(50)", is_nullable: false, is_primary_key: false, default_value: "'user'", ordinal_position: 7 },
-  { name: "login_count", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: "0", ordinal_position: 8 },
-  { name: "created_at", data_type: "timestamptz", is_nullable: false, is_primary_key: false, default_value: "now()", ordinal_position: 9 },
-  { name: "updated_at", data_type: "timestamptz", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 10 },
+  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: "nextval('users_id_seq')", ordinal_position: 1, is_auto_generated: true },
+  { name: "email", data_type: "varchar(255)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2, is_auto_generated: false },
+  { name: "username", data_type: "varchar(100)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 3, is_auto_generated: false },
+  { name: "full_name", data_type: "varchar(255)", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 4, is_auto_generated: false },
+  { name: "password_hash", data_type: "varchar(255)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 5, is_auto_generated: false },
+  { name: "is_active", data_type: "boolean", is_nullable: false, is_primary_key: false, default_value: "true", ordinal_position: 6, is_auto_generated: false },
+  { name: "role", data_type: "varchar(50)", is_nullable: false, is_primary_key: false, default_value: "'user'", ordinal_position: 7, is_auto_generated: false },
+  { name: "login_count", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: "0", ordinal_position: 8, is_auto_generated: false },
+  { name: "created_at", data_type: "timestamptz", is_nullable: false, is_primary_key: false, default_value: "now()", ordinal_position: 9, is_auto_generated: false },
+  { name: "updated_at", data_type: "timestamptz", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 10, is_auto_generated: false },
 ];
 
 const names = ["Alice Johnson", "Bob Smith", "Charlie Brown", "Diana Prince", "Eve Wilson", "Frank Miller", "Grace Lee", "Henry Davis", "Ivy Chen", "Jack Taylor", "Karen White", "Leo Martinez", "Mia Anderson", "Noah Garcia", "Olivia Thomas"];
@@ -121,14 +121,14 @@ function generateUserRows(count: number): unknown[][] {
 }
 
 const ordersColumns: ColumnInfo[] = [
-  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: "nextval('orders_id_seq')", ordinal_position: 1 },
-  { name: "user_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2 },
-  { name: "status", data_type: "varchar(50)", is_nullable: false, is_primary_key: false, default_value: "'pending'", ordinal_position: 3 },
-  { name: "total_amount", data_type: "numeric(10,2)", is_nullable: false, is_primary_key: false, default_value: "0", ordinal_position: 4 },
-  { name: "currency", data_type: "varchar(3)", is_nullable: false, is_primary_key: false, default_value: "'USD'", ordinal_position: 5 },
-  { name: "shipping_address", data_type: "text", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 6 },
-  { name: "notes", data_type: "text", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 7 },
-  { name: "created_at", data_type: "timestamptz", is_nullable: false, is_primary_key: false, default_value: "now()", ordinal_position: 8 },
+  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: "nextval('orders_id_seq')", ordinal_position: 1, is_auto_generated: true },
+  { name: "user_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2, is_auto_generated: false },
+  { name: "status", data_type: "varchar(50)", is_nullable: false, is_primary_key: false, default_value: "'pending'", ordinal_position: 3, is_auto_generated: false },
+  { name: "total_amount", data_type: "numeric(10,2)", is_nullable: false, is_primary_key: false, default_value: "0", ordinal_position: 4, is_auto_generated: false },
+  { name: "currency", data_type: "varchar(3)", is_nullable: false, is_primary_key: false, default_value: "'USD'", ordinal_position: 5, is_auto_generated: false },
+  { name: "shipping_address", data_type: "text", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 6, is_auto_generated: false },
+  { name: "notes", data_type: "text", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 7, is_auto_generated: false },
+  { name: "created_at", data_type: "timestamptz", is_nullable: false, is_primary_key: false, default_value: "now()", ordinal_position: 8, is_auto_generated: false },
 ];
 
 const statuses = ["pending", "processing", "shipped", "delivered", "cancelled"];
@@ -147,23 +147,23 @@ function generateOrderRows(count: number): unknown[][] {
 }
 
 const productsColumns: ColumnInfo[] = [
-  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: null, ordinal_position: 1 },
-  { name: "name", data_type: "varchar(255)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2 },
-  { name: "category_id", data_type: "integer", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 3 },
+  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: null, ordinal_position: 1, is_auto_generated: true },
+  { name: "name", data_type: "varchar(255)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2, is_auto_generated: false },
+  { name: "category_id", data_type: "integer", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 3, is_auto_generated: false },
 ];
 const categoriesColumns: ColumnInfo[] = [
-  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: null, ordinal_position: 1 },
-  { name: "name", data_type: "varchar(100)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2 },
+  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: null, ordinal_position: 1, is_auto_generated: true },
+  { name: "name", data_type: "varchar(100)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2, is_auto_generated: false },
 ];
 const orderItemsColumns: ColumnInfo[] = [
-  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: null, ordinal_position: 1 },
-  { name: "order_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2 },
-  { name: "product_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 3 },
+  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: null, ordinal_position: 1, is_auto_generated: true },
+  { name: "order_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2, is_auto_generated: false },
+  { name: "product_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 3, is_auto_generated: false },
 ];
 const reviewsColumns: ColumnInfo[] = [
-  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: null, ordinal_position: 1 },
-  { name: "user_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2 },
-  { name: "product_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 3 },
+  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: null, ordinal_position: 1, is_auto_generated: true },
+  { name: "user_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2, is_auto_generated: false },
+  { name: "product_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 3, is_auto_generated: false },
 ];
 
 const columnsMap: Record<string, ColumnInfo[]> = {

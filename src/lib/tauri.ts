@@ -154,6 +154,7 @@ export interface ColumnInfo {
   is_primary_key: boolean;
   default_value: string | null;
   ordinal_position: number;
+  is_auto_generated: boolean;
 }
 
 export interface TableData {

@@ -181,7 +181,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setShowSearch(true);
         setTimeout(() => searchInputRef.current?.focus(), 0);
@@ -195,13 +195,15 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     return () => document.removeEventListener("keydown", handler);
   }, [showSearch]);
 
-  const searchLower = searchQuery.toLowerCase();
+  const searchTokens = searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
 
   const cellMatches = (value: unknown): boolean => {
-    if (!searchQuery) return false;
-    if (value === null || value === undefined) return "null".includes(searchLower);
-    const str = typeof value === "object" ? JSON.stringify(value) : String(value);
-    return str.toLowerCase().includes(searchLower);
+    if (!searchTokens.length) return false;
+    const str = (value === null || value === undefined)
+      ? "null"
+      : typeof value === "object" ? JSON.stringify(value) : String(value);
+    const lower = str.toLowerCase();
+    return searchTokens.every((t) => lower.includes(t));
   };
 
   const searchMatchCount = useMemo(() => {
@@ -298,6 +300,11 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       ...prev,
       inserts: [...prev.inserts, { values }],
     }));
+    requestAnimationFrame(() => {
+      if (tableRef.current) {
+        tableRef.current.scrollTop = 0;
+      }
+    });
   };
 
   const handleDeleteRow = (rowIndex: number) => {
@@ -643,7 +650,11 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
             </tr>
           </thead>
           <tbody>
-            {editingRows.map((row, rowIdx) => {
+            {[
+              ...editingRows.map((_, i) => i).filter((i) => i >= originalRowCount),
+              ...editingRows.map((_, i) => i).filter((i) => i < originalRowCount),
+            ].map((rowIdx) => {
+              const row = editingRows[rowIdx];
               const isInserted = rowIdx >= originalRowCount;
               const pkKey = !isInserted ? getPkKey(rowIdx) : "";
               const isDeleted = !isInserted && changes.deletedKeys.has(pkKey);
@@ -666,7 +677,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
                     onClick={() => setDetailRowIdx(rowIdx)}
                     title="Click to open row detail"
                   >
-                    {page * PAGE_SIZE + rowIdx + 1}
+                    {isInserted ? "+" : page * PAGE_SIZE + rowIdx + 1}
                   </td>
                   {visibleIndices.map((colIdx) => {
                     const col = data.columns[colIdx];
@@ -758,6 +769,16 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         <div
           className="context-menu"
           style={{ left: rowContextMenu.x, top: rowContextMenu.y }}
+          ref={(el) => {
+            if (!el) return;
+            const rect = el.getBoundingClientRect();
+            if (rect.bottom > window.innerHeight) {
+              el.style.top = `${rowContextMenu.y - rect.height}px`;
+            }
+            if (rect.right > window.innerWidth) {
+              el.style.left = `${rowContextMenu.x - rect.width}px`;
+            }
+          }}
         >
           <button
             className="context-menu-item"

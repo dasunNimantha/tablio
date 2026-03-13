@@ -187,7 +187,7 @@ impl DatabaseDriver for MysqlDriver {
         table: &str,
     ) -> Result<Vec<ColumnInfo>> {
         let sql = "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY, \
-                   COLUMN_DEFAULT, ORDINAL_POSITION \
+                   COLUMN_DEFAULT, ORDINAL_POSITION, EXTRA \
                    FROM information_schema.COLUMNS \
                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
                    ORDER BY ORDINAL_POSITION";
@@ -202,6 +202,7 @@ impl DatabaseDriver for MysqlDriver {
             .map(|r| {
                 let nullable_str: String = r.get("IS_NULLABLE");
                 let key: String = r.get("COLUMN_KEY");
+                let extra: String = r.try_get("EXTRA").unwrap_or_default();
                 ColumnInfo {
                     name: r.get("COLUMN_NAME"),
                     data_type: r.get("DATA_TYPE"),
@@ -209,6 +210,7 @@ impl DatabaseDriver for MysqlDriver {
                     is_primary_key: key == "PRI",
                     default_value: r.try_get("COLUMN_DEFAULT").ok(),
                     ordinal_position: r.get("ORDINAL_POSITION"),
+                    is_auto_generated: extra.contains("auto_increment") || extra.contains("VIRTUAL GENERATED") || extra.contains("STORED GENERATED"),
                 }
             })
             .collect())
@@ -331,7 +333,17 @@ impl DatabaseDriver for MysqlDriver {
                 };
                 format!("ORDER BY {} {}", quote_ident(&s.column), dir)
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                let pk_cols: Vec<String> = columns.iter()
+                    .filter(|c| c.is_primary_key)
+                    .map(|c| quote_ident(&c.name))
+                    .collect();
+                if pk_cols.is_empty() {
+                    String::new()
+                } else {
+                    format!("ORDER BY {}", pk_cols.join(", "))
+                }
+            });
 
         let count_sql = format!(
             "SELECT COUNT(*) as cnt FROM {}.{} {}",

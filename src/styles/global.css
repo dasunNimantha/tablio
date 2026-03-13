@@ -80,6 +80,8 @@ body,
 #root {
   height: 100%;
   overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 ::-webkit-scrollbar {
@@ -419,6 +421,25 @@ select {
 
 .spin {
   animation: spin 1s linear infinite;
+}
+
+/* Re-enable text selection for content areas where copy is useful */
+input,
+textarea,
+.cell-value,
+.cell-input,
+.query-error,
+.grid-error-banner,
+.dr-log-line,
+.json-tree,
+.info-table td,
+.activity-query,
+.query-history-sql,
+.confirm-dialog p,
+.empty-state p,
+.cm-editor {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 @keyframes fadeIn {
