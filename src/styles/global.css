@@ -1,20 +1,78 @@
-:root {
-  --bg-primary: #1e1e22;
-  --bg-secondary: #17171b;
-  --bg-tertiary: #131316;
-  --bg-surface: #26262c;
-  --bg-elevated: #2e2e35;
-  --bg-hover: rgba(255, 255, 255, 0.055);
-  --bg-active: rgba(255, 255, 255, 0.09);
-  --bg-selected: rgba(99, 152, 255, 0.12);
+@font-face {
+  font-family: "Fira Sans";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/FiraSans-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Fira Sans";
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/FiraSans-Medium.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Fira Sans";
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/FiraSans-SemiBold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Fira Sans";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/FiraSans-Bold.woff2") format("woff2");
+}
 
-  --text-primary: #ececf0;
-  --text-secondary: #a0a0ab;
-  --text-muted: #636370;
+@font-face {
+  font-family: "JetBrains Mono";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/JetBrainsMono-Medium.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/JetBrainsMono-SemiBold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+}
+
+:root {
+  --bg-primary: #1c1c20;
+  --bg-secondary: #232328;
+  --bg-tertiary: #18181c;
+  --bg-surface: #2a2a30;
+  --bg-elevated: #323238;
+  --bg-hover: rgba(255, 255, 255, 0.07);
+  --bg-active: rgba(255, 255, 255, 0.12);
+  --bg-selected: rgba(99, 152, 255, 0.16);
+
+  --text-primary: #e8e8ec;
+  --text-secondary: #b0b0bb;
+  --text-muted: #7c7c8a;
   --text-inverse: #111114;
 
-  --border: rgba(255, 255, 255, 0.07);
-  --border-subtle: rgba(255, 255, 255, 0.04);
+  --border: rgba(255, 255, 255, 0.12);
+  --border-subtle: rgba(255, 255, 255, 0.07);
   --border-focus: #6398ff;
 
   --accent: #6398ff;
@@ -52,10 +110,10 @@
   --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.55);
   --shadow-dropdown: 0 8px 28px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.05);
 
-  --cell-modified: rgba(245, 183, 49, 0.12);
-  --cell-inserted: rgba(61, 214, 140, 0.12);
-  --cell-deleted: rgba(240, 100, 100, 0.10);
-  --cell-null: #636370;
+  --cell-modified: rgba(245, 183, 49, 0.15);
+  --cell-inserted: rgba(61, 214, 140, 0.15);
+  --cell-deleted: rgba(240, 100, 100, 0.13);
+  --cell-null: #7c7c8a;
 
   --gutter: 14px;
   --gutter-sm: 8px;
@@ -339,42 +397,7 @@ button {
   max-width: 340px;
 }
 
-[data-theme="light"] {
-  --bg-primary: #f7f7f9;
-  --bg-secondary: #eeeef1;
-  --bg-tertiary: #ffffff;
-  --bg-surface: #ffffff;
-  --bg-elevated: #f2f2f5;
-  --bg-hover: rgba(0, 0, 0, 0.04);
-  --bg-active: rgba(0, 0, 0, 0.07);
-  --bg-selected: rgba(59, 130, 246, 0.08);
-
-  --text-primary: #111114;
-  --text-secondary: #4a4a55;
-  --text-muted: #9494a0;
-  --text-inverse: #fafafa;
-
-  --border: rgba(0, 0, 0, 0.09);
-  --border-subtle: rgba(0, 0, 0, 0.05);
-  --border-focus: #3b82f6;
-
-  --accent: #3b82f6;
-  --accent-hover: #2563eb;
-  --accent-muted: rgba(59, 130, 246, 0.10);
-  --accent-soft: rgba(59, 130, 246, 0.05);
-
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
-  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.08);
-  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.12);
-  --shadow-dropdown: 0 8px 28px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.06);
-
-  --cell-modified: rgba(234, 179, 8, 0.10);
-  --cell-inserted: rgba(34, 197, 94, 0.10);
-  --cell-deleted: rgba(239, 68, 68, 0.10);
-  --cell-null: #9494a0;
-
-  color-scheme: light;
-}
+/* Light/dark theme variables are applied dynamically from src/lib/themes.ts */
 
 .statusbar {
   display: flex;
@@ -392,6 +415,21 @@ button {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.zoom-indicator {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  cursor: pointer;
+  animation: zoomFadeIn 0.15s ease;
+}
+
+@keyframes zoomFadeIn {
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
 }
 
 .statusbar .btn-icon {
@@ -445,4 +483,79 @@ textarea,
 @keyframes fadeIn {
   from { opacity: 0; transform: scale(0.97); }
   to { opacity: 1; transform: scale(1); }
+}
+
+/* ── Theme Picker ── */
+
+.theme-picker-wrapper {
+  position: relative;
+}
+
+.theme-picker-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  width: 180px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-dropdown);
+  padding: 4px;
+  z-index: 1000;
+  animation: fadeIn 0.12s ease;
+  overflow-y: auto;
+}
+
+.theme-picker-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.theme-picker-group + .theme-picker-group {
+  margin-top: 2px;
+  padding-top: 2px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.theme-picker-group-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  padding: 4px 8px 2px;
+}
+
+.theme-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.theme-picker-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.theme-picker-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.theme-picker-item.active:hover {
+  background: var(--accent-soft);
+}
+
+.theme-picker-name {
+  flex: 1;
+  text-align: left;
 }

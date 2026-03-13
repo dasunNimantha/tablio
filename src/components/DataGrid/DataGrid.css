@@ -138,7 +138,6 @@
   font-size: 11px;
   width: 54px;
   min-width: 54px;
-  background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   position: sticky;
   left: 0;
@@ -167,12 +166,16 @@ th.grid-row-number {
   cursor: pointer;
 }
 
-.grid-table tbody tr:hover td {
-  background: var(--bg-hover);
+.grid-table tbody tr td {
+  background: var(--bg-secondary);
 }
 
-.grid-table tbody tr:hover td.grid-row-number {
-  background: var(--bg-elevated);
+.grid-table tbody tr:nth-child(even) td {
+  background: var(--bg-primary);
+}
+
+.grid-table tbody tr:hover td {
+  background: var(--bg-hover);
 }
 
 .grid-table tbody tr.row-selected td {

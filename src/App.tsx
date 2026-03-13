@@ -12,7 +12,8 @@ import { KeyboardShortcuts } from "./components/KeyboardShortcuts/KeyboardShortc
 import { ToastContainer } from "./components/Toast/Toast";
 import { useConnectionStore } from "./stores/connectionStore";
 import { useTabStore } from "./stores/tabStore";
-import { Database, Plus, Sun, Moon, Keyboard } from "lucide-react";
+import { Database, Plus, Keyboard, Palette, Check } from "lucide-react";
+import { themes, getThemeById, applyTheme } from "./lib/themes";
 
 interface CreateTableTarget {
   connectionId: string;
@@ -57,8 +58,16 @@ export default function App() {
   const [backupTarget, setBackupTarget] = useState<BackupTarget | null>(null);
   const [dumpRestoreTarget, setDumpRestoreTarget] = useState<DumpRestoreTarget | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
-  const [theme, setTheme] = useState<"dark" | "light">(() => {
-    return (localStorage.getItem("dbstudio-theme") as "dark" | "light") || "dark";
+  const [showZoom, setShowZoom] = useState(false);
+  const [showThemePicker, setShowThemePicker] = useState(false);
+  const zoomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const themePickerRef = useRef<HTMLDivElement>(null);
+  const [themeId, setThemeId] = useState<string>(() => {
+    return localStorage.getItem("dbstudio-theme") || "dark";
+  });
+  const [zoom, setZoom] = useState<number>(() => {
+    const saved = localStorage.getItem("dbstudio-zoom");
+    return saved ? parseFloat(saved) : 110;
   });
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem("dbstudio-sidebar-width");
@@ -93,9 +102,36 @@ export default function App() {
 
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem("dbstudio-theme", theme);
-  }, [theme]);
+    const t = getThemeById(themeId);
+    applyTheme(t);
+    localStorage.setItem("dbstudio-theme", themeId);
+  }, [themeId]);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (themePickerRef.current && !themePickerRef.current.contains(e.target as Node)) {
+        setShowThemePicker(false);
+      }
+    };
+    if (showThemePicker) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showThemePicker]);
+
+  const applyZoom = useCallback((level: number) => {
+    const clamped = Math.min(200, Math.max(50, Math.round(level)));
+    setZoom(clamped);
+    localStorage.setItem("dbstudio-zoom", String(clamped));
+    document.documentElement.style.zoom = `${clamped}%`;
+    setShowZoom(true);
+    if (zoomTimerRef.current) clearTimeout(zoomTimerRef.current);
+    zoomTimerRef.current = setTimeout(() => setShowZoom(false), 1500);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.style.zoom = `${zoom}%`;
+  }, []);
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
@@ -103,10 +139,36 @@ export default function App() {
         e.preventDefault();
         setShowShortcuts((prev) => !prev);
       }
+      if (e.ctrlKey && (e.key === "=" || e.key === "+")) {
+        e.preventDefault();
+        setZoom((prev) => { const n = Math.min(200, prev + 10); applyZoom(n); return n; });
+      }
+      if (e.ctrlKey && e.key === "-") {
+        e.preventDefault();
+        setZoom((prev) => { const n = Math.max(50, prev - 10); applyZoom(n); return n; });
+      }
+      if (e.ctrlKey && e.key === "0") {
+        e.preventDefault();
+        applyZoom(110);
+      }
+    };
+    const handleWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      setZoom((prev) => {
+        const delta = e.deltaY > 0 ? -10 : 10;
+        const n = Math.min(200, Math.max(50, prev + delta));
+        applyZoom(n);
+        return n;
+      });
     };
     window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, []);
+    window.addEventListener("wheel", handleWheel, { passive: false });
+    return () => {
+      window.removeEventListener("keydown", handleKey);
+      window.removeEventListener("wheel", handleWheel);
+    };
+  }, [applyZoom]);
 
   return (
     <div className="app-layout">
@@ -154,6 +216,15 @@ export default function App() {
         <div className="statusbar">
           <div className="statusbar-left" />
           <div className="statusbar-right">
+            {showZoom && (
+              <span
+                className="zoom-indicator"
+                onClick={() => applyZoom(110)}
+                title="Reset Zoom (Ctrl+0)"
+              >
+                {zoom}%
+              </span>
+            )}
             <button
               className="btn-icon"
               onClick={() => setShowShortcuts(true)}
@@ -161,13 +232,45 @@ export default function App() {
             >
               <Keyboard size={14} />
             </button>
-            <button
-              className="btn-icon"
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-              title="Toggle Theme"
-            >
-              {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
-            </button>
+            <div className="theme-picker-wrapper" ref={themePickerRef}>
+              <button
+                className="btn-icon"
+                onClick={() => setShowThemePicker((p) => !p)}
+                title="Change Theme"
+              >
+                <Palette size={14} />
+              </button>
+              {showThemePicker && (
+                <div className="theme-picker-popover">
+                  <div className="theme-picker-group">
+                    <div className="theme-picker-group-label">Dark</div>
+                    {themes.filter((t) => t.group === "dark").map((t) => (
+                      <button
+                        key={t.id}
+                        className={`theme-picker-item${t.id === themeId ? " active" : ""}`}
+                        onClick={() => { setThemeId(t.id); setShowThemePicker(false); }}
+                      >
+                        <span className="theme-picker-name">{t.name}</span>
+                        {t.id === themeId && <Check size={13} />}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="theme-picker-group">
+                    <div className="theme-picker-group-label">Light</div>
+                    {themes.filter((t) => t.group === "light").map((t) => (
+                      <button
+                        key={t.id}
+                        className={`theme-picker-item${t.id === themeId ? " active" : ""}`}
+                        onClick={() => { setThemeId(t.id); setShowThemePicker(false); }}
+                      >
+                        <span className="theme-picker-name">{t.name}</span>
+                        {t.id === themeId && <Check size={13} />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
