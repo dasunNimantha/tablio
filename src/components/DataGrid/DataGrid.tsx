@@ -669,7 +669,8 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
                   ].filter(Boolean).join(" ")}
                   onContextMenu={(e) => {
                     e.preventDefault();
-                    setRowContextMenu({ x: e.clientX, y: e.clientY, rowIdx });
+                    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+                    setRowContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx });
                   }}
                 >
                   <td

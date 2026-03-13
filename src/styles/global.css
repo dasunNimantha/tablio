@@ -29,31 +29,45 @@
 
 @font-face {
   font-family: "JetBrains Mono";
+  font-weight: 200;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/JetBrainsMonoNF-ExtraLight.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/JetBrainsMonoNF-Light.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
   font-weight: 400;
   font-style: normal;
   font-display: swap;
-  src: url("../assets/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  src: url("../assets/fonts/JetBrainsMonoNF-Regular.woff2") format("woff2");
 }
 @font-face {
   font-family: "JetBrains Mono";
   font-weight: 500;
   font-style: normal;
   font-display: swap;
-  src: url("../assets/fonts/JetBrainsMono-Medium.woff2") format("woff2");
+  src: url("../assets/fonts/JetBrainsMonoNF-Medium.woff2") format("woff2");
 }
 @font-face {
   font-family: "JetBrains Mono";
   font-weight: 600;
   font-style: normal;
   font-display: swap;
-  src: url("../assets/fonts/JetBrainsMono-SemiBold.woff2") format("woff2");
+  src: url("../assets/fonts/JetBrainsMonoNF-SemiBold.woff2") format("woff2");
 }
 @font-face {
   font-family: "JetBrains Mono";
   font-weight: 700;
   font-style: normal;
   font-display: swap;
-  src: url("../assets/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+  src: url("../assets/fonts/JetBrainsMonoNF-Bold.woff2") format("woff2");
 }
 
 :root {
@@ -125,6 +139,10 @@
   background-color: var(--bg-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+[data-theme="dark"] .grid-table {
+  font-weight: 250;
 }
 
 * {

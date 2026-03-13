@@ -66,6 +66,7 @@
   border-spacing: 0;
   font-size: 13px;
   font-family: var(--font-mono);
+  font-weight: 400;
   table-layout: auto;
 }
 

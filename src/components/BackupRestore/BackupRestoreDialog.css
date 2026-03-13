@@ -25,6 +25,7 @@
   cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
   margin-bottom: -1px;
+  outline: none;
 }
 
 .backup-tab:hover {

@@ -462,7 +462,8 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
   const handleContextMenu = (e: React.MouseEvent, node: TreeNode) => {
     e.preventDefault();
     e.stopPropagation();
-    setContextMenu({ x: e.clientX, y: e.clientY, node });
+    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    setContextMenu({ x: e.clientX / z, y: e.clientY / z, node });
   };
 
   const renderNode = (node: TreeNode, depth: number) => {

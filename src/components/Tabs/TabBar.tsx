@@ -16,7 +16,8 @@ export function TabBar() {
 
   const handleContextMenu = (e: React.MouseEvent, tabId: string) => {
     e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY, tabId });
+    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    setContextMenu({ x: e.clientX / z, y: e.clientY / z, tabId });
   };
 
   const handleDragStart = (e: React.DragEvent, idx: number) => {
