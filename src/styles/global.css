@@ -444,6 +444,26 @@ button {
   gap: 4px;
 }
 
+.statusbar-resource {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+}
+
+.statusbar-resource:hover {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+
+.statusbar-left {
+  gap: 2px;
+}
+
 .zoom-indicator {
   font-size: 13px;
   color: var(--text-secondary);

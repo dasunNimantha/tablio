@@ -1380,42 +1380,174 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_quote_ident() {
+    fn quote_ident_simple() {
         assert_eq!(quote_ident("col"), r#""col""#);
+    }
+
+    #[test]
+    fn quote_ident_with_double_quote() {
         assert_eq!(quote_ident(r#"col"umn"#), r#""col""umn""#);
     }
 
     #[test]
-    fn test_filter_is_unsafe() {
-        assert!(!filter_is_unsafe(""));
-        assert!(!filter_is_unsafe(r#""id" = 1"#));
-        assert!(filter_is_unsafe("x; DROP TABLE t"));
-        assert!(filter_is_unsafe("x -- comment"));
-        assert!(filter_is_unsafe("x /* comment */"));
+    fn quote_ident_empty() {
+        assert_eq!(quote_ident(""), r#""""#);
     }
 
     #[test]
-    fn test_sql_fragment_is_unsafe() {
+    fn quote_ident_spaces() {
+        assert_eq!(quote_ident("my column"), r#""my column""#);
+    }
+
+    #[test]
+    fn quote_ident_keywords() {
+        assert_eq!(quote_ident("select"), r#""select""#);
+        assert_eq!(quote_ident("table"), r#""table""#);
+    }
+
+    #[test]
+    fn quote_ident_multiple_quotes() {
+        assert_eq!(quote_ident(r#"a""b"#), r#""a""""b""#);
+    }
+
+    #[test]
+    fn filter_safe_empty() {
+        assert!(!filter_is_unsafe(""));
+    }
+
+    #[test]
+    fn filter_safe_simple_expression() {
+        assert!(!filter_is_unsafe(r#""id" = 1"#));
+        assert!(!filter_is_unsafe(r#""name" LIKE '%test%'"#));
+        assert!(!filter_is_unsafe(r#""status" IN ('active', 'idle')"#));
+    }
+
+    #[test]
+    fn filter_unsafe_semicolon() {
+        assert!(filter_is_unsafe("x; DROP TABLE t"));
+    }
+
+    #[test]
+    fn filter_unsafe_line_comment() {
+        assert!(filter_is_unsafe("x -- comment"));
+    }
+
+    #[test]
+    fn filter_unsafe_block_comment() {
+        assert!(filter_is_unsafe("x /* comment */"));
+        assert!(filter_is_unsafe("/**/"));
+    }
+
+    #[test]
+    fn filter_safe_with_whitespace() {
+        assert!(!filter_is_unsafe("  \"id\" > 10  "));
+    }
+
+    #[test]
+    fn sql_fragment_safe_types() {
         assert!(!sql_fragment_is_unsafe("integer"));
         assert!(!sql_fragment_is_unsafe("varchar(255)"));
+        assert!(!sql_fragment_is_unsafe("timestamp with time zone"));
+        assert!(!sql_fragment_is_unsafe("numeric(10, 2)"));
+        assert!(!sql_fragment_is_unsafe("boolean"));
+    }
+
+    #[test]
+    fn sql_fragment_unsafe_injection_with_semicolon() {
         assert!(sql_fragment_is_unsafe("int); DROP TABLE t; --"));
+    }
+
+    #[test]
+    fn sql_fragment_unsafe_single_quote() {
         assert!(sql_fragment_is_unsafe("default 'x'"));
     }
 
     #[test]
-    fn test_json_to_sql_literal() {
+    fn sql_fragment_unsafe_block_comment() {
+        assert!(sql_fragment_is_unsafe("int /* evil */"));
+    }
+
+    #[test]
+    fn sql_fragment_safe_empty() {
+        assert!(!sql_fragment_is_unsafe(""));
+    }
+
+    #[test]
+    fn json_to_sql_null() {
         assert_eq!(json_to_sql_literal(&serde_json::Value::Null), "NULL");
+    }
+
+    #[test]
+    fn json_to_sql_bool() {
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Bool(true)), "true");
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Bool(false)), "false");
+    }
+
+    #[test]
+    fn json_to_sql_integer() {
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Number(42i64.into())), "42");
+    }
+
+    #[test]
+    fn json_to_sql_float() {
+        let n = serde_json::Number::from_f64(3.14).unwrap();
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Number(n)), "3.14");
+    }
+
+    #[test]
+    fn json_to_sql_string_simple() {
         assert_eq!(
-            json_to_sql_literal(&serde_json::Value::Bool(true)),
-            "true"
+            json_to_sql_literal(&serde_json::Value::String("hello".into())),
+            "'hello'"
         );
-        assert_eq!(
-            json_to_sql_literal(&serde_json::Value::Number(42i64.into())),
-            "42"
-        );
+    }
+
+    #[test]
+    fn json_to_sql_string_escapes_quotes() {
         assert_eq!(
             json_to_sql_literal(&serde_json::Value::String("O'Brien".into())),
             "'O''Brien'"
         );
+    }
+
+    #[test]
+    fn json_to_sql_string_multiple_quotes() {
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::String("it''s".into())),
+            "'it''''s'"
+        );
+    }
+
+    #[test]
+    fn json_to_sql_string_empty() {
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::String("".into())),
+            "''"
+        );
+    }
+
+    #[test]
+    fn json_to_sql_array() {
+        let val = serde_json::json!([1, 2, 3]);
+        let result = json_to_sql_literal(&val);
+        assert!(result.starts_with("'"));
+        assert!(result.ends_with("'"));
+    }
+
+    #[test]
+    fn json_to_sql_object() {
+        let val = serde_json::json!({"key": "value"});
+        let result = json_to_sql_literal(&val);
+        assert!(result.starts_with("'"));
+    }
+
+    #[test]
+    fn json_to_sql_negative_number() {
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Number((-5i64).into())), "-5");
+    }
+
+    #[test]
+    fn json_to_sql_zero() {
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Number(0i64.into())), "0");
     }
 }

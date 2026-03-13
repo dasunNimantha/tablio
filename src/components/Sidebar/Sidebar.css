@@ -187,10 +187,13 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: auto;
-  flex-shrink: 0;
+  position: absolute;
+  right: 4px;
+  top: 0;
+  height: 34px;
   opacity: 0;
   transition: opacity 0.15s;
+  z-index: 1;
 }
 
 .tree-conn-row:hover .tree-conn-actions,

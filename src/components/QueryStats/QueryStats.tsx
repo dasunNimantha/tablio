@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { api, QueryStatEntry, QueryStatsResponse } from "../../lib/tauri";
+import { formatQueryDuration as formatDuration, cacheHitClass, speedClass } from "../../lib/dashboardUtils";
 import {
   Loader2,
   RefreshCw,
@@ -37,27 +38,8 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
 
 const PAGE_SIZE = 50;
 
-function formatDuration(ms: number): string {
-  if (ms < 1) return `${(ms * 1000).toFixed(0)}µs`;
-  if (ms < 1000) return `${ms.toFixed(1)}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(2)}s`;
-  return `${(ms / 60000).toFixed(1)}m`;
-}
-
 function formatNumber(n: number): string {
   return n.toLocaleString();
-}
-
-function cacheHitClass(ratio: number): string {
-  if (ratio >= 90) return "qs-cache-good";
-  if (ratio >= 70) return "qs-cache-warn";
-  return "qs-cache-bad";
-}
-
-function speedClass(meanMs: number): string {
-  if (meanMs >= 5000) return "qs-speed-slow";
-  if (meanMs >= 1000) return "qs-speed-warn";
-  return "";
 }
 
 export function QueryStats({ connectionId }: Props) {

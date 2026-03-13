@@ -693,4 +693,7 @@ export const api = {
 
   dumpAndRestore: (request: DumpRestoreRequest): Promise<string> =>
     invoke("dump_and_restore", { request }),
+
+  getAppResourceUsage: (): Promise<{ memory_mb: number; cpu_percent: number }> =>
+    invoke("get_app_resource_usage"),
 };

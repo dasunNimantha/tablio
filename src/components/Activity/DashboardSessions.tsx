@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { api, ServerActivity } from "../../lib/tauri";
+import { formatDuration, filterSessions } from "../../lib/dashboardUtils";
 import { Loader2, XCircle, Search, Users } from "lucide-react";
 import { ConfirmDialog } from "../ConfirmDialog";
 
@@ -60,28 +61,9 @@ export function DashboardSessions({ connectionId, paused }: Props) {
     }
   };
 
-  const filtered = useMemo(() => {
-    if (!search.trim()) return activities;
-    const q = search.toLowerCase();
-    return activities.filter(
-      (a) =>
-        a.pid.toLowerCase().includes(q) ||
-        a.user.toLowerCase().includes(q) ||
-        a.database.toLowerCase().includes(q) ||
-        a.query.toLowerCase().includes(q) ||
-        a.state.toLowerCase().includes(q) ||
-        (a.client_addr && a.client_addr.toLowerCase().includes(q))
-    );
-  }, [activities, search]);
+  const filtered = useMemo(() => filterSessions(activities, search), [activities, search]);
 
   const activeCount = activities.filter((a) => a.state === "active").length;
-
-  const formatDuration = (ms: number | null): string => {
-    if (ms === null) return "-";
-    if (ms < 1000) return `${Math.round(ms)}ms`;
-    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-    return `${(ms / 60000).toFixed(1)}m`;
-  };
 
   if (loading) {
     return (

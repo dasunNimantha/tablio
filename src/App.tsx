@@ -12,8 +12,9 @@ import { KeyboardShortcuts } from "./components/KeyboardShortcuts/KeyboardShortc
 import { ToastContainer } from "./components/Toast/Toast";
 import { useConnectionStore } from "./stores/connectionStore";
 import { useTabStore } from "./stores/tabStore";
-import { Database, Plus, Keyboard, Palette, Check } from "lucide-react";
+import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick } from "lucide-react";
 import { themes, getThemeById, applyTheme } from "./lib/themes";
+import { api } from "./lib/tauri";
 
 interface CreateTableTarget {
   connectionId: string;
@@ -96,9 +97,23 @@ export default function App() {
     document.addEventListener("mouseup", onUp);
   }, []);
 
+  const [resourceUsage, setResourceUsage] = useState({ memory_mb: 0, cpu_percent: 0 });
+
   useEffect(() => {
     loadConnections();
   }, [loadConnections]);
+
+  useEffect(() => {
+    let alive = true;
+    const poll = () => {
+      api.getAppResourceUsage().then((r) => {
+        if (alive) setResourceUsage(r);
+      }).catch(() => {});
+    };
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
 
 
   useEffect(() => {
@@ -214,7 +229,18 @@ export default function App() {
           </div>
         )}
         <div className="statusbar">
-          <div className="statusbar-left" />
+          <div className="statusbar-left">
+            <span className="statusbar-resource" title="Memory Usage">
+              <MemoryStick size={13} />
+              {resourceUsage.memory_mb < 1024
+                ? `${resourceUsage.memory_mb.toFixed(1)} MB`
+                : `${(resourceUsage.memory_mb / 1024).toFixed(2)} GB`}
+            </span>
+            <span className="statusbar-resource" title="CPU Usage">
+              <Cpu size={13} />
+              {resourceUsage.cpu_percent.toFixed(1)}%
+            </span>
+          </div>
           <div className="statusbar-right">
             {showZoom && (
               <span

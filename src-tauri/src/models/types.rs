@@ -500,3 +500,202 @@ pub struct DumpRestoreRequest {
     pub target_connection_id: String,
     pub target_database: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_type_serializes_lowercase() {
+        assert_eq!(serde_json::to_string(&DbType::Postgres).unwrap(), r#""postgres""#);
+        assert_eq!(serde_json::to_string(&DbType::Mysql).unwrap(), r#""mysql""#);
+        assert_eq!(serde_json::to_string(&DbType::Sqlite).unwrap(), r#""sqlite""#);
+    }
+
+    #[test]
+    fn db_type_deserializes_lowercase() {
+        let p: DbType = serde_json::from_str(r#""postgres""#).unwrap();
+        matches!(p, DbType::Postgres);
+        let m: DbType = serde_json::from_str(r#""mysql""#).unwrap();
+        matches!(m, DbType::Mysql);
+    }
+
+    #[test]
+    fn db_type_rejects_unknown() {
+        let r: Result<DbType, _> = serde_json::from_str(r#""oracle""#);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn sort_direction_serializes() {
+        assert_eq!(serde_json::to_string(&SortDirection::Asc).unwrap(), r#""asc""#);
+        assert_eq!(serde_json::to_string(&SortDirection::Desc).unwrap(), r#""desc""#);
+    }
+
+    #[test]
+    fn connection_config_defaults() {
+        let json = r##"{
+            "id": "1", "name": "test", "db_type": "postgres",
+            "host": "localhost", "port": 5432, "user": "u",
+            "password": "p", "database": "db", "color": "#fff",
+            "ssl": false
+        }"##;
+        let config: ConnectionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.ssh_port, 22);
+        assert!(!config.ssh_enabled);
+        assert_eq!(config.ssh_host, "");
+        assert!(config.group.is_none());
+    }
+
+    #[test]
+    fn connection_config_with_ssh() {
+        let json = r##"{
+            "id": "1", "name": "test", "db_type": "postgres",
+            "host": "localhost", "port": 5432, "user": "u",
+            "password": "p", "database": "db", "color": "#fff",
+            "ssl": false, "ssh_enabled": true, "ssh_host": "bastion",
+            "ssh_port": 2222, "ssh_user": "admin"
+        }"##;
+        let config: ConnectionConfig = serde_json::from_str(json).unwrap();
+        assert!(config.ssh_enabled);
+        assert_eq!(config.ssh_host, "bastion");
+        assert_eq!(config.ssh_port, 2222);
+        assert_eq!(config.ssh_user, "admin");
+    }
+
+    #[test]
+    fn connection_config_new_id_is_uuid() {
+        let id = ConnectionConfig::new_id();
+        assert_eq!(id.len(), 36);
+        assert!(id.contains('-'));
+    }
+
+    #[test]
+    fn alter_table_op_tagged_enum() {
+        let op = AlterTableOperation::AddColumn {
+            column: ColumnDefinition {
+                name: "col".into(),
+                data_type: "text".into(),
+                is_nullable: true,
+                is_primary_key: false,
+                default_value: None,
+            },
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(json.contains(r#""op":"add_column""#));
+    }
+
+    #[test]
+    fn alter_table_op_rename() {
+        let json = r#"{"op": "rename_column", "old_name": "a", "new_name": "b"}"#;
+        let op: AlterTableOperation = serde_json::from_str(json).unwrap();
+        matches!(op, AlterTableOperation::RenameColumn { .. });
+    }
+
+    #[test]
+    fn alter_table_op_set_default_null() {
+        let json = r#"{"op": "set_default", "column_name": "c", "default_value": null}"#;
+        let op: AlterTableOperation = serde_json::from_str(json).unwrap();
+        if let AlterTableOperation::SetDefault { default_value, .. } = op {
+            assert!(default_value.is_none());
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn query_stats_response_unavailable() {
+        let json = r#"{"available": false, "message": "Extension not installed", "entries": []}"#;
+        let resp: QueryStatsResponse = serde_json::from_str(json).unwrap();
+        assert!(!resp.available);
+        assert_eq!(resp.message.unwrap(), "Extension not installed");
+        assert!(resp.entries.is_empty());
+    }
+
+    #[test]
+    fn database_stats_round_trip() {
+        let stats = DatabaseStats {
+            active_connections: 5,
+            idle_connections: 10,
+            idle_in_transaction: 1,
+            total_connections: 16,
+            xact_commit: 1000,
+            xact_rollback: 5,
+            tup_inserted: 100,
+            tup_updated: 50,
+            tup_deleted: 10,
+            tup_fetched: 5000,
+            blks_read: 200,
+            blks_hit: 9800,
+            timestamp_ms: 1234567890.0,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let back: DatabaseStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.active_connections, 5);
+        assert_eq!(back.timestamp_ms, 1234567890.0);
+    }
+
+    #[test]
+    fn saved_query_round_trip() {
+        let q = SavedQuery {
+            id: "q1".into(),
+            name: "My Query".into(),
+            sql: "SELECT 1".into(),
+            connection_id: Some("conn1".into()),
+            database: Some("mydb".into()),
+            created_at: 100,
+            updated_at: 200,
+        };
+        let json = serde_json::to_string(&q).unwrap();
+        let back: SavedQuery = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "q1");
+        assert_eq!(back.connection_id, Some("conn1".into()));
+    }
+
+    #[test]
+    fn saved_query_optional_fields() {
+        let json = r#"{"id":"1","name":"q","sql":"SELECT 1","connection_id":null,"database":null,"created_at":0,"updated_at":0}"#;
+        let q: SavedQuery = serde_json::from_str(json).unwrap();
+        assert!(q.connection_id.is_none());
+        assert!(q.database.is_none());
+    }
+
+    #[test]
+    fn lock_info_round_trip() {
+        let lock = LockInfo {
+            pid: 123,
+            locktype: "relation".into(),
+            database: "mydb".into(),
+            relation: "users".into(),
+            mode: "AccessShareLock".into(),
+            granted: true,
+            query: "SELECT * FROM users".into(),
+            user: "admin".into(),
+            state: "active".into(),
+            duration_ms: Some(150.5),
+        };
+        let json = serde_json::to_string(&lock).unwrap();
+        let back: LockInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pid, 123);
+        assert!(back.granted);
+        assert_eq!(back.duration_ms, Some(150.5));
+    }
+
+    #[test]
+    fn server_config_entry_round_trip() {
+        let entry = ServerConfigEntry {
+            name: "max_connections".into(),
+            setting: "100".into(),
+            unit: Some("connections".into()),
+            category: "Resource Usage".into(),
+            description: "Max connections".into(),
+            context: "postmaster".into(),
+            source: "configuration file".into(),
+            pending_restart: false,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: ServerConfigEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "max_connections");
+        assert!(!back.pending_restart);
+    }
+}

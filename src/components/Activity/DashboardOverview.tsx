@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { api, DatabaseStats } from "../../lib/tauri";
+import { computeRate, formatVal, makeLabels, type RatePoint } from "../../lib/dashboardUtils";
 import { Loader2, Activity, ArrowUpDown, Database, HardDrive } from "lucide-react";
 import {
   Chart as ChartJS,
@@ -21,58 +22,27 @@ interface Props {
 
 const MAX_POINTS = 60;
 
-interface RatePoint {
-  tps_commit: number;
-  tps_rollback: number;
-  tup_ins: number;
-  tup_upd: number;
-  tup_del: number;
-  tup_fetch: number;
-  blks_read: number;
-  blks_hit: number;
-}
-
-function computeRate(prev: DatabaseStats, cur: DatabaseStats): RatePoint {
-  const dt = (cur.timestamp_ms - prev.timestamp_ms) / 1000;
-  if (dt <= 0) {
-    return { tps_commit: 0, tps_rollback: 0, tup_ins: 0, tup_upd: 0, tup_del: 0, tup_fetch: 0, blks_read: 0, blks_hit: 0 };
-  }
-  return {
-    tps_commit: Math.max(0, (cur.xact_commit - prev.xact_commit) / dt),
-    tps_rollback: Math.max(0, (cur.xact_rollback - prev.xact_rollback) / dt),
-    tup_ins: Math.max(0, (cur.tup_inserted - prev.tup_inserted) / dt),
-    tup_upd: Math.max(0, (cur.tup_updated - prev.tup_updated) / dt),
-    tup_del: Math.max(0, (cur.tup_deleted - prev.tup_deleted) / dt),
-    tup_fetch: Math.max(0, (cur.tup_fetched - prev.tup_fetched) / dt),
-    blks_read: Math.max(0, (cur.blks_read - prev.blks_read) / dt),
-    blks_hit: Math.max(0, (cur.blks_hit - prev.blks_hit) / dt),
-  };
-}
-
 interface DatasetConfig {
   label: string;
   color: string;
   data: number[];
 }
 
-function formatVal(v: number): string {
-  if (v >= 1000000) return `${(v / 1000000).toFixed(1)}M`;
-  if (v >= 1000) return `${(v / 1000).toFixed(1)}K`;
-  if (v >= 100) return Math.round(v).toString();
-  if (v >= 1) return v.toFixed(1);
-  if (v > 0) return v.toFixed(2);
-  return "0";
-}
+function getThemeColors() {
+  const isLight = document.documentElement.getAttribute("data-theme") === "light";
 
-function makeLabels(count: number): string[] {
-  const labels: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const secsAgo = (count - 1 - i) * 2;
-    if (secsAgo === 0) labels.push("now");
-    else if (secsAgo % 10 === 0) labels.push(`${secsAgo}s ago`);
-    else labels.push("");
-  }
-  return labels;
+  return {
+    grid: isLight ? "rgba(0,0,0,0.08)" : "rgba(255,255,255,0.1)",
+    tick: isLight ? "rgba(0,0,0,0.12)" : "rgba(255,255,255,0.15)",
+    border: isLight ? "rgba(0,0,0,0.12)" : "rgba(255,255,255,0.15)",
+    label: isLight ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.55)",
+    crosshair: isLight ? "rgba(0,0,0,0.15)" : "rgba(255,255,255,0.2)",
+    tooltipBg: isLight ? "rgba(255,255,255,0.96)" : "rgba(22,22,28,0.96)",
+    tooltipTitle: isLight ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.5)",
+    tooltipBody: isLight ? "rgba(0,0,0,0.85)" : "rgba(255,255,255,0.95)",
+    tooltipBorder: isLight ? "rgba(0,0,0,0.1)" : "rgba(255,255,255,0.12)",
+    pointHoverBorder: isLight ? "#333" : "#fff",
+  };
 }
 
 interface ChartCardProps {
@@ -108,6 +78,8 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
       return grad;
     };
 
+    const tc = getThemeColors();
+
     const chartDatasets = datasets.map((ds) => {
       const padded = new Array(Math.max(0, labels.length - ds.data.length)).fill(null).concat(ds.data);
       return {
@@ -119,7 +91,7 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
         pointRadius: 0,
         pointHoverRadius: 5,
         pointHoverBackgroundColor: ds.color,
-        pointHoverBorderColor: "#fff",
+        pointHoverBorderColor: tc.pointHoverBorder,
         pointHoverBorderWidth: 2,
         tension: 0.4,
         fill: true,
@@ -134,6 +106,25 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
           existing.backgroundColor = chartDatasets[i].backgroundColor;
         }
       });
+      const opts = chartRef.current.options;
+      if (opts.scales?.x) {
+        const xScale = opts.scales.x as any;
+        if (xScale.grid) { xScale.grid.color = tc.grid; xScale.grid.tickColor = tc.tick; }
+        if (xScale.ticks) { xScale.ticks.color = tc.label; }
+        if (xScale.border) { xScale.border.color = tc.border; }
+      }
+      if (opts.scales?.y) {
+        const yScale = opts.scales.y as any;
+        if (yScale.grid) { yScale.grid.color = tc.grid; yScale.grid.tickColor = tc.tick; }
+        if (yScale.ticks) { yScale.ticks.color = tc.label; }
+        if (yScale.border) { yScale.border.color = tc.border; }
+      }
+      if (opts.plugins?.tooltip) {
+        opts.plugins.tooltip.backgroundColor = tc.tooltipBg;
+        opts.plugins.tooltip.titleColor = tc.tooltipTitle;
+        opts.plugins.tooltip.bodyColor = tc.tooltipBody;
+        opts.plugins.tooltip.borderColor = tc.tooltipBorder;
+      }
       chartRef.current.update("none");
     } else {
       chartRef.current = new ChartJS(ctx, {
@@ -157,13 +148,13 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
         scales: {
           x: {
             grid: {
-              color: "rgba(255,255,255,0.1)",
+              color: tc.grid,
               drawTicks: true,
               tickLength: 4,
-              tickColor: "rgba(255,255,255,0.15)",
+              tickColor: tc.tick,
             },
             ticks: {
-              color: "rgba(255,255,255,0.55)",
+              color: tc.label,
               font: { size: 10 },
               maxRotation: 0,
               autoSkip: true,
@@ -172,19 +163,19 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
             },
             border: {
               display: true,
-              color: "rgba(255,255,255,0.15)",
+              color: tc.border,
             },
           },
           y: {
             beginAtZero: true,
             grid: {
-              color: "rgba(255,255,255,0.1)",
+              color: tc.grid,
               drawTicks: true,
               tickLength: 4,
-              tickColor: "rgba(255,255,255,0.15)",
+              tickColor: tc.tick,
             },
             ticks: {
-              color: "rgba(255,255,255,0.55)",
+              color: tc.label,
               font: { size: 10 },
               maxTicksLimit: 5,
               callback: (val) => formatVal(Number(val)),
@@ -192,7 +183,7 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
             },
             border: {
               display: true,
-              color: "rgba(255,255,255,0.15)",
+              color: tc.border,
             },
           },
         },
@@ -200,10 +191,10 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
           legend: { display: false },
           tooltip: {
             enabled: true,
-            backgroundColor: "rgba(22, 22, 28, 0.96)",
-            titleColor: "rgba(255,255,255,0.5)",
-            bodyColor: "rgba(255,255,255,0.95)",
-            borderColor: "rgba(255,255,255,0.12)",
+            backgroundColor: tc.tooltipBg,
+            titleColor: tc.tooltipTitle,
+            bodyColor: tc.tooltipBody,
+            borderColor: tc.tooltipBorder,
             borderWidth: 1,
             padding: { top: 10, bottom: 10, left: 14, right: 14 },
             titleFont: { size: 11, weight: "normal", family: "'JetBrains Mono', monospace" },
@@ -242,7 +233,7 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
           drawCtx.save();
           drawCtx.beginPath();
           drawCtx.setLineDash([4, 4]);
-          drawCtx.strokeStyle = "rgba(255,255,255,0.2)";
+          drawCtx.strokeStyle = tc.crosshair;
           drawCtx.lineWidth = 1;
           drawCtx.moveTo(x, yScale.top);
           drawCtx.lineTo(x, yScale.bottom);

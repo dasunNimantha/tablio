@@ -946,10 +946,111 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_filter_is_unsafe() {
+    fn filter_safe_empty() {
         assert!(!filter_is_unsafe(""));
+    }
+
+    #[test]
+    fn filter_safe_expression() {
         assert!(!filter_is_unsafe("`id` = 1"));
+        assert!(!filter_is_unsafe("`name` LIKE '%test%'"));
+    }
+
+    #[test]
+    fn filter_unsafe_semicolon() {
         assert!(filter_is_unsafe("x; DROP TABLE t"));
+    }
+
+    #[test]
+    fn filter_unsafe_line_comment() {
         assert!(filter_is_unsafe("x -- comment"));
+    }
+
+    #[test]
+    fn filter_unsafe_block_comment() {
+        assert!(filter_is_unsafe("x /* evil */"));
+        assert!(filter_is_unsafe("x */"));
+    }
+
+    #[test]
+    fn quote_ident_simple() {
+        assert_eq!(quote_ident("col"), "`col`");
+    }
+
+    #[test]
+    fn quote_ident_with_backtick() {
+        assert_eq!(quote_ident("my`col"), "`my``col`");
+    }
+
+    #[test]
+    fn quote_ident_empty() {
+        assert_eq!(quote_ident(""), "``");
+    }
+
+    #[test]
+    fn json_to_sql_null() {
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Null), "NULL");
+    }
+
+    #[test]
+    fn json_to_sql_bool() {
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Bool(true)), "true");
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Bool(false)), "false");
+    }
+
+    #[test]
+    fn json_to_sql_number() {
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Number(42i64.into())), "42");
+    }
+
+    #[test]
+    fn json_to_sql_string_escapes() {
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::String("O'Brien".into())),
+            "'O''Brien'"
+        );
+    }
+
+    #[test]
+    fn json_to_sql_empty_string() {
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::String("".into())),
+            "''"
+        );
+    }
+
+    #[test]
+    fn format_bytes_none() {
+        assert_eq!(format_bytes(None), "0 B");
+    }
+
+    #[test]
+    fn format_bytes_negative() {
+        assert_eq!(format_bytes(Some(-100)), "0 B");
+    }
+
+    #[test]
+    fn format_bytes_zero() {
+        assert_eq!(format_bytes(Some(0)), "0 B");
+    }
+
+    #[test]
+    fn format_bytes_kb() {
+        assert_eq!(format_bytes(Some(2048)), "2 kB");
+    }
+
+    #[test]
+    fn format_bytes_mb() {
+        assert_eq!(format_bytes(Some(1048576)), "1.0 MB");
+    }
+
+    #[test]
+    fn format_bytes_gb() {
+        assert_eq!(format_bytes(Some(1073741824)), "1.0 GB");
+    }
+
+    #[test]
+    fn format_bytes_tb() {
+        assert_eq!(format_bytes(Some(1099511627776)), "1.0 TB");
     }
 }

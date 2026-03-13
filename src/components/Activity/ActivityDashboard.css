@@ -246,7 +246,7 @@
 }
 
 .chart-card-title {
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -262,25 +262,25 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 10px;
-  color: var(--text-muted);
+  font-size: 11px;
+  color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
 
 .chart-legend-dot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
 .chart-legend-label {
-  opacity: 0.7;
+  opacity: 0.85;
 }
 
 .chart-legend-value {
   font-weight: 600;
-  color: var(--text-secondary);
+  color: var(--text-primary);
 }
 
 .chart-canvas-wrapper {

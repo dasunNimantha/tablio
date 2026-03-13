@@ -11,6 +11,7 @@ use commands::query::*;
 use commands::roles::*;
 use commands::saved_queries::*;
 use commands::schema::*;
+use commands::system::*;
 use db::pool::PoolManager;
 use std::sync::Arc;
 
@@ -68,6 +69,7 @@ pub fn run() {
             backup_database,
             restore_database,
             dump_and_restore,
+            get_app_resource_usage,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
