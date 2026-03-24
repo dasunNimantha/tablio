@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import { api } from "../../lib/tauri";
 import { Loader2, Copy, Check } from "lucide-react";
@@ -25,6 +25,7 @@ export function DDLViewer({
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
+    let alive = true;
     const fetchDdl = async () => {
       setLoading(true);
       setError(null);
@@ -36,21 +37,31 @@ export function DDLViewer({
           object_name: objectName,
           object_type: objectType,
         });
-        setDdl(result);
+        if (alive) setDdl(result);
       } catch (e) {
-        setError(String(e));
+        if (alive) setError(String(e));
       } finally {
-        setLoading(false);
+        if (alive) setLoading(false);
       }
     };
     fetchDdl();
+    return () => { alive = false; };
   }, [connectionId, database, schema, objectName, objectType]);
+
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
 
   const handleCopy = async () => {
     if (ddl) {
       await navigator.clipboard.writeText(ddl);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopied(false), 2000);
     }
   };
 

@@ -37,17 +37,17 @@ pub async fn get_app_resource_usage() -> Result<AppResourceUsage, String> {
     })
 }
 
-fn round_1dp_f64(v: f64) -> f64 {
-    (v * 10.0).round() / 10.0
-}
-
-fn round_1dp_f32(v: f32) -> f32 {
-    (v * 10.0).round() / 10.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn round_1dp_f64(v: f64) -> f64 {
+        (v * 10.0).round() / 10.0
+    }
+
+    fn round_1dp_f32(v: f32) -> f32 {
+        (v * 10.0).round() / 10.0
+    }
 
     #[test]
     fn rounding_f64() {

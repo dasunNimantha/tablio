@@ -113,6 +113,8 @@
   padding: 5px;
   min-width: 180px;
   animation: fadeIn 0.12s ease;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 .context-menu button {

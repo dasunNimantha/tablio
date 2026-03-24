@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{Column, MySqlPool, Row, TypeInfo};
@@ -59,7 +59,7 @@ fn mysql_row_to_json_values(
             "DOUBLE" | "DECIMAL" => row
                 .try_get::<f64, _>(i)
                 .ok()
-                .and_then(|v| serde_json::Number::from_f64(v))
+                .and_then(serde_json::Number::from_f64)
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
             "JSON" => row
@@ -88,6 +88,10 @@ fn json_to_sql_literal(val: &serde_json::Value) -> String {
         serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
         _ => format!("'{}'", val.to_string().replace('\'', "''")),
     }
+}
+
+fn sql_fragment_is_unsafe(s: &str) -> bool {
+    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") || s.contains('\'')
 }
 
 fn filter_is_unsafe(filter: &str) -> bool {
@@ -160,14 +164,15 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     async fn list_tables(&self, database: &str, _schema: &str) -> Result<Vec<TableInfo>> {
-        let sql = format!(
+        let rows = sqlx::query(
             "SELECT TABLE_NAME, TABLE_TYPE, TABLE_ROWS \
              FROM information_schema.TABLES \
-             WHERE TABLE_SCHEMA = '{}'
-             ORDER BY TABLE_NAME",
-            database.replace('\'', "''")
-        );
-        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+             WHERE TABLE_SCHEMA = ? \
+             ORDER BY TABLE_NAME"
+        )
+        .bind(database)
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows
             .iter()
@@ -500,6 +505,19 @@ impl DatabaseDriver for MysqlDriver {
         table_name: &str,
         columns: &[ColumnDefinition],
     ) -> Result<()> {
+        if columns.is_empty() {
+            anyhow::bail!("At least one column is required");
+        }
+        for col in columns {
+            if sql_fragment_is_unsafe(&col.data_type) {
+                anyhow::bail!("Invalid character in data type for column {}", col.name);
+            }
+            if let Some(d) = &col.default_value {
+                if !d.is_empty() && sql_fragment_is_unsafe(d) {
+                    anyhow::bail!("Invalid character in default value for column {}", col.name);
+                }
+            }
+        }
         let pk_cols: Vec<&ColumnDefinition> = columns.iter().filter(|c| c.is_primary_key).collect();
         let mut col_defs = Vec::new();
         for col in columns {
@@ -633,6 +651,32 @@ impl DatabaseDriver for MysqlDriver {
         table_name: &str,
         operations: &[AlterTableOperation],
     ) -> Result<()> {
+        for op in operations {
+            match op {
+                AlterTableOperation::AddColumn { column } => {
+                    if sql_fragment_is_unsafe(&column.data_type) {
+                        anyhow::bail!("Invalid character in data type for column {}", column.name);
+                    }
+                    if let Some(d) = &column.default_value {
+                        if !d.is_empty() && sql_fragment_is_unsafe(d) {
+                            anyhow::bail!("Invalid character in default value for column {}", column.name);
+                        }
+                    }
+                }
+                AlterTableOperation::ChangeColumnType { new_type, .. } => {
+                    if sql_fragment_is_unsafe(new_type) {
+                        anyhow::bail!("Invalid character in column type");
+                    }
+                }
+                AlterTableOperation::SetDefault { default_value: Some(d), .. } if !d.is_empty() => {
+                    if sql_fragment_is_unsafe(d) {
+                        anyhow::bail!("Invalid character in default value");
+                    }
+                }
+                _ => {}
+            }
+        }
+
         let mut current_table = table_name.to_string();
 
         for op in operations {
@@ -770,7 +814,7 @@ impl DatabaseDriver for MysqlDriver {
         for chunk in rows.chunks(BATCH_SIZE) {
             let mut values_list = Vec::with_capacity(chunk.len());
             for row in chunk {
-                let vals: Vec<String> = row.iter().map(|v| json_to_sql_literal(v)).collect();
+                let vals: Vec<String> = row.iter().map(json_to_sql_literal).collect();
                 values_list.push(format!("({})", vals.join(", ")));
             }
             let values_str = values_list.join(", ");
@@ -869,7 +913,8 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     async fn cancel_query(&self, pid: &str) -> Result<()> {
-        let sql = format!("KILL QUERY {}", pid);
+        let pid_num: u64 = pid.parse().map_err(|_| anyhow!("Invalid PID: must be numeric"))?;
+        let sql = format!("KILL QUERY {}", pid_num);
         sqlx::query(&sql).execute(&self.pool).await?;
         Ok(())
     }

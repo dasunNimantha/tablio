@@ -48,7 +48,7 @@ fn sqlite_row_to_json_values(
             "REAL" => row
                 .try_get::<f64, _>(i)
                 .ok()
-                .and_then(|v| serde_json::Number::from_f64(v))
+                .and_then(serde_json::Number::from_f64)
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
             _ => row
@@ -74,6 +74,10 @@ fn json_to_sql_literal(val: &serde_json::Value) -> String {
         serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
         _ => format!("'{}'", val.to_string().replace('\'', "''")),
     }
+}
+
+fn sql_fragment_is_unsafe(s: &str) -> bool {
+    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") || s.contains('\'')
 }
 
 fn filter_is_unsafe(filter: &str) -> bool {
@@ -433,6 +437,19 @@ impl DatabaseDriver for SqliteDriver {
         table_name: &str,
         columns: &[ColumnDefinition],
     ) -> Result<()> {
+        if columns.is_empty() {
+            anyhow::bail!("At least one column is required");
+        }
+        for col in columns {
+            if sql_fragment_is_unsafe(&col.data_type) {
+                anyhow::bail!("Invalid character in data type for column {}", col.name);
+            }
+            if let Some(d) = &col.default_value {
+                if !d.is_empty() && sql_fragment_is_unsafe(d) {
+                    anyhow::bail!("Invalid character in default value for column {}", col.name);
+                }
+            }
+        }
         let pk_cols: Vec<&ColumnDefinition> = columns.iter().filter(|c| c.is_primary_key).collect();
         let mut col_defs = Vec::new();
         for col in columns {
@@ -565,6 +582,19 @@ impl DatabaseDriver for SqliteDriver {
         table_name: &str,
         operations: &[AlterTableOperation],
     ) -> Result<()> {
+        for op in operations {
+            if let AlterTableOperation::AddColumn { column } = op {
+                if sql_fragment_is_unsafe(&column.data_type) {
+                    anyhow::bail!("Invalid character in data type for column {}", column.name);
+                }
+                if let Some(d) = &column.default_value {
+                    if !d.is_empty() && sql_fragment_is_unsafe(d) {
+                        anyhow::bail!("Invalid character in default value for column {}", column.name);
+                    }
+                }
+            }
+        }
+
         let mut current_table = table_name.to_string();
 
         for op in operations {

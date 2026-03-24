@@ -61,7 +61,7 @@ fn pg_row_to_json_values(row: &sqlx::postgres::PgRow, col_count: usize) -> Vec<s
             "FLOAT8" | "NUMERIC" => row
                 .try_get::<f64, _>(i)
                 .ok()
-                .and_then(|v| serde_json::Number::from_f64(v))
+                .and_then(serde_json::Number::from_f64)
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
             "JSON" | "JSONB" => row
@@ -940,7 +940,7 @@ impl DatabaseDriver for PostgresDriver {
             for row in chunk {
                 let vals: Vec<String> = row
                     .iter()
-                    .map(|v| json_to_sql_literal(v))
+                    .map(json_to_sql_literal)
                     .collect();
                 values_list.push(format!("({})", vals.join(", ")));
             }
@@ -1178,36 +1178,40 @@ impl DatabaseDriver for PostgresDriver {
 
         let sql = if version_num >= 130000 {
             "SELECT \
-                query, queryid, calls, \
-                total_exec_time as total_exec_time_ms, \
-                mean_exec_time as mean_exec_time_ms, \
-                min_exec_time as min_exec_time_ms, \
-                max_exec_time as max_exec_time_ms, \
-                rows, \
-                shared_blks_hit, shared_blks_read, \
-                CASE WHEN (shared_blks_hit + shared_blks_read) > 0 \
-                     THEN shared_blks_hit::float / (shared_blks_hit + shared_blks_read) * 100 \
+                s.query, s.queryid, s.calls, \
+                COALESCE(r.rolname, '') as username, \
+                s.total_exec_time as total_exec_time_ms, \
+                s.mean_exec_time as mean_exec_time_ms, \
+                s.min_exec_time as min_exec_time_ms, \
+                s.max_exec_time as max_exec_time_ms, \
+                s.rows, \
+                s.shared_blks_hit, s.shared_blks_read, \
+                CASE WHEN (s.shared_blks_hit + s.shared_blks_read) > 0 \
+                     THEN s.shared_blks_hit::float / (s.shared_blks_hit + s.shared_blks_read) * 100 \
                      ELSE 0 END as cache_hit_ratio, \
-                total_plan_time as total_plan_time_ms, \
-                mean_plan_time as mean_plan_time_ms \
-             FROM pg_stat_statements \
-             ORDER BY total_exec_time DESC"
+                s.total_plan_time as total_plan_time_ms, \
+                s.mean_plan_time as mean_plan_time_ms \
+             FROM pg_stat_statements s \
+             LEFT JOIN pg_roles r ON s.userid = r.oid \
+             ORDER BY s.total_exec_time DESC"
         } else {
             "SELECT \
-                query, queryid, calls, \
-                total_time as total_exec_time_ms, \
-                mean_time as mean_exec_time_ms, \
-                min_time as min_exec_time_ms, \
-                max_time as max_exec_time_ms, \
-                rows, \
-                shared_blks_hit, shared_blks_read, \
-                CASE WHEN (shared_blks_hit + shared_blks_read) > 0 \
-                     THEN shared_blks_hit::float / (shared_blks_hit + shared_blks_read) * 100 \
+                s.query, s.queryid, s.calls, \
+                COALESCE(r.rolname, '') as username, \
+                s.total_time as total_exec_time_ms, \
+                s.mean_time as mean_exec_time_ms, \
+                s.min_time as min_exec_time_ms, \
+                s.max_time as max_exec_time_ms, \
+                s.rows, \
+                s.shared_blks_hit, s.shared_blks_read, \
+                CASE WHEN (s.shared_blks_hit + s.shared_blks_read) > 0 \
+                     THEN s.shared_blks_hit::float / (s.shared_blks_hit + s.shared_blks_read) * 100 \
                      ELSE 0 END as cache_hit_ratio, \
                 0::float as total_plan_time_ms, \
                 0::float as mean_plan_time_ms \
-             FROM pg_stat_statements \
-             ORDER BY total_time DESC"
+             FROM pg_stat_statements s \
+             LEFT JOIN pg_roles r ON s.userid = r.oid \
+             ORDER BY s.total_time DESC"
         };
 
         let rows = sqlx::query(sql)
@@ -1219,6 +1223,7 @@ impl DatabaseDriver for PostgresDriver {
             .map(|r| QueryStatEntry {
                 query: r.try_get::<String, _>("query").unwrap_or_default(),
                 queryid: r.try_get::<i64, _>("queryid").ok(),
+                user: r.try_get::<String, _>("username").unwrap_or_default(),
                 calls: r.try_get::<i64, _>("calls").unwrap_or(0),
                 total_exec_time_ms: r.try_get::<f64, _>("total_exec_time_ms").unwrap_or(0.0),
                 mean_exec_time_ms: r.try_get::<f64, _>("mean_exec_time_ms").unwrap_or(0.0),

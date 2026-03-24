@@ -45,7 +45,8 @@ export function ConnectionList({ onAddConnection }: Props) {
         database: config.database,
         schema: "",
       });
-    } catch {
+    } catch (e) {
+      console.error("Connection failed:", e);
     } finally {
       setConnectingId(null);
     }
@@ -159,10 +160,13 @@ export function ConnectionList({ onAddConnection }: Props) {
           <>
             {Object.entries(grouped.groups)
               .sort(([a], [b]) => a.localeCompare(b))
-              .map(([groupName, conns]) => {
+              .map(([groupName, conns], groupIndex) => {
                 const isCollapsed = collapsedGroups.has(groupName);
                 return (
-                  <div key={groupName} className="connection-group">
+                  <div
+                    key={groupName}
+                    className={`connection-group ${groupIndex === 0 ? "connection-group-first" : ""}`}
+                  >
                     <div
                       className="connection-group-header"
                       onClick={() => toggleGroup(groupName)}
@@ -170,7 +174,11 @@ export function ConnectionList({ onAddConnection }: Props) {
                       <span className="connection-group-chevron">
                         {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                       </span>
-                      {isCollapsed ? <Folder size={13} /> : <FolderOpen size={13} />}
+                      {isCollapsed ? (
+                        <Folder size={13} className="connection-group-folder-icon" />
+                      ) : (
+                        <FolderOpen size={13} className="connection-group-folder-icon" />
+                      )}
                       <span className="connection-group-name">{groupName}</span>
                       <span className="connection-group-count">{conns.length}</span>
                     </div>

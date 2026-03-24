@@ -20,6 +20,12 @@ pub struct PoolManager {
     ssh_tunnels: RwLock<HashMap<String, SshTunnel>>,
 }
 
+impl Default for PoolManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PoolManager {
     pub fn new() -> Self {
         Self {
@@ -62,7 +68,7 @@ impl PoolManager {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
 
-        let child = cmd.spawn()
+        let mut child = cmd.spawn()
             .map_err(|e| anyhow!("Failed to start SSH tunnel: {}. Make sure 'ssh' is available.", e))?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
@@ -74,7 +80,8 @@ impl PoolManager {
             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         }
 
-        Ok(SshTunnel { child, local_port })
+        let _ = child.kill().await;
+        Err(anyhow!("SSH tunnel failed to become ready within timeout"))
     }
 
     pub async fn connect(&self, config: ConnectionConfig) -> Result<String> {
@@ -93,10 +100,20 @@ impl PoolManager {
             config.clone()
         };
 
-        let driver: Arc<dyn DatabaseDriver> = match effective_config.db_type {
-            DbType::Postgres => Arc::new(PostgresDriver::connect(&effective_config).await?),
-            DbType::Mysql => Arc::new(MysqlDriver::connect(&effective_config).await?),
-            DbType::Sqlite => Arc::new(SqliteDriver::connect(&effective_config).await?),
+        let driver_result = match effective_config.db_type {
+            DbType::Postgres => PostgresDriver::connect(&effective_config).await.map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
+            DbType::Mysql => MysqlDriver::connect(&effective_config).await.map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
+            DbType::Sqlite => SqliteDriver::connect(&effective_config).await.map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
+        };
+
+        let driver = match driver_result {
+            Ok(d) => d,
+            Err(e) => {
+                if let Some(mut tunnel) = self.ssh_tunnels.write().await.remove(&id) {
+                    let _ = tunnel.child.kill().await;
+                }
+                return Err(e);
+            }
         };
 
         self.connections.write().await.insert(id.clone(), driver);
@@ -132,12 +149,33 @@ impl PoolManager {
     }
 
     pub async fn test_connection(config: &ConnectionConfig) -> Result<bool> {
-        let driver: Box<dyn DatabaseDriver> = match config.db_type {
-            DbType::Postgres => Box::new(PostgresDriver::connect(config).await?),
-            DbType::Mysql => Box::new(MysqlDriver::connect(config).await?),
-            DbType::Sqlite => Box::new(SqliteDriver::connect(config).await?),
+        let mut tunnel_handle: Option<SshTunnel> = None;
+        let effective_config = if config.ssh_enabled && !config.ssh_host.is_empty() {
+            let tunnel = Self::setup_ssh_tunnel(config).await?;
+            let local_port = tunnel.local_port;
+            tunnel_handle = Some(tunnel);
+            ConnectionConfig {
+                host: "127.0.0.1".to_string(),
+                port: local_port,
+                ..config.clone()
+            }
+        } else {
+            config.clone()
         };
-        driver.test_connection().await
+
+        let result = async {
+            let driver: Box<dyn DatabaseDriver> = match effective_config.db_type {
+                DbType::Postgres => Box::new(PostgresDriver::connect(&effective_config).await?),
+                DbType::Mysql => Box::new(MysqlDriver::connect(&effective_config).await?),
+                DbType::Sqlite => Box::new(SqliteDriver::connect(&effective_config).await?),
+            };
+            driver.test_connection().await
+        }.await;
+
+        if let Some(mut t) = tunnel_handle {
+            let _ = t.child.kill().await;
+        }
+        result
     }
 
     pub async fn is_connected(&self, id: &str) -> bool {

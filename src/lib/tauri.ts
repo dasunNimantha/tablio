@@ -107,6 +107,22 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       return "Restore completed successfully" as T;
     case "dump_and_restore":
       return "Successfully dumped source and restored to target" as T;
+    case "get_database_stats":
+      return {
+        active_connections: 2, idle_connections: 5, idle_in_transaction: 0,
+        total_connections: 7, xact_commit: 1000, xact_rollback: 5,
+        tup_inserted: 500, tup_updated: 200, tup_deleted: 10,
+        tup_fetched: 5000, blks_read: 100, blks_hit: 1000,
+        timestamp_ms: Date.now(),
+      } as T;
+    case "get_locks":
+      return [] as T;
+    case "get_server_config":
+      return [] as T;
+    case "get_query_stats":
+      return { available: false, message: "Mock mode", entries: [] } as T;
+    case "get_app_resource_usage":
+      return { memory_mb: 64.5, cpu_percent: 2.3 } as T;
     default:
       throw new Error(`Unknown mock command: ${cmd}`);
   }
@@ -337,6 +353,7 @@ export interface QueryStatsRequest {
 export interface QueryStatEntry {
   query: string;
   queryid: number | null;
+  user: string;
   calls: number;
   total_exec_time_ms: number;
   mean_exec_time_ms: number;

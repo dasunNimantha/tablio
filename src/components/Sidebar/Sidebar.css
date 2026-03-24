@@ -157,6 +157,14 @@
   justify-content: center;
 }
 
+.tree-icon.icon-connection { color: #8b9dc3; }
+.tree-icon.icon-database { color: #e6a546; }
+.tree-icon.icon-schema { color: #6ba3d6; }
+.tree-icon.icon-table { color: #5b9bd5; }
+.tree-icon.icon-view { color: #9b87c4; }
+.tree-icon.icon-function { color: #e8a838; }
+.tree-icon.icon-folder { color: #8b9dc3; }
+
 .tree-label {
   flex: 1;
   white-space: nowrap;
@@ -359,23 +367,40 @@
   line-height: 1;
 }
 
+/* ── Folder groups ───────────────────────── */
+
 .connection-group {
-  border-bottom: 1px solid var(--border);
+  margin: 0 4px 4px;
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+}
+
+.connection-group-first {
+  margin-top: var(--gutter-xs);
+}
+
+.connection-group .tree-root {
+  border-bottom: none;
+}
+
+.connection-group .tree-root-header > .connection-dot {
+  margin-left: 22px;
 }
 
 .connection-group-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 var(--gutter-lg);
-  height: 34px;
+  gap: 5px;
+  padding: 0 8px;
+  height: 28px;
   cursor: pointer;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.04em;
   color: var(--text-muted);
-  transition: background 0.12s;
+  transition: background 0.12s, color 0.12s;
+  user-select: none;
 }
 
 .connection-group-header:hover {
@@ -387,17 +412,155 @@
   display: flex;
   align-items: center;
   color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+/* Connection folder icon only (not chevron, not label) */
+.connection-group-folder-icon {
+  flex-shrink: 0;
+  color: color-mix(in srgb, var(--accent) 52%, var(--text-secondary));
+  opacity: 1;
+}
+
+.connection-group-header:hover .connection-group-folder-icon {
+  color: color-mix(in srgb, var(--accent) 58%, var(--text-primary));
 }
 
 .connection-group-name {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .connection-group-count {
-  font-size: 12px;
+  font-size: 9px;
   font-weight: 600;
-  background: var(--bg-hover);
-  padding: 2px 8px;
-  border-radius: var(--radius-lg);
+  min-width: 16px;
+  text-align: center;
+  background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+  padding: 1px 5px;
+  border-radius: 8px;
   color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.connection-group-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 6px 30px;
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.connection-group.drag-over {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  outline: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
+  outline-offset: -1px;
+}
+
+.sidebar-drop-active {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+/* ── Folder create / rename input ────────── */
+
+.connection-group-create {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  margin: 0 4px 4px;
+  color: var(--text-muted);
+}
+
+.connection-group-create .btn-icon {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+.folder-name-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  font-size: 12px;
+}
+
+.connection-group-header .folder-name-input {
+  height: 22px;
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+}
+
+.context-menu-separator {
+  height: 1px;
+  background: var(--border);
+  margin: 3px 6px;
+}
+
+.context-menu-submenu {
+  position: relative;
+}
+
+/* Invisible bridge so the cursor can reach the submenu without leaving the hover zone */
+.context-menu-submenu::after {
+  content: "";
+  position: absolute;
+  left: 100%;
+  top: 0;
+  width: 12px;
+  height: 100%;
+  z-index: 1000;
+}
+
+.context-menu .context-menu-submenu-trigger {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.context-menu .context-menu-submenu-trigger svg {
+  opacity: 0.35;
+  flex-shrink: 0;
+  margin-right: -4px;
+}
+
+.context-menu .context-menu-submenu-trigger:hover svg {
+  opacity: 0.7;
+}
+
+.context-menu-submenu-content {
+  display: none;
+  position: absolute;
+  /* Overlap parent slightly — no dead air between row and panel */
+  left: calc(100% - 4px);
+  top: 0;
+  min-width: 160px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 5px;
+  box-shadow: var(--shadow-dropdown);
+  z-index: 1001;
+  animation: fadeIn 0.1s ease;
+}
+
+.context-menu-submenu:hover > .context-menu-submenu-content {
+  display: block;
+}
+
+/* ── Drag handle ─────────────────────────── */
+
+.tree-root[draggable="true"] {
+  cursor: grab;
+}
+
+.tree-root[draggable="true"]:active {
+  cursor: grabbing;
+  opacity: 0.5;
 }

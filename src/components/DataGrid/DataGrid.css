@@ -16,6 +16,12 @@
   height: var(--toolbar-height);
   min-height: var(--toolbar-height);
   gap: var(--gutter);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.grid-toolbar .btn-ghost {
+  font-weight: 400;
 }
 
 .grid-toolbar-left {
@@ -72,7 +78,7 @@
 
 .grid-table th {
   background: var(--bg-header);
-  padding: 0 var(--gutter);
+  padding: 0 24px 0 var(--gutter);
   height: 38px;
   text-align: left;
   font-weight: 400;

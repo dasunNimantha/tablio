@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { api, DatabaseInfo, SchemaInfo, TableInfo, FunctionInfo } from "../../lib/tauri";
@@ -22,6 +22,9 @@ import {
   PowerOff,
   Pencil,
   Trash2,
+  Check,
+  X,
+  Layers,
 } from "lucide-react";
 import "./Sidebar.css";
 
@@ -53,12 +56,24 @@ interface ObjectTreeProps {
 }
 
 export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImportData, onBackupRestore, onDumpRestore }: ObjectTreeProps) {
-  const { connections, activeConnections, connectTo, disconnectFrom, removeConnection } = useConnectionStore();
+  const { connections, activeConnections, connectTo, disconnectFrom, removeConnection, updateConnection } = useConnectionStore();
   const { openTab } = useTabStore();
   const [editingConn, setEditingConn] = useState<import("../../lib/tauri").ConnectionConfig | null>(null);
   const [duplicatingConn, setDuplicatingConn] = useState<import("../../lib/tauri").ConnectionConfig | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<import("../../lib/tauri").ConnectionConfig | null>(null);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [renamingGroup, setRenamingGroup] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [groupContextMenu, setGroupContextMenu] = useState<{ x: number; y: number; group: string } | null>(null);
+  const [dragOverGroup, setDragOverGroup] = useState<string | null>(null);
+  const [draggingConnId, setDraggingConnId] = useState<string | null>(null);
+  const [emptyGroups, setEmptyGroups] = useState<Set<string>>(new Set());
+  const dragCounterRef = useRef<Record<string, number>>({});
+  const newFolderInputRef = useRef<HTMLInputElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [childrenMap, setChildrenMap] = useState<Record<string, TreeNode[]>>({});
   const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set());
@@ -85,6 +100,105 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [showTypeFilter]);
+
+  useEffect(() => {
+    if (creatingFolder && newFolderInputRef.current) {
+      newFolderInputRef.current.focus();
+    }
+  }, [creatingFolder]);
+
+  useEffect(() => {
+    if (renamingGroup && renameInputRef.current) {
+      renameInputRef.current.focus();
+      renameInputRef.current.select();
+    }
+  }, [renamingGroup]);
+
+  useEffect(() => {
+    if (!groupContextMenu) return;
+    const handleClick = () => setGroupContextMenu(null);
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [groupContextMenu]);
+
+  const handleCreateFolder = () => {
+    const name = newFolderName.trim();
+    if (name) {
+      setEmptyGroups((prev) => new Set(prev).add(name));
+      setCollapsedGroups((prev) => {
+        const next = new Set(prev);
+        next.delete(name);
+        return next;
+      });
+    }
+    setCreatingFolder(false);
+    setNewFolderName("");
+  };
+
+  const handleRenameGroup = async (oldName: string) => {
+    const newName = renameValue.trim();
+    if (!newName || newName === oldName) {
+      setRenamingGroup(null);
+      return;
+    }
+    const toUpdate = connections.filter((c) => c.group?.trim() === oldName);
+    for (const conn of toUpdate) {
+      await updateConnection({ ...conn, group: newName });
+    }
+    setEmptyGroups((prev) => {
+      const next = new Set(prev);
+      next.delete(oldName);
+      if (toUpdate.length === 0) next.add(newName);
+      return next;
+    });
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      next.delete(oldName);
+      return next;
+    });
+    setRenamingGroup(null);
+  };
+
+  const handleDeleteGroup = async (groupName: string) => {
+    const toUpdate = connections.filter((c) => c.group?.trim() === groupName);
+    for (const conn of toUpdate) {
+      await updateConnection({ ...conn, group: null });
+    }
+    setEmptyGroups((prev) => {
+      const next = new Set(prev);
+      next.delete(groupName);
+      return next;
+    });
+  };
+
+  const preserveSourceGroup = (conn: import("../../lib/tauri").ConnectionConfig) => {
+    const sourceGroup = conn.group?.trim();
+    if (sourceGroup) {
+      const othersInGroup = connections.filter((c) => c.id !== conn.id && c.group?.trim() === sourceGroup);
+      if (othersInGroup.length === 0) {
+        setEmptyGroups((prev) => new Set(prev).add(sourceGroup));
+      }
+    }
+  };
+
+  const handleMoveToGroup = async (conn: import("../../lib/tauri").ConnectionConfig, group: string | null) => {
+    preserveSourceGroup(conn);
+    await updateConnection({ ...conn, group });
+  };
+
+  const handleDrop = async (e: React.DragEvent, targetGroup: string | null) => {
+    e.preventDefault();
+    setDragOverGroup(null);
+    setDraggingConnId(null);
+    dragCounterRef.current = {};
+    const connId = e.dataTransfer.getData("text/connection-id");
+    if (!connId) return;
+    const conn = connections.find((c) => c.id === connId);
+    if (conn && (conn.group?.trim() || null) !== targetGroup) {
+      preserveSourceGroup(conn);
+      await updateConnection({ ...conn, group: targetGroup });
+    }
+  };
 
   const toggleExpand = useCallback(
     async (node: TreeNode) => {
@@ -318,8 +432,9 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
               schema: "",
             });
             setTimeout(() => toggleExpand(node), 100);
-          } catch {}
-          finally { setConnectingId(null); }
+          } catch (e) {
+            console.error("Connection failed:", e);
+          } finally { setConnectingId(null); }
         }
       }
       return;
@@ -507,25 +622,30 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
     const isExpanded = expanded.has(node.id) || (hasActiveFilter && !!descendantMatches);
     const isLoading = loadingNodes.has(node.id);
 
-    const Icon = () => {
-      if (isLoading) return <Loader2 size={14} className="spin" />;
+    const getIconInfo = (): { icon: React.ReactNode; cls: string } => {
+      if (isLoading) return { icon: <Loader2 size={14} className="spin" />, cls: "" };
       switch (node.type) {
+        case "connection":
+          return { icon: <Database size={14} />, cls: "icon-connection" };
         case "database":
-          return <Database size={14} />;
+          return { icon: <Database size={14} />, cls: "icon-database" };
+        case "schema":
+          return { icon: <Layers size={14} />, cls: "icon-schema" };
         case "table":
-          return <Table2 size={14} />;
+          return { icon: <Table2 size={14} />, cls: "icon-table" };
         case "view":
-          return <Eye size={14} />;
+          return { icon: <Eye size={14} />, cls: "icon-view" };
         case "function":
-          return <Zap size={14} />;
+          return { icon: <Zap size={14} />, cls: "icon-function" };
         case "table-group":
         case "view-group":
         case "function-group":
-          return isExpanded ? <FolderOpen size={14} /> : <Folder size={14} />;
+          return { icon: isExpanded ? <FolderOpen size={14} /> : <Folder size={14} />, cls: "icon-folder" };
         default:
-          return <Database size={14} />;
+          return { icon: <Database size={14} />, cls: "icon-database" };
       }
     };
+    const iconInfo = getIconInfo();
 
     return (
       <div key={node.id}>
@@ -548,8 +668,8 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
             </span>
           )}
           {isLeaf && <span className="tree-chevron-spacer" />}
-          <span className="tree-icon">
-            <Icon />
+          <span className={`tree-icon ${iconInfo.cls}`}>
+            {iconInfo.icon}
           </span>
           <span className="tree-label">{node.label}</span>
           {node.type === "database" && (
@@ -587,7 +707,7 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
     if (!contextMenu) return null;
     const { node } = contextMenu;
 
-    const items: { label: string; action: () => void }[] = [];
+    const items: { label: string; action: () => void; children?: { label: string; action: () => void }[] }[] = [];
 
     if (node.type === "table" || node.type === "view") {
       items.push({
@@ -739,7 +859,7 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
                   database: conn.database,
                   schema: "",
                 });
-              } catch {} finally { setConnectingId(null); }
+              } catch (e) { console.error("Connection failed:", e); } finally { setConnectingId(null); }
             }
           },
         });
@@ -754,6 +874,37 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
           label: "Duplicate Connection",
           action: () => setDuplicatingConn(conn),
         });
+
+        const existingGroups = Object.keys(grouped.groups).sort();
+        const currentGroup = conn.group?.trim() || null;
+        const moveChildren: { label: string; action: () => void }[] = [];
+        for (const g of existingGroups) {
+          if (g !== currentGroup) {
+            moveChildren.push({
+              label: g,
+              action: () => handleMoveToGroup(conn, g),
+            });
+          }
+        }
+        if (currentGroup) {
+          if (moveChildren.length > 0) {
+            moveChildren.push({ label: "---", action: () => {} });
+          }
+          moveChildren.push({
+            label: "Remove from folder",
+            action: () => handleMoveToGroup(conn, null),
+          });
+        }
+        if (moveChildren.length > 0) {
+          items.push({ label: "---", action: () => {} });
+          items.push({
+            label: "Move to",
+            action: () => {},
+            children: moveChildren,
+          });
+        }
+
+        items.push({ label: "---", action: () => {} });
         items.push({
           label: "Delete Connection",
           action: () => setDeleteTarget(conn),
@@ -801,17 +952,45 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
             }
           }}
         >
-          {items.map((item, i) => (
-            <button
-              key={i}
-              onClick={() => {
-                item.action();
-                setContextMenu(null);
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
+          {items.map((item, i) =>
+            item.label === "---" ? (
+              <div key={i} className="context-menu-separator" />
+            ) : item.children ? (
+              <div key={i} className="context-menu-submenu">
+                <button className="context-menu-submenu-trigger">
+                  {item.label}
+                  <ChevronRight size={12} />
+                </button>
+                <div className="context-menu-submenu-content">
+                  {item.children.map((child, j) =>
+                    child.label === "---" ? (
+                      <div key={j} className="context-menu-separator" />
+                    ) : (
+                      <button
+                        key={j}
+                        onClick={() => {
+                          child.action();
+                          setContextMenu(null);
+                        }}
+                      >
+                        {child.label}
+                      </button>
+                    )
+                  )}
+                </div>
+              </div>
+            ) : (
+              <button
+                key={i}
+                onClick={() => {
+                  item.action();
+                  setContextMenu(null);
+                }}
+              >
+                {item.label}
+              </button>
+            )
+          )}
         </div>
       </>
     );
@@ -851,15 +1030,184 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
     return nodes.filter((n) => nodeMatchesFilter(n, q));
   };
 
+  const grouped = useMemo(() => {
+    const groups: Record<string, typeof connections> = {};
+    const ungrouped: typeof connections = [];
+    for (const g of emptyGroups) {
+      if (!groups[g]) groups[g] = [];
+    }
+    for (const conn of connections) {
+      const g = conn.group?.trim();
+      if (g) {
+        if (!groups[g]) groups[g] = [];
+        groups[g].push(conn);
+      } else {
+        ungrouped.push(conn);
+      }
+    }
+    return { groups, ungrouped };
+  }, [connections, emptyGroups]);
+
+  const toggleGroup = (group: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(group)) next.delete(group);
+      else next.add(group);
+      return next;
+    });
+  };
+
+  const renderConnectionNode = (conn: import("../../lib/tauri").ConnectionConfig) => {
+    const isActive = activeConnections.has(conn.id);
+    const isConn = connectingId === conn.id;
+    const node: TreeNode = {
+      id: conn.id,
+      label: conn.name || conn.database,
+      type: "connection",
+      connectionId: conn.id,
+      connectionColor: conn.color,
+    };
+    return (
+      <div
+        key={conn.id}
+        className="tree-root"
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData("text/connection-id", conn.id);
+          e.dataTransfer.effectAllowed = "move";
+          setDraggingConnId(conn.id);
+        }}
+        onDragEnd={() => {
+          setDraggingConnId(null);
+          setDragOverGroup(null);
+          dragCounterRef.current = {};
+        }}
+      >
+        <div className="tree-root-header">
+          <div
+            className="connection-dot"
+            style={{
+              background: isActive ? "var(--success)" : "var(--text-muted)",
+              boxShadow: isActive ? "0 0 6px var(--success)" : "none",
+            }}
+          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {isActive ? (
+              <div className="tree-conn-row">
+                {renderNode(node, 0)}
+                <div className="tree-conn-actions">
+                  <button
+                    className="btn-icon tree-action"
+                    onClick={(e) => { e.stopPropagation(); disconnectFrom(conn.id); }}
+                    title="Disconnect"
+                  >
+                    <PowerOff size={12} />
+                  </button>
+                  <button
+                    className="btn-icon tree-action"
+                    onClick={(e) => { e.stopPropagation(); setEditingConn(conn); }}
+                    title="Edit"
+                  >
+                    <Pencil size={12} />
+                  </button>
+                  <button
+                    className="btn-icon tree-action tree-action-danger"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setConfirmAction({
+                        title: "Delete Connection",
+                        message: `Delete "${conn.name || conn.database}"? This cannot be undone.`,
+                        action: () => removeConnection(conn.id),
+                        node,
+                      });
+                    }}
+                    title="Delete"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div
+                className="tree-node tree-conn-row"
+                style={{ paddingLeft: 6 }}
+                onDoubleClick={() => handleDoubleClick(node)}
+                onContextMenu={(e) => handleContextMenu(e, node)}
+              >
+                {isConn ? (
+                  <Loader2 size={14} className="spin" style={{ color: "var(--accent)" }} />
+                ) : (
+                  <span className="tree-icon icon-connection"><Database size={14} /></span>
+                )}
+                <span className="tree-label" style={{ color: "var(--text-muted)" }}>
+                  {conn.name || conn.database}
+                </span>
+                <div className="tree-conn-actions">
+                  <button
+                    className="btn-icon tree-action"
+                    onClick={(e) => { e.stopPropagation(); handleConnectDirect(conn); }}
+                    title="Connect"
+                  >
+                    <Power size={12} />
+                  </button>
+                  <button
+                    className="btn-icon tree-action"
+                    onClick={(e) => { e.stopPropagation(); setEditingConn(conn); }}
+                    title="Edit"
+                  >
+                    <Pencil size={12} />
+                  </button>
+                  <button
+                    className="btn-icon tree-action tree-action-danger"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setConfirmAction({
+                        title: "Delete Connection",
+                        message: `Delete "${conn.name || conn.database}"? This cannot be undone.`,
+                        action: () => removeConnection(conn.id),
+                        node,
+                      });
+                    }}
+                    title="Delete"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <>
       <div className="sidebar-header">
         <span>Explorer</span>
-        <button className="btn-icon" onClick={onAddConnection} title="New Connection">
-          <Plus size={16} />
-        </button>
+        <div style={{ display: "flex", gap: 2 }}>
+          <button className="btn-icon" onClick={onAddConnection} title="New Connection">
+            <Plus size={16} />
+          </button>
+          <button className="btn-icon" onClick={() => { setCreatingFolder(true); setNewFolderName(""); }} title="New Folder">
+            <Folder size={15} />
+          </button>
+        </div>
       </div>
-      <div className="sidebar-content">
+      <div
+        className={`sidebar-content ${dragOverGroup === "__ungrouped__" ? "sidebar-drop-active" : ""}`}
+        onDragOver={(e) => { e.preventDefault(); }}
+        onDragEnter={(e) => {
+          e.preventDefault();
+          if (draggingConnId) {
+            const dragged = connections.find((c) => c.id === draggingConnId);
+            if (dragged?.group?.trim()) {
+              setDragOverGroup("__ungrouped__");
+            }
+          }
+        }}
+        onDrop={(e) => handleDrop(e, null)}
+      >
         {connections.length === 0 ? (
           <div className="tree-empty-state">
             <p>No connections yet</p>
@@ -917,115 +1265,122 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
                 )}
               </div>
             </div>
-            {connections.map((conn) => {
-              const isActive = activeConnections.has(conn.id);
-              const isConnecting = connectingId === conn.id;
-              const node: TreeNode = {
-                id: conn.id,
-                label: conn.name || conn.database,
-                type: "connection",
-                connectionId: conn.id,
-                connectionColor: conn.color,
-              };
-              return (
-                <div key={conn.id} className="tree-root">
-                  <div className="tree-root-header">
+            {creatingFolder && (
+              <div className="connection-group-create">
+                <Folder size={13} />
+                <input
+                  ref={newFolderInputRef}
+                  className="folder-name-input"
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleCreateFolder();
+                    if (e.key === "Escape") { setCreatingFolder(false); setNewFolderName(""); }
+                  }}
+                  placeholder="Enter folder name"
+                />
+                <button className="btn-icon" onClick={handleCreateFolder} title="Create"><Check size={13} /></button>
+                <button className="btn-icon" onClick={() => { setCreatingFolder(false); setNewFolderName(""); }} title="Cancel"><X size={13} /></button>
+              </div>
+            )}
+            {Object.entries(grouped.groups)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([groupName, conns], groupIndex) => {
+                const isCollapsed = collapsedGroups.has(groupName);
+                const isRenaming = renamingGroup === groupName;
+                return (
+                  <div
+                    key={`group:${groupName}`}
+                    className={`connection-group ${groupIndex === 0 ? "connection-group-first" : ""} ${dragOverGroup === groupName ? "drag-over" : ""}`}
+                    onDragOver={(e) => { e.preventDefault(); }}
+                    onDragEnter={(e) => {
+                      e.preventDefault();
+                      const key = `group:${groupName}`;
+                      dragCounterRef.current[key] = (dragCounterRef.current[key] || 0) + 1;
+                      if (draggingConnId) {
+                        const dragged = connections.find((c) => c.id === draggingConnId);
+                        if ((dragged?.group?.trim() || null) !== groupName) {
+                          setDragOverGroup(groupName);
+                        }
+                      }
+                    }}
+                    onDragLeave={() => {
+                      const key = `group:${groupName}`;
+                      dragCounterRef.current[key] = (dragCounterRef.current[key] || 1) - 1;
+                      if (dragCounterRef.current[key] <= 0) {
+                        dragCounterRef.current[key] = 0;
+                        if (dragOverGroup === groupName) setDragOverGroup(null);
+                      }
+                    }}
+                    onDrop={(e) => handleDrop(e, groupName)}
+                  >
                     <div
-                      className="connection-dot"
-                      style={{
-                        background: isActive ? "var(--success)" : "var(--text-muted)",
-                        boxShadow: isActive ? "0 0 6px var(--success)" : "none",
+                      className="connection-group-header"
+                      onClick={() => !isRenaming && toggleGroup(groupName)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+                        setGroupContextMenu({ x: e.clientX / z, y: e.clientY / z, group: groupName });
                       }}
-                    />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      {isActive ? (
-                        <div className="tree-conn-row">
-                          {renderNode(node, 0)}
-                          <div className="tree-conn-actions">
-                            <button
-                              className="btn-icon tree-action"
-                              onClick={(e) => { e.stopPropagation(); disconnectFrom(conn.id); }}
-                              title="Disconnect"
-                            >
-                              <PowerOff size={12} />
-                            </button>
-                            <button
-                              className="btn-icon tree-action"
-                              onClick={(e) => { e.stopPropagation(); setEditingConn(conn); }}
-                              title="Edit"
-                            >
-                              <Pencil size={12} />
-                            </button>
-                            <button
-                              className="btn-icon tree-action tree-action-danger"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setConfirmAction({
-                                  title: "Delete Connection",
-                                  message: `Delete "${conn.name || conn.database}"? This cannot be undone.`,
-                                  action: () => removeConnection(conn.id),
-                                  node,
-                                });
-                              }}
-                              title="Delete"
-                            >
-                              <Trash2 size={12} />
-                            </button>
-                          </div>
-                        </div>
+                    >
+                      <span className="connection-group-chevron">
+                        {isCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+                      </span>
+                      {isCollapsed ? (
+                        <Folder size={12} className="connection-group-folder-icon" />
                       ) : (
-                        <div
-                          className="tree-node tree-conn-row"
-                          style={{ paddingLeft: 6 }}
-                          onDoubleClick={() => handleDoubleClick(node)}
-                          onContextMenu={(e) => handleContextMenu(e, node)}
-                        >
-                          {isConnecting ? (
-                            <Loader2 size={14} className="spin" style={{ color: "var(--accent)" }} />
-                          ) : (
-                            <span className="tree-icon"><Database size={14} /></span>
-                          )}
-                          <span className="tree-label" style={{ color: "var(--text-muted)" }}>
-                            {conn.name || conn.database}
-                          </span>
-                          <div className="tree-conn-actions">
-                            <button
-                              className="btn-icon tree-action"
-                              onClick={(e) => { e.stopPropagation(); handleConnectDirect(conn); }}
-                              title="Connect"
-                            >
-                              <Power size={12} />
-                            </button>
-                            <button
-                              className="btn-icon tree-action"
-                              onClick={(e) => { e.stopPropagation(); setEditingConn(conn); }}
-                              title="Edit"
-                            >
-                              <Pencil size={12} />
-                            </button>
-                            <button
-                              className="btn-icon tree-action tree-action-danger"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setConfirmAction({
-                                  title: "Delete Connection",
-                                  message: `Delete "${conn.name || conn.database}"? This cannot be undone.`,
-                                  action: () => removeConnection(conn.id),
-                                  node,
-                                });
-                              }}
-                              title="Delete"
-                            >
-                              <Trash2 size={12} />
-                            </button>
-                          </div>
-                        </div>
+                        <FolderOpen size={12} className="connection-group-folder-icon" />
+                      )}
+                      {isRenaming ? (
+                        <input
+                          ref={renameInputRef}
+                          className="folder-name-input"
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleRenameGroup(groupName);
+                            if (e.key === "Escape") setRenamingGroup(null);
+                          }}
+                          onBlur={() => handleRenameGroup(groupName)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        <span className="connection-group-name">{groupName}</span>
                       )}
                     </div>
+                    {!isCollapsed && (conns.length > 0
+                      ? conns.map(renderConnectionNode)
+                      : <div className="connection-group-empty">Drag connections here</div>
+                    )}
                   </div>
+                );
+              })}
+            {grouped.ungrouped.map(renderConnectionNode)}
+            {groupContextMenu && (
+              <>
+                <div className="context-backdrop" onClick={() => setGroupContextMenu(null)} />
+                <div
+                  className="context-menu"
+                  style={{ left: groupContextMenu.x, top: groupContextMenu.y }}
+                  ref={(el) => {
+                    if (!el) return;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.bottom > window.innerHeight) el.style.top = `${groupContextMenu.y - rect.height}px`;
+                    if (rect.right > window.innerWidth) el.style.left = `${groupContextMenu.x - rect.width}px`;
+                  }}
+                >
+                  <button onClick={() => {
+                    setRenamingGroup(groupContextMenu.group);
+                    setRenameValue(groupContextMenu.group);
+                    setGroupContextMenu(null);
+                  }}>Rename Folder</button>
+                  <button onClick={() => {
+                    handleDeleteGroup(groupContextMenu.group);
+                    setGroupContextMenu(null);
+                  }}>Delete Folder</button>
                 </div>
-              );
-            })}
+              </>
+            )}
           </>
         )}
         {renderContextMenu()}

@@ -15,6 +15,7 @@ import {
   Pause,
   Play,
 } from "lucide-react";
+import { CustomSelect } from "../CustomSelect/CustomSelect";
 import "./QueryStats.css";
 
 interface Props {
@@ -49,8 +50,12 @@ export function QueryStats({ connectionId }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("total_exec_time_ms");
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
   const [search, setSearch] = useState("");
+  const [userFilter, setUserFilter] = useState<string>("__all__");
   const [page, setPage] = useState(0);
   const [paused, setPaused] = useState(false);
+  const [enabling, setEnabling] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [enableError, setEnableError] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchStats = useCallback(async () => {
@@ -64,6 +69,24 @@ export function QueryStats({ connectionId }: Props) {
       setLoading(false);
     }
   }, [connectionId]);
+
+  const handleEnableExtension = useCallback(async () => {
+    setEnabling(true);
+    setEnableError(null);
+    try {
+      await api.executeQuery({
+        connection_id: connectionId,
+        database: "",
+        sql: "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;",
+      });
+      setLoading(true);
+      await fetchStats();
+    } catch (e) {
+      setEnableError(String(e));
+    } finally {
+      setEnabling(false);
+    }
+  }, [connectionId, fetchStats]);
 
   useEffect(() => {
     fetchStats();
@@ -82,9 +105,18 @@ export function QueryStats({ connectionId }: Props) {
     };
   }, [paused, fetchStats, data?.available]);
 
+  const uniqueUsers = useMemo(() => {
+    if (!data?.entries) return [];
+    const users = new Set(data.entries.map((e) => e.user).filter(Boolean));
+    return Array.from(users).sort();
+  }, [data]);
+
   const filtered = useMemo(() => {
     if (!data?.entries) return [];
     let entries = data.entries;
+    if (userFilter !== "__all__") {
+      entries = entries.filter((e) => e.user === userFilter);
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       entries = entries.filter((e) => e.query.toLowerCase().includes(q));
@@ -92,12 +124,12 @@ export function QueryStats({ connectionId }: Props) {
     return [...entries].sort(
       (a, b) => (b[sortKey] as number) - (a[sortKey] as number)
     );
-  }, [data, sortKey, search]);
+  }, [data, sortKey, search, userFilter]);
 
   useEffect(() => {
     setPage(0);
     setExpandedIdx(null);
-  }, [search, sortKey]);
+  }, [search, sortKey, userFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const pageEntries = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -134,36 +166,54 @@ export function QueryStats({ connectionId }: Props) {
         </div>
         <div className="qs-unavailable">
           <div className="qs-unavailable-icon">
-            <Database size={40} />
+            <Database size={36} />
           </div>
           <h3>pg_stat_statements not enabled</h3>
           <p>This extension is required to track query performance statistics.</p>
-          <div className="qs-setup-steps">
-            <div className="qs-step">
-              <span className="qs-step-num">1</span>
-              <div>
-                <strong>Add to postgresql.conf</strong>
-                <code>shared_preload_libraries = 'pg_stat_statements'</code>
+
+          <div className="qs-setup-card">
+            <div className="qs-setup-steps">
+              <div className="qs-step">
+                <span className="qs-step-num">1</span>
+                <div>
+                  <strong>Add to postgresql.conf</strong>
+                  <code>shared_preload_libraries = 'pg_stat_statements'</code>
+                </div>
+              </div>
+              <div className="qs-step">
+                <span className="qs-step-num">2</span>
+                <div>
+                  <strong>Restart PostgreSQL</strong>
+                  <code>sudo systemctl restart postgresql</code>
+                </div>
+              </div>
+              <div className="qs-step">
+                <span className="qs-step-num">3</span>
+                <div>
+                  <strong>Create the extension</strong>
+                  <code>CREATE EXTENSION pg_stat_statements;</code>
+                </div>
               </div>
             </div>
-            <div className="qs-step">
-              <span className="qs-step-num">2</span>
-              <div>
-                <strong>Restart PostgreSQL</strong>
-                <code>sudo systemctl restart postgresql</code>
-              </div>
+
+            <div className="qs-setup-actions">
+              <button
+                className="btn-primary qs-enable-btn"
+                onClick={handleEnableExtension}
+                disabled={enabling}
+              >
+                {enabling ? <><Loader2 size={14} className="spin" /> Enabling...</> : "Enable Extension"}
+              </button>
+              <button className="btn-ghost" disabled={checking} onClick={async () => { setChecking(true); await fetchStats(); setChecking(false); }}>
+                {checking ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />} {checking ? "Checking..." : "Check"}
+              </button>
             </div>
-            <div className="qs-step">
-              <span className="qs-step-num">3</span>
-              <div>
-                <strong>Create the extension</strong>
-                <code>CREATE EXTENSION pg_stat_statements;</code>
+            {enableError && (
+              <div className="qs-enable-error">
+                <AlertTriangle size={13} /> {enableError}
               </div>
-            </div>
+            )}
           </div>
-          <button className="btn-primary" onClick={() => { setLoading(true); fetchStats(); }} style={{ marginTop: 16 }}>
-            <RefreshCw size={14} /> Check Again
-          </button>
         </div>
       </div>
     );
@@ -178,9 +228,9 @@ export function QueryStats({ connectionId }: Props) {
       <div className="qs-toolbar">
         <span className="qs-title">Query Statistics</span>
         <span className="qs-count">
-          {filtered.length === data?.entries.length
+          {filtered.length === (data?.entries?.length ?? 0)
             ? `${filtered.length} queries`
-            : `${filtered.length} of ${data?.entries.length} queries`}
+            : `${filtered.length} of ${data?.entries?.length ?? 0} queries`}
         </span>
         <div style={{ flex: 1 }} />
         <div className="qs-search">
@@ -192,19 +242,27 @@ export function QueryStats({ connectionId }: Props) {
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
-        <label className="qs-sort-label">
-          Sort by
-          <select
+        <div className="qs-sort-label">
+          User
+          <CustomSelect
+            value={userFilter}
+            options={[
+              { value: "__all__", label: "All Users" },
+              ...uniqueUsers.map((u) => ({ value: u, label: u })),
+            ]}
+            onChange={(v) => setUserFilter(v)}
+            className="qs-sort-select"
+          />
+        </div>
+        <div className="qs-sort-label">
+          Sort
+          <CustomSelect
             value={sortKey}
-            onChange={(e) => setSortKey(e.target.value as SortKey)}
-          >
-            {SORT_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </label>
+            options={SORT_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+            onChange={(v) => setSortKey(v as SortKey)}
+            className="qs-sort-select"
+          />
+        </div>
         <button
           className={`btn-ghost ${!paused ? "active" : ""}`}
           onClick={() => setPaused(!paused)}
@@ -223,19 +281,20 @@ export function QueryStats({ connectionId }: Props) {
           <thead>
             <tr>
               <th style={{ width: 32 }}></th>
-              <th>Query</th>
-              <th style={{ width: 90 }}>Calls</th>
-              <th style={{ width: 110 }}>Total Time</th>
-              <th style={{ width: 100 }}>Mean Time</th>
-              <th style={{ width: 100 }}>Max Time</th>
-              <th style={{ width: 90 }}>Rows</th>
-              <th style={{ width: 120 }}>Cache Hit</th>
+              <th style={{ maxWidth: 420 }}>Query</th>
+              <th style={{ width: 90 }} title="Total number of times this query has been executed">Calls</th>
+              <th style={{ width: 90 }} title="PostgreSQL role that executed the query">User</th>
+              <th style={{ width: 110 }} title="Cumulative execution time across all calls">Total Time</th>
+              <th style={{ width: 100 }} title="Average execution time per call">Mean Time</th>
+              <th style={{ width: 100 }} title="Longest single execution of this query">Max Time</th>
+              <th style={{ width: 90 }} title="Total number of rows returned by all executions">Rows</th>
+              <th style={{ width: 120 }} title="Percentage of reads served from buffer cache vs disk">Cache Hit</th>
             </tr>
           </thead>
           <tbody>
             {pageEntries.length === 0 ? (
               <tr>
-                <td colSpan={8} className="info-empty">
+                <td colSpan={9} className="info-empty">
                   {search ? "No queries match your search" : "No query statistics available"}
                 </td>
               </tr>
@@ -309,10 +368,11 @@ function QueryRow({
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </td>
         <td className="qs-query-cell" title={entry.query}>
-          {entry.query.substring(0, 100)}
-          {entry.query.length > 100 ? "..." : ""}
+          {entry.query.substring(0, 80)}
+          {entry.query.length > 80 ? "..." : ""}
         </td>
         <td className="qs-num">{formatNumber(entry.calls)}</td>
+        <td className="qs-user-cell">{entry.user}</td>
         <td className="qs-num">{formatDuration(entry.total_exec_time_ms)}</td>
         <td className={`qs-num ${meanClass}`}>
           {formatDuration(entry.mean_exec_time_ms)}
@@ -336,7 +396,7 @@ function QueryRow({
       </tr>
       {expanded && (
         <tr className="qs-detail-row">
-          <td colSpan={8}>
+          <td colSpan={9}>
             <QueryDetail entry={entry} />
           </td>
         </tr>

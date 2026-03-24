@@ -498,6 +498,11 @@ select {
   padding-right: 32px;
 }
 
+select option {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);

@@ -8,6 +8,7 @@ use anyhow::Result;
 use crate::models::*;
 
 #[async_trait]
+#[allow(clippy::too_many_arguments)]
 pub trait DatabaseDriver: Send + Sync {
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>>;
     async fn list_schemas(&self, database: &str) -> Result<Vec<SchemaInfo>>;

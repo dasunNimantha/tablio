@@ -100,6 +100,12 @@ export default function App() {
   const [resourceUsage, setResourceUsage] = useState({ memory_mb: 0, cpu_percent: 0 });
 
   useEffect(() => {
+    return () => {
+      if (zoomTimerRef.current) clearTimeout(zoomTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
     loadConnections();
   }, [loadConnections]);
 
@@ -108,7 +114,7 @@ export default function App() {
     const poll = () => {
       api.getAppResourceUsage().then((r) => {
         if (alive) setResourceUsage(r);
-      }).catch(() => {});
+      }).catch((e) => console.warn("Resource usage fetch failed:", e));
     };
     poll();
     const id = setInterval(poll, 3000);

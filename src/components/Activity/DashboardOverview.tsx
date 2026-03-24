@@ -37,10 +37,10 @@ function getThemeColors() {
     border: isLight ? "rgba(0,0,0,0.12)" : "rgba(255,255,255,0.15)",
     label: isLight ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.55)",
     crosshair: isLight ? "rgba(0,0,0,0.15)" : "rgba(255,255,255,0.2)",
-    tooltipBg: isLight ? "rgba(255,255,255,0.96)" : "rgba(22,22,28,0.96)",
-    tooltipTitle: isLight ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.5)",
-    tooltipBody: isLight ? "rgba(0,0,0,0.85)" : "rgba(255,255,255,0.95)",
-    tooltipBorder: isLight ? "rgba(0,0,0,0.1)" : "rgba(255,255,255,0.12)",
+    tooltipBg: isLight ? "rgba(255,255,255,0.99)" : "rgba(30,30,38,0.98)",
+    tooltipTitle: isLight ? "rgba(0,0,0,0.72)" : "rgba(230,232,240,0.95)",
+    tooltipBody: isLight ? "rgba(0,0,0,0.92)" : "rgba(255,255,255,1)",
+    tooltipBorder: isLight ? "rgba(0,0,0,0.14)" : "rgba(255,255,255,0.22)",
     pointHoverBorder: isLight ? "#333" : "#fff",
   };
 }
@@ -120,10 +120,13 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
         if (yScale.border) { yScale.border.color = tc.border; }
       }
       if (opts.plugins?.tooltip) {
-        opts.plugins.tooltip.backgroundColor = tc.tooltipBg;
-        opts.plugins.tooltip.titleColor = tc.tooltipTitle;
-        opts.plugins.tooltip.bodyColor = tc.tooltipBody;
-        opts.plugins.tooltip.borderColor = tc.tooltipBorder;
+        const tip = opts.plugins.tooltip as Record<string, unknown>;
+        tip.backgroundColor = tc.tooltipBg;
+        tip.titleColor = tc.tooltipTitle;
+        tip.bodyColor = tc.tooltipBody;
+        tip.borderColor = tc.tooltipBorder;
+        tip.titleFont = { size: 12, weight: "600", family: "'JetBrains Mono', monospace" };
+        tip.bodyFont = { size: 12, weight: "500", family: "'JetBrains Mono', monospace" };
       }
       chartRef.current.update("none");
     } else {
@@ -196,14 +199,14 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
             bodyColor: tc.tooltipBody,
             borderColor: tc.tooltipBorder,
             borderWidth: 1,
-            padding: { top: 10, bottom: 10, left: 14, right: 14 },
-            titleFont: { size: 11, weight: "normal", family: "'JetBrains Mono', monospace" },
-            bodyFont: { size: 11, family: "'JetBrains Mono', monospace" },
-            bodySpacing: 6,
+            padding: { top: 12, bottom: 12, left: 16, right: 16 },
+            titleFont: { size: 12, weight: "600", family: "'JetBrains Mono', monospace" },
+            bodyFont: { size: 12, weight: "500", family: "'JetBrains Mono', monospace" },
+            bodySpacing: 8,
             displayColors: true,
-            boxWidth: 10,
-            boxHeight: 10,
-            boxPadding: 6,
+            boxWidth: 11,
+            boxHeight: 11,
+            boxPadding: 8,
             cornerRadius: 8,
             caretSize: 0,
             usePointStyle: true,

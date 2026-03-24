@@ -331,6 +331,7 @@ pub struct QueryStatsRequest {
 pub struct QueryStatEntry {
     pub query: String,
     pub queryid: Option<i64>,
+    pub user: String,
     pub calls: i64,
     pub total_exec_time_ms: f64,
     pub mean_exec_time_ms: f64,
