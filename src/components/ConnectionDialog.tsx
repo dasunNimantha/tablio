@@ -22,7 +22,8 @@ interface Props {
 }
 
 export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
-  const { addConnection, updateConnection } = useConnectionStore();
+  const addConnection = useConnectionStore((s) => s.addConnection);
+  const updateConnection = useConnectionStore((s) => s.updateConnection);
   const isEdit = !!editConfig && !duplicate;
 
   const [form, setForm] = useState<ConnectionConfig>(() => {

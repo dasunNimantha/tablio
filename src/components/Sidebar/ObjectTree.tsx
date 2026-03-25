@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
+import { useShallow } from "zustand/react/shallow";
 import { api, DatabaseInfo, SchemaInfo, TableInfo, FunctionInfo } from "../../lib/tauri";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { ConnectionDialog } from "../ConnectionDialog";
@@ -56,8 +58,15 @@ interface ObjectTreeProps {
 }
 
 export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImportData, onBackupRestore, onDumpRestore }: ObjectTreeProps) {
-  const { connections, activeConnections, connectTo, disconnectFrom, removeConnection, updateConnection } = useConnectionStore();
-  const { openTab } = useTabStore();
+  const { connections, activeConnections, connectTo, disconnectFrom, removeConnection, updateConnection } = useConnectionStore(useShallow((s) => ({
+    connections: s.connections,
+    activeConnections: s.activeConnections,
+    connectTo: s.connectTo,
+    disconnectFrom: s.disconnectFrom,
+    removeConnection: s.removeConnection,
+    updateConnection: s.updateConnection,
+  })));
+  const openTab = useTabStore((s) => s.openTab);
   const [editingConn, setEditingConn] = useState<import("../../lib/tauri").ConnectionConfig | null>(null);
   const [duplicatingConn, setDuplicatingConn] = useState<import("../../lib/tauri").ConnectionConfig | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
@@ -935,7 +944,7 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
       });
     }
 
-    return (
+    return createPortal(
       <>
         <div className="context-backdrop" onClick={() => setContextMenu(null)} />
         <div
@@ -943,12 +952,17 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
           style={{ left: contextMenu.x, top: contextMenu.y }}
           ref={(el) => {
             if (!el) return;
+            const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
             const rect = el.getBoundingClientRect();
-            if (rect.bottom > window.innerHeight) {
-              el.style.top = `${contextMenu.y - rect.height}px`;
+            const vh = window.innerHeight / z;
+            const vw = window.innerWidth / z;
+            const menuH = rect.height / z;
+            const menuW = rect.width / z;
+            if (contextMenu.y + menuH > vh) {
+              el.style.top = `${Math.max(4, contextMenu.y - menuH)}px`;
             }
-            if (rect.right > window.innerWidth) {
-              el.style.left = `${contextMenu.x - rect.width}px`;
+            if (contextMenu.x + menuW > vw) {
+              el.style.left = `${Math.max(4, contextMenu.x - menuW)}px`;
             }
           }}
         >
@@ -992,7 +1006,8 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
             )
           )}
         </div>
-      </>
+      </>,
+      document.body
     );
   };
 
@@ -1356,7 +1371,7 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
                 );
               })}
             {grouped.ungrouped.map(renderConnectionNode)}
-            {groupContextMenu && (
+            {groupContextMenu && createPortal(
               <>
                 <div className="context-backdrop" onClick={() => setGroupContextMenu(null)} />
                 <div
@@ -1364,9 +1379,14 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
                   style={{ left: groupContextMenu.x, top: groupContextMenu.y }}
                   ref={(el) => {
                     if (!el) return;
+                    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
                     const rect = el.getBoundingClientRect();
-                    if (rect.bottom > window.innerHeight) el.style.top = `${groupContextMenu.y - rect.height}px`;
-                    if (rect.right > window.innerWidth) el.style.left = `${groupContextMenu.x - rect.width}px`;
+                    const vh = window.innerHeight / z;
+                    const vw = window.innerWidth / z;
+                    const menuH = rect.height / z;
+                    const menuW = rect.width / z;
+                    if (groupContextMenu.y + menuH > vh) el.style.top = `${Math.max(4, groupContextMenu.y - menuH)}px`;
+                    if (groupContextMenu.x + menuW > vw) el.style.left = `${Math.max(4, groupContextMenu.x - menuW)}px`;
                   }}
                 >
                   <button onClick={() => {
@@ -1379,7 +1399,8 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
                     setGroupContextMenu(null);
                   }}>Delete Folder</button>
                 </div>
-              </>
+              </>,
+              document.body
             )}
           </>
         )}

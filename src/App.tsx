@@ -49,9 +49,38 @@ interface DumpRestoreTarget {
   database: string;
 }
 
+function ResourceMonitor() {
+  const [usage, setUsage] = useState({ memory_mb: 0, cpu_percent: 0 });
+  useEffect(() => {
+    let alive = true;
+    const poll = () => {
+      api.getAppResourceUsage().then((r) => {
+        if (alive) setUsage(r);
+      }).catch(() => {});
+    };
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+  return (
+    <div className="statusbar-left">
+      <span className="statusbar-resource" title="Memory Usage">
+        <MemoryStick size={13} />
+        {usage.memory_mb < 1024
+          ? `${usage.memory_mb.toFixed(1)} MB`
+          : `${(usage.memory_mb / 1024).toFixed(2)} GB`}
+      </span>
+      <span className="statusbar-resource" title="CPU Usage">
+        <Cpu size={13} />
+        {usage.cpu_percent.toFixed(1)}%
+      </span>
+    </div>
+  );
+}
+
 export default function App() {
-  const { loadConnections } = useConnectionStore();
-  const { tabs } = useTabStore();
+  const loadConnections = useConnectionStore((s) => s.loadConnections);
+  const tabs = useTabStore((s) => s.tabs);
   const [showConnDialog, setShowConnDialog] = useState(false);
   const [createTableTarget, setCreateTableTarget] = useState<CreateTableTarget | null>(null);
   const [alterTableTarget, setAlterTableTarget] = useState<AlterTableTarget | null>(null);
@@ -75,6 +104,7 @@ export default function App() {
     return saved ? parseInt(saved, 10) : 270;
   });
   const sidebarWidthRef = useRef(sidebarWidth);
+  const sidebarElRef = useRef<HTMLDivElement>(null);
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -84,20 +114,22 @@ export default function App() {
     const onMove = (ev: MouseEvent) => {
       const w = Math.max(200, Math.min(ev.clientX, 500));
       sidebarWidthRef.current = w;
-      setSidebarWidth(w);
+      if (sidebarElRef.current) {
+        sidebarElRef.current.style.width = `${w}px`;
+        sidebarElRef.current.style.minWidth = `${w}px`;
+      }
     };
     const onUp = () => {
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      setSidebarWidth(sidebarWidthRef.current);
       localStorage.setItem("dbstudio-sidebar-width", String(sidebarWidthRef.current));
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
   }, []);
-
-  const [resourceUsage, setResourceUsage] = useState({ memory_mb: 0, cpu_percent: 0 });
 
   useEffect(() => {
     return () => {
@@ -108,18 +140,6 @@ export default function App() {
   useEffect(() => {
     loadConnections();
   }, [loadConnections]);
-
-  useEffect(() => {
-    let alive = true;
-    const poll = () => {
-      api.getAppResourceUsage().then((r) => {
-        if (alive) setResourceUsage(r);
-      }).catch((e) => console.warn("Resource usage fetch failed:", e));
-    };
-    poll();
-    const id = setInterval(poll, 3000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
 
 
   useEffect(() => {
@@ -193,7 +213,7 @@ export default function App() {
 
   return (
     <div className="app-layout">
-      <div className="sidebar" style={{ width: sidebarWidth, minWidth: sidebarWidth }}>
+      <div ref={sidebarElRef} className="sidebar" style={{ width: sidebarWidth, minWidth: sidebarWidth }}>
         <ObjectTree
           onAddConnection={() => setShowConnDialog(true)}
           onCreateTable={(connectionId, connectionColor, database, schema) =>
@@ -235,18 +255,7 @@ export default function App() {
           </div>
         )}
         <div className="statusbar">
-          <div className="statusbar-left">
-            <span className="statusbar-resource" title="Memory Usage">
-              <MemoryStick size={13} />
-              {resourceUsage.memory_mb < 1024
-                ? `${resourceUsage.memory_mb.toFixed(1)} MB`
-                : `${(resourceUsage.memory_mb / 1024).toFixed(2)} GB`}
-            </span>
-            <span className="statusbar-resource" title="CPU Usage">
-              <Cpu size={13} />
-              {resourceUsage.cpu_percent.toFixed(1)}%
-            </span>
-          </div>
+          <ResourceMonitor />
           <div className="statusbar-right">
             {showZoom && (
               <span

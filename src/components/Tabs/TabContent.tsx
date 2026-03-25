@@ -1,4 +1,5 @@
 import { useTabStore } from "../../stores/tabStore";
+import { useShallow } from "zustand/react/shallow";
 import { DataGrid } from "../DataGrid/DataGrid";
 import { QueryConsole } from "../QueryConsole/QueryConsole";
 import { DDLViewer } from "../DDLViewer/DDLViewer";
@@ -10,7 +11,7 @@ import { ERDView } from "../ERD/ERDView";
 import { QueryStats } from "../QueryStats/QueryStats";
 
 export function TabContent() {
-  const { tabs, activeTabId } = useTabStore();
+  const { tabs, activeTabId } = useTabStore(useShallow((s) => ({ tabs: s.tabs, activeTabId: s.activeTabId })));
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
   if (!activeTab) return null;

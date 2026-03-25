@@ -1,11 +1,19 @@
 import { useTabStore } from "../../stores/tabStore";
+import { useShallow } from "zustand/react/shallow";
 import { X, Table2, Terminal, Code, Columns3, Activity, BarChart3, Shield, TrendingUp } from "lucide-react";
 import { useState, useRef } from "react";
 import "./Tabs.css";
 
 export function TabBar() {
   const { tabs, activeTabId, setActiveTab, closeTab, closeOtherTabs, closeAllTabs } =
-    useTabStore();
+    useTabStore(useShallow((s) => ({
+      tabs: s.tabs,
+      activeTabId: s.activeTabId,
+      setActiveTab: s.setActiveTab,
+      closeTab: s.closeTab,
+      closeOtherTabs: s.closeOtherTabs,
+      closeAllTabs: s.closeAllTabs,
+    })));
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -101,12 +109,17 @@ export function TabBar() {
             style={{ left: contextMenu.x, top: contextMenu.y }}
             ref={(el) => {
               if (!el) return;
+              const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
               const rect = el.getBoundingClientRect();
-              if (rect.bottom > window.innerHeight) {
-                el.style.top = `${contextMenu.y - rect.height}px`;
+              const vh = window.innerHeight / z;
+              const vw = window.innerWidth / z;
+              const menuH = rect.height / z;
+              const menuW = rect.width / z;
+              if (contextMenu.y + menuH > vh) {
+                el.style.top = `${Math.max(4, contextMenu.y - menuH)}px`;
               }
-              if (rect.right > window.innerWidth) {
-                el.style.left = `${contextMenu.x - rect.width}px`;
+              if (contextMenu.x + menuW > vw) {
+                el.style.left = `${Math.max(4, contextMenu.x - menuW)}px`;
               }
             }}
           >

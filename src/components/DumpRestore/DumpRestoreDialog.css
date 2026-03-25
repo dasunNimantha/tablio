@@ -13,13 +13,14 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 40px;
+  height: 38px;
   padding: 0 12px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  font-size: 15px;
+  font-size: 13px;
   color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
 }
 
 .dr-dot {
@@ -36,13 +37,13 @@
 .dr-mono {
   font-family: var(--font-mono);
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: 12px;
 }
 
 .dr-host {
   margin-left: auto;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
@@ -103,10 +104,11 @@
   border-radius: var(--radius-md);
   background: transparent;
   cursor: pointer;
-  font-size: 15px;
+  font-size: 13px;
   text-align: left;
   color: var(--text-primary);
   transition: background 0.1s, border-color 0.1s;
+  -webkit-font-smoothing: antialiased;
 }
 
 .dr-target-item:hover {
@@ -125,6 +127,7 @@
 
 .dr-target-name {
   font-weight: 500;
+  font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -132,14 +135,14 @@
 
 .dr-target-db {
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: 12px;
   color: var(--text-secondary);
   white-space: nowrap;
 }
 
 .dr-target-host {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-muted);
   white-space: nowrap;
 }
@@ -165,8 +168,9 @@
   align-items: flex-start;
   padding: 12px 14px;
   border-radius: var(--radius-md);
-  font-size: 15px;
+  font-size: 13px;
   line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
 .dr-banner svg {
@@ -175,11 +179,12 @@
 }
 
 .dr-banner strong {
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .dr-banner-sub {
   margin: 2px 0 0;
+  font-size: 12.5px;
   color: var(--text-secondary);
   word-break: break-word;
 }
@@ -279,7 +284,7 @@
 
 /* ── Footer extras ───────────────────────────────────── */
 .dr-footer-hint {
-  font-size: 15px;
+  font-size: 13px;
   color: var(--text-muted);
   margin-right: auto;
 }
@@ -289,16 +294,17 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 36px;
+  height: 34px;
   padding: 0 16px;
   background: var(--error);
   color: var(--text-inverse);
   border: none;
   border-radius: var(--radius-md);
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   transition: background 0.12s;
+  -webkit-font-smoothing: antialiased;
 }
 
 .dr-btn-danger:hover {

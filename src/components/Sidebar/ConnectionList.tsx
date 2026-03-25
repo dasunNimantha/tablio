@@ -1,5 +1,6 @@
 import { useConnectionStore } from "../../stores/connectionStore";
 import { useTabStore } from "../../stores/tabStore";
+import { useShallow } from "zustand/react/shallow";
 import {
   Plus,
   Power,
@@ -24,7 +25,13 @@ interface Props {
 
 export function ConnectionList({ onAddConnection }: Props) {
   const { connections, activeConnections, connectTo, disconnectFrom, removeConnection } =
-    useConnectionStore();
+    useConnectionStore(useShallow((s) => ({
+      connections: s.connections,
+      activeConnections: s.activeConnections,
+      connectTo: s.connectTo,
+      disconnectFrom: s.disconnectFrom,
+      removeConnection: s.removeConnection,
+    })));
   const [editingConn, setEditingConn] = useState<ConnectionConfig | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());

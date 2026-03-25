@@ -20,8 +20,11 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
-.grid-toolbar .btn-ghost {
+.grid-toolbar .btn-ghost,
+.grid-toolbar .btn-primary {
   font-weight: 400;
+  height: 30px;
+  font-size: 13px;
 }
 
 .grid-toolbar-left {
@@ -95,7 +98,7 @@
 }
 
 .grid-table th:hover {
-  background: var(--bg-active);
+  background: color-mix(in srgb, var(--bg-header) 88%, white);
   color: var(--text-primary);
 }
 
@@ -169,23 +172,19 @@ th.grid-row-number {
 }
 
 .grid-table tbody tr {
-  transition: background 0.08s;
   cursor: pointer;
-}
-
-.grid-table tbody tr td {
   background: var(--bg-secondary);
 }
 
-.grid-table tbody tr:nth-child(even) td {
+.grid-table tbody tr:nth-child(even) {
   background: var(--bg-primary);
 }
 
-.grid-table tbody tr:hover td {
+.grid-table tbody tr:hover {
   background: var(--bg-hover);
 }
 
-.grid-table tbody tr.row-selected td {
+.grid-table tbody tr.row-selected {
   background: var(--bg-selected);
 }
 

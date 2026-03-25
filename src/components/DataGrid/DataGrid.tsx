@@ -9,7 +9,6 @@ import {
   NewRow,
   DeleteRow,
 } from "../../lib/tauri";
-import { EditableCell } from "./EditableCell";
 import { FilterBar } from "./FilterBar";
 import { RowDetailView } from "./RowDetailView";
 import { ExportMenu } from "../ExportMenu";
@@ -49,7 +48,7 @@ interface PendingChanges {
   deletedKeys: Set<string>;
 }
 
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 50;
 const REFRESH_OPTIONS = [
   { label: "Off", value: 0 },
   { label: "5s", value: 5 },
@@ -88,6 +87,12 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const tableRef = useRef<HTMLDivElement>(null);
   const resizingRef = useRef<{ col: string; startX: number; startWidth: number } | null>(null);
+  const [editingCell, setEditingCell] = useState<{ row: number; col: number } | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const editInputRef = useRef<HTMLInputElement>(null);
+  const editCommittedRef = useRef(false);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(600);
 
   const [colSettings, setColSettings] = useState<ColumnSettings>(() => {
     return loadColumnSettings(connectionId, database, schema, table) || { order: [], hidden: new Set() };
@@ -232,6 +237,43 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     }
   }, [searchQuery]);
 
+  const ROW_HEIGHT = 36;
+  const HEADER_HEIGHT = 38;
+  const OVERSCAN = 5;
+
+  const viewportHeightRef = useRef(600);
+  useEffect(() => {
+    const el = tableRef.current;
+    if (!el) return;
+    let rafId = 0;
+    const onScroll = () => {
+      if (rafId) return;
+      rafId = requestAnimationFrame(() => {
+        setScrollTop(el.scrollTop);
+        rafId = 0;
+      });
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const h = Math.round(entry.contentRect.height);
+        if (Math.abs(h - viewportHeightRef.current) > 2) {
+          viewportHeightRef.current = h;
+          setViewportHeight(h);
+        }
+      }
+    });
+    ro.observe(el);
+    const h = Math.round(el.clientHeight);
+    viewportHeightRef.current = h;
+    setViewportHeight(h);
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (rafId) cancelAnimationFrame(rafId);
+      ro.disconnect();
+    };
+  }, [data]);
+
   const totalPages = data ? Math.ceil(data.total_rows / PAGE_SIZE) : 0;
 
   const handleSort = (column: string) => {
@@ -261,7 +303,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     return JSON.stringify(values);
   };
 
-  const handleCellChange = (
+  const handleCellChange = useCallback((
     rowIndex: number,
     colIndex: number,
     newValue: unknown
@@ -296,7 +338,39 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       next[rowIndex][colIndex] = newValue;
       return next;
     });
-  };
+  }, [data, getPkValues, getPkKey]);
+
+  const startCellEdit = useCallback((rowIdx: number, colIdx: number, value: unknown) => {
+    editCommittedRef.current = false;
+    setEditingCell({ row: rowIdx, col: colIdx });
+    setEditValue(value === null || value === undefined ? "" : String(value));
+  }, []);
+
+  const commitCellEdit = useCallback(() => {
+    if (editCommittedRef.current || !editingCell || !data) return;
+    editCommittedRef.current = true;
+    const { row, col } = editingCell;
+    const column = data.columns[col];
+    setEditingCell(null);
+    if (editValue === "" && column.is_nullable) {
+      handleCellChange(row, col, null);
+      return;
+    }
+    const parsed = parseCellValue(editValue, column.data_type);
+    handleCellChange(row, col, parsed);
+  }, [editingCell, editValue, data, handleCellChange]);
+
+  const cancelCellEdit = useCallback(() => {
+    editCommittedRef.current = true;
+    setEditingCell(null);
+  }, []);
+
+  useEffect(() => {
+    if (editingCell && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingCell]);
 
   const handleAddRow = () => {
     if (!data) return;
@@ -441,16 +515,23 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       e.stopPropagation();
       const startWidth = thEl.offsetWidth;
       resizingRef.current = { col: colName, startX: e.clientX, startWidth };
+      let rafId = 0;
 
       const onMove = (ev: MouseEvent) => {
         if (!resizingRef.current) return;
-        const diff = ev.clientX - resizingRef.current.startX;
-        const newWidth = Math.max(60, resizingRef.current.startWidth + diff);
-        setColumnWidths((prev) => ({ ...prev, [resizingRef.current!.col]: newWidth }));
+        if (rafId) return;
+        rafId = requestAnimationFrame(() => {
+          if (!resizingRef.current) return;
+          const diff = ev.clientX - resizingRef.current.startX;
+          const newWidth = Math.max(60, resizingRef.current.startWidth + diff);
+          setColumnWidths((prev) => ({ ...prev, [resizingRef.current!.col]: newWidth }));
+          rafId = 0;
+        });
       };
 
       const onUp = () => {
         resizingRef.current = null;
+        if (rafId) cancelAnimationFrame(rafId);
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
         document.body.style.cursor = "";
@@ -464,6 +545,34 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     },
     []
   );
+
+  const originalRowCount = data?.rows.length ?? 0;
+
+  const orderedRowIndices = useMemo(() => {
+    if (!editingRows.length) return [];
+    const inserted: number[] = [];
+    const existing: number[] = [];
+    for (let i = 0; i < editingRows.length; i++) {
+      if (i >= originalRowCount) inserted.push(i);
+      else existing.push(i);
+    }
+    return [...inserted, ...existing];
+  }, [editingRows.length, originalRowCount]);
+
+  const virtualRange = useMemo(() => {
+    const totalRows = orderedRowIndices.length;
+    if (totalRows === 0) return { start: 0, end: 0, topPad: 0, bottomPad: 0 };
+    const visibleStart = Math.floor(Math.max(0, scrollTop - HEADER_HEIGHT) / ROW_HEIGHT);
+    const visibleCount = Math.ceil(viewportHeight / ROW_HEIGHT);
+    const start = Math.max(0, visibleStart - OVERSCAN);
+    const end = Math.min(totalRows, visibleStart + visibleCount + OVERSCAN);
+    return {
+      start,
+      end,
+      topPad: start * ROW_HEIGHT,
+      bottomPad: Math.max(0, (totalRows - end) * ROW_HEIGHT),
+    };
+  }, [orderedRowIndices.length, scrollTop, viewportHeight]);
 
   if (loading && !data) {
     return (
@@ -486,8 +595,6 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   }
 
   if (!data) return null;
-
-  const originalRowCount = data.rows.length;
 
   return (
     <div className="data-grid-container">
@@ -651,10 +758,10 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
             </tr>
           </thead>
           <tbody>
-            {[
-              ...editingRows.map((_, i) => i).filter((i) => i >= originalRowCount),
-              ...editingRows.map((_, i) => i).filter((i) => i < originalRowCount),
-            ].map((rowIdx) => {
+            {virtualRange.topPad > 0 && (
+              <tr style={{ height: virtualRange.topPad }} aria-hidden="true"><td colSpan={visibleIndices.length + 2} /></tr>
+            )}
+            {orderedRowIndices.slice(virtualRange.start, virtualRange.end).map((rowIdx) => {
               const row = editingRows[rowIdx];
               const isInserted = rowIdx >= originalRowCount;
               const pkKey = !isInserted ? getPkKey(rowIdx) : "";
@@ -684,24 +791,60 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
                   {visibleIndices.map((colIdx) => {
                     const col = data.columns[colIdx];
                     const value = row[colIdx];
-                    const changeKey = !isInserted
-                      ? `${pkKey}:${col.name}`
-                      : null;
-                    const isModified =
-                      changeKey !== null && changes.updates.has(changeKey);
+                    const isNull = value === null || value === undefined;
+                    const changeKey = !isInserted ? `${pkKey}:${col.name}` : null;
+                    const isModified = changeKey !== null && changes.updates.has(changeKey);
+                    const isAutoOnInsert = isInserted && col.is_auto_generated && isNull;
+                    const isEditing = editingCell?.row === rowIdx && editingCell?.col === colIdx;
+
+                    let cls = "grid-cell";
+                    if (isAutoOnInsert) cls += " cell-auto";
+                    else if (isNull) cls += " cell-null";
+                    if (isModified) cls += " cell-modified";
+                    if (isInserted) cls += " cell-inserted";
+                    if (isEditing) cls += " cell-editing";
+
+                    if (isAutoOnInsert) {
+                      return <td key={colIdx} className={cls} title="Auto-generated by database"><span className="cell-value cell-auto-label">auto</span></td>;
+                    }
+
+                    if (isEditing) {
+                      return (
+                        <td key={colIdx} className={cls}>
+                          <input
+                            ref={editInputRef}
+                            className="cell-input"
+                            value={editValue}
+                            onChange={(e) => setEditValue(e.target.value)}
+                            onBlur={commitCellEdit}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") commitCellEdit();
+                              else if (e.key === "Escape") cancelCellEdit();
+                              else if (e.key === "Tab") { e.preventDefault(); commitCellEdit(); }
+                            }}
+                          />
+                        </td>
+                      );
+                    }
+
+                    const displayValue = isNull ? "NULL" : String(value);
+                    let content: React.ReactNode = displayValue;
+                    if (searchQuery) {
+                      const q = searchQuery.toLowerCase();
+                      const str = isNull ? "null" : (typeof value === "object" ? JSON.stringify(value) : String(value));
+                      if (str.toLowerCase().includes(q)) {
+                        cls += " cell-search-match";
+                        const idx = displayValue.toLowerCase().indexOf(q);
+                        if (idx !== -1) {
+                          content = <>{displayValue.slice(0, idx)}<mark className="cell-search-highlight">{displayValue.slice(idx, idx + searchQuery.length)}</mark>{displayValue.slice(idx + searchQuery.length)}</>;
+                        }
+                      }
+                    }
 
                     return (
-                      <EditableCell
-                        key={`${rowIdx}-${colIdx}`}
-                        value={value}
-                        column={col}
-                        isModified={isModified}
-                        isInserted={isInserted}
-                        searchQuery={searchQuery}
-                        onChange={(newVal) =>
-                          handleCellChange(rowIdx, colIdx, newVal)
-                        }
-                      />
+                      <td key={colIdx} className={cls} onDoubleClick={() => startCellEdit(rowIdx, colIdx, value)}>
+                        <span className="cell-value">{content}</span>
+                      </td>
                     );
                   })}
                   <td className="grid-actions-cell">
@@ -722,6 +865,9 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
                 </tr>
               );
             })}
+            {virtualRange.bottomPad > 0 && (
+              <tr style={{ height: virtualRange.bottomPad }} aria-hidden="true"><td colSpan={visibleIndices.length + 2} /></tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -777,12 +923,17 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           style={{ left: rowContextMenu.x, top: rowContextMenu.y }}
           ref={(el) => {
             if (!el) return;
+            const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
             const rect = el.getBoundingClientRect();
-            if (rect.bottom > window.innerHeight) {
-              el.style.top = `${rowContextMenu.y - rect.height}px`;
+            const vh = window.innerHeight / z;
+            const vw = window.innerWidth / z;
+            const menuH = rect.height / z;
+            const menuW = rect.width / z;
+            if (rowContextMenu.y + menuH > vh) {
+              el.style.top = `${Math.max(4, rowContextMenu.y - menuH)}px`;
             }
-            if (rect.right > window.innerWidth) {
-              el.style.left = `${rowContextMenu.x - rect.width}px`;
+            if (rowContextMenu.x + menuW > vw) {
+              el.style.left = `${Math.max(4, rowContextMenu.x - menuW)}px`;
             }
           }}
         >
@@ -835,4 +986,20 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       )}
     </div>
   );
+}
+
+function parseCellValue(raw: string, dataType: string): unknown {
+  const t = dataType.toLowerCase();
+  if (t.includes("int") || t === "serial" || t === "bigserial" || t === "smallserial") {
+    const n = parseInt(raw, 10);
+    return isNaN(n) ? raw : n;
+  }
+  if (t.includes("float") || t.includes("double") || t.includes("decimal") || t.includes("numeric") || t === "real") {
+    const n = parseFloat(raw);
+    return isNaN(n) ? raw : n;
+  }
+  if (t === "boolean" || t === "bool") {
+    return raw.toLowerCase() === "true" || raw === "1";
+  }
+  return raw;
 }

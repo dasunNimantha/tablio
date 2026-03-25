@@ -113,7 +113,7 @@ export function BackupRestoreDialog({
   };
 
   return (
-    <div className="dialog-overlay" onClick={onClose}>
+    <div className="dialog-overlay" onClick={loading ? undefined : onClose}>
       <div
         className="dialog backup-restore-dialog"
         onClick={(e) => e.stopPropagation()}
@@ -123,7 +123,7 @@ export function BackupRestoreDialog({
             <Database size={18} />
             Backup / Restore
           </h2>
-          <button className="btn-icon" onClick={onClose}>
+          <button className="btn-icon" onClick={onClose} disabled={loading}>
             <X size={18} />
           </button>
         </div>
@@ -280,7 +280,7 @@ export function BackupRestoreDialog({
         </div>
 
         <div className="dialog-footer">
-          <button className="btn-secondary" onClick={onClose}>
+          <button className="btn-secondary" onClick={onClose} disabled={loading}>
             Close
           </button>
         </div>

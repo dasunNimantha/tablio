@@ -8,16 +8,20 @@ interface Props {
   isModified: boolean;
   isInserted: boolean;
   searchQuery?: string;
-  onChange: (newValue: unknown) => void;
+  rowIdx: number;
+  colIdx: number;
+  onCellChange: (rowIdx: number, colIdx: number, newValue: unknown) => void;
 }
 
-export function EditableCell({
+export const EditableCell = React.memo(function EditableCell({
   value,
   column,
   isModified,
   isInserted,
   searchQuery,
-  onChange,
+  rowIdx,
+  colIdx,
+  onCellChange,
 }: Props) {
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState("");
@@ -39,11 +43,11 @@ export function EditableCell({
     committedRef.current = true;
     setEditing(false);
     if (editValue === "" && column.is_nullable) {
-      onChange(null);
+      onCellChange(rowIdx, colIdx, null);
       return;
     }
     const parsed = parseValue(editValue, column.data_type);
-    onChange(parsed);
+    onCellChange(rowIdx, colIdx, parsed);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -129,7 +133,7 @@ export function EditableCell({
       <span className="cell-value">{isSearchMatch ? highlightText(displayValue) : displayValue}</span>
     </td>
   );
-}
+});
 
 function parseValue(raw: string, dataType: string): unknown {
   const t = dataType.toLowerCase();

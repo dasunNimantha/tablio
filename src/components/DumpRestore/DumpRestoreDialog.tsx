@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { api, DumpRestoreRequest } from "../../lib/tauri";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { X, Loader2, AlertTriangle, CheckCircle, XCircle, Shield, Search, ChevronDown, ChevronUp } from "lucide-react";
 import "./DumpRestoreDialog.css";
+
+const MAX_LOG_LINES = 2000;
 
 interface Props {
   sourceConnectionId: string;
@@ -26,10 +28,12 @@ function isLocalHost(host: string): boolean {
 type Step = "select" | "confirm" | "running" | "done";
 
 export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose }: Props) {
-  const { connections, activeConnections } = useConnectionStore();
+  const connections = useConnectionStore((s) => s.connections);
+  const activeConnections = useConnectionStore((s) => s.activeConnections);
   const [targets, setTargets] = useState<TargetOption[]>([]);
   const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
   const [loadingTargets, setLoadingTargets] = useState(true);
+  const [loadErrors, setLoadErrors] = useState<string[]>([]);
   const [step, setStep] = useState<Step>("select");
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -37,6 +41,7 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
   const [logs, setLogs] = useState<string[]>([]);
   const [logsOpen, setLogsOpen] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
+  const unlistenRef = useRef<(() => void) | null>(null);
 
   const sourceConn = connections.find((c) => c.id === sourceConnectionId);
 
@@ -44,6 +49,7 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
     const load = async () => {
       setLoadingTargets(true);
       const opts: TargetOption[] = [];
+      const errors: string[] = [];
       const connected = connections.filter((c) => activeConnections.has(c.id));
       for (const conn of connected) {
         try {
@@ -62,28 +68,44 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
               port: conn.port,
             });
           }
-        } catch { /* skip */ }
+        } catch (e) {
+          errors.push(`Failed to list databases for ${conn.name}: ${e}`);
+        }
       }
       setTargets(opts);
+      setLoadErrors(errors);
       setLoadingTargets(false);
     };
     load();
   }, [connections, activeConnections, sourceConnectionId, sourceDatabase]);
 
+  const appendLog = useCallback((line: string) => {
+    setLogs((prev) => {
+      if (prev.length >= MAX_LOG_LINES) {
+        return [...prev.slice(prev.length - MAX_LOG_LINES + 1), line];
+      }
+      return [...prev, line];
+    });
+    setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+  }, []);
+
   useEffect(() => {
-    if (step !== "running" && step !== "done") return;
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
     const isTauri = !!(window as any).__TAURI_INTERNALS__;
     if (isTauri) {
       import("@tauri-apps/api/event").then(({ listen }) => {
+        if (cancelled) return;
         listen<string>("dump-restore-log", (event) => {
-          setLogs((prev) => [...prev, event.payload]);
-          setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
-        }).then((fn) => { unlisten = fn; });
+          appendLog(event.payload);
+        }).then((fn) => {
+          if (cancelled) { fn(); return; }
+          unlisten = fn;
+        });
       });
     }
-    return () => { unlisten?.(); };
-  }, [step]);
+    return () => { cancelled = true; unlisten?.(); };
+  }, [appendLog]);
 
   const selectedTargetInfo = selectedTarget
     ? targets.find((t) => `${t.connectionId}:${t.database}` === selectedTarget)
@@ -214,6 +236,18 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
                   </div>
                 )}
               </div>
+
+              {/* Errors loading databases */}
+              {loadErrors.length > 0 && (
+                <div className="dr-banner dr-banner--warn">
+                  <AlertTriangle size={16} />
+                  <div>
+                    {loadErrors.map((err, i) => (
+                      <p key={i} className="dr-banner-sub" style={{ margin: 0 }}>{err}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Remote target warning */}
               {selectedTargetInfo && targetIsRemote && (

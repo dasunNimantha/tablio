@@ -36,10 +36,12 @@ pub async fn dump_and_restore(
         return Err("Source and target database cannot be the same".to_string());
     }
 
+    let unique_id = uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0").to_string();
     let tmp_path = std::env::temp_dir().join(format!(
-        "dbstudio-dump-{}-{}.backup",
+        "dbstudio-dump-{}-{}-{}.backup",
         request.source_database,
-        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+        unique_id
     ));
     let tmp_str = tmp_path.to_string_lossy().to_string();
 
@@ -53,8 +55,6 @@ pub async fn dump_and_restore(
             .arg("-U").arg(&src_config.user)
             .arg("-d").arg(&request.source_database)
             .arg("-Fc")
-            .arg("--no-owner")
-            .arg("--no-privileges")
             .arg("--verbose")
             .arg("-f").arg(&tmp_str);
         cmd.env("PGPASSWORD", &src_config.password);
@@ -69,24 +69,44 @@ pub async fn dump_and_restore(
         return Err("pg_dump failed — see logs above for details".to_string());
     }
 
-    emit_log(&app, "Dump complete. Starting pg_restore…");
+    emit_log(&app, "Dump complete. Starting pg_restore (transactional)…");
 
-    // IMPORTANT: We use --clean --if-exists WITHOUT --single-transaction.
-    //
-    // - DO NOT use DROP/CREATE DATABASE: it destroys database-level settings
-    //   (e.g. ALTER DATABASE ... SET search_path = ...). Applications that
-    //   query tables without schema qualification (relying on search_path)
-    //   will get "relation does not exist" errors after restore.
-    //
-    // - DO NOT use --single-transaction with --clean: if pg_restore hits any
-    //   non-fatal error (missing roles, "schema public already exists", etc.),
-    //   the entire transaction aborts, rolling back all DROP statements and
-    //   leaving the database unchanged.
-    //
-    // --clean --if-exists drops and recreates objects INSIDE the database,
-    // preserving database-level settings. Without --single-transaction,
-    // individual non-fatal errors are skipped and the rest of the restore
-    // continues normally.
+    // First attempt: --single-transaction for atomic all-or-nothing restore.
+    // If anything fails, the entire transaction is rolled back and the target
+    // DB is left untouched. We skip --clean here because DROP commands inside
+    // a transaction cause cascading issues with dependent objects.
+    let tx_status = {
+        let mut cmd = tokio::process::Command::new("pg_restore");
+        cmd.arg("-h").arg(&tgt_config.host)
+            .arg("-p").arg(tgt_config.port.to_string())
+            .arg("-U").arg(&tgt_config.user)
+            .arg("-d").arg(&request.target_database)
+            .arg("--clean")
+            .arg("--if-exists")
+            .arg("--single-transaction")
+            .arg("--verbose")
+            .arg(&tmp_str);
+        cmd.env("PGPASSWORD", &tgt_config.password);
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to run pg_restore: {}", e))?;
+        stream_stderr(&app, &mut child).await;
+        child.wait().await.map_err(|e| format!("pg_restore process error: {}", e))?
+    };
+
+    if tx_status.success() {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        emit_log(&app, "Restore complete (transactional).");
+        return Ok(format!(
+            "Successfully dumped '{}' and restored to '{}'",
+            request.source_database, request.target_database
+        ));
+    }
+
+    // --single-transaction aborts on ANY error (missing roles, "schema already
+    // exists", etc.), so non-fatal warnings cause a full rollback. Fall back to
+    // a non-transactional restore which tolerates those warnings.
+    emit_log(&app, "Transactional restore rolled back due to warnings. Retrying without --single-transaction…");
+
     let restore_status = {
         let mut cmd = tokio::process::Command::new("pg_restore");
         cmd.arg("-h").arg(&tgt_config.host)
@@ -95,8 +115,6 @@ pub async fn dump_and_restore(
             .arg("-d").arg(&request.target_database)
             .arg("--clean")
             .arg("--if-exists")
-            .arg("--no-owner")
-            .arg("--no-privileges")
             .arg("--verbose")
             .arg(&tmp_str);
         cmd.env("PGPASSWORD", &tgt_config.password);
@@ -108,17 +126,30 @@ pub async fn dump_and_restore(
 
     let _ = tokio::fs::remove_file(&tmp_path).await;
 
-    // pg_restore often exits non-zero for harmless warnings (e.g. role
-    // doesn't exist when using --no-owner). Treat it as success with a note.
     if restore_status.success() {
         emit_log(&app, "Restore complete.");
+        Ok(format!(
+            "Successfully dumped '{}' and restored to '{}'",
+            request.source_database, request.target_database
+        ))
     } else {
-        emit_log(&app, "Restore complete (pg_restore reported warnings — see logs above).");
+        let code = restore_status.code().unwrap_or(-1);
+        // pg_restore exit code 1 = warnings only (missing roles, etc.)
+        // exit code >= 2 = actual errors
+        if code == 1 {
+            emit_log(&app, "Restore complete with warnings — see logs above.");
+            Ok(format!(
+                "Dumped '{}' and restored to '{}' (with warnings — check logs)",
+                request.source_database, request.target_database
+            ))
+        } else {
+            emit_log(&app, &format!("pg_restore failed with exit code {}", code));
+            Err(format!(
+                "pg_restore failed (exit code {}) — see logs for details",
+                code
+            ))
+        }
     }
-    Ok(format!(
-        "Successfully dumped '{}' and restored to '{}'",
-        request.source_database, request.target_database
-    ))
 }
 
 #[tauri::command]
@@ -150,6 +181,10 @@ pub async fn restore_database(
 }
 
 async fn backup_postgres(config: &ConnectionConfig, req: &BackupRequest) -> Result<String, String> {
+    if req.schema_only && req.data_only {
+        return Err("Cannot use both schema-only and data-only at the same time".to_string());
+    }
+
     let mut cmd = tokio::process::Command::new("pg_dump");
     cmd.arg("-h").arg(&config.host)
         .arg("-p").arg(config.port.to_string())
@@ -208,8 +243,16 @@ async fn restore_postgres(config: &ConnectionConfig, req: &RestoreRequest) -> Re
         cmd.arg("-h").arg(&config.host)
             .arg("-p").arg(config.port.to_string())
             .arg("-U").arg(&config.user)
-            .arg("-d").arg(&req.database)
-            .arg(&req.input_path);
+            .arg("-d").arg(&req.database);
+
+        match req.format.as_str() {
+            "custom" => { cmd.arg("-Fc"); }
+            "tar" => { cmd.arg("-Ft"); }
+            "directory" => { cmd.arg("-Fd"); }
+            _ => {} // auto: let pg_restore detect format
+        }
+
+        cmd.arg(&req.input_path);
         cmd.env("PGPASSWORD", &config.password);
 
         let output = cmd.output().await.map_err(|e| format!("Failed to run pg_restore: {}", e))?;
@@ -231,7 +274,7 @@ async fn backup_mysql(config: &ConnectionConfig, req: &BackupRequest) -> Result<
         .arg("--result-file").arg(&req.output_path);
 
     if !config.password.is_empty() {
-        cmd.arg(format!("-p{}", config.password));
+        cmd.env("MYSQL_PWD", &config.password);
     }
     if req.schema_only {
         cmd.arg("--no-data");
@@ -257,7 +300,7 @@ async fn restore_mysql(config: &ConnectionConfig, req: &RestoreRequest) -> Resul
         .arg(&req.database);
 
     if !config.password.is_empty() {
-        cmd.arg(format!("-p{}", config.password));
+        cmd.env("MYSQL_PWD", &config.password);
     }
 
     let input = tokio::fs::read(&req.input_path).await

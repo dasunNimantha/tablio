@@ -30,10 +30,14 @@ function loadPersistedTabs(): { tabs: TabInfo[]; activeTabId: string | null } {
   return { tabs: [], activeTabId: null };
 }
 
+let _persistTimer: ReturnType<typeof setTimeout> | null = null;
 function persistTabs(tabs: TabInfo[], activeTabId: string | null) {
-  try {
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs, activeTabId }));
-  } catch {}
+  if (_persistTimer) clearTimeout(_persistTimer);
+  _persistTimer = setTimeout(() => {
+    try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs, activeTabId }));
+    } catch {}
+  }, 500);
 }
 
 interface TabState {
