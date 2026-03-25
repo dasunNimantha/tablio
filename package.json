@@ -1,7 +1,7 @@
 {
   "name": "dbstudio",
   "private": true,
-  "version": "0.1.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,11 +14,11 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
-    "@tanstack/react-table": "^8.20.0",
-    "@tanstack/react-virtual": "^3.10.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-fs": "^2.0.0",
+    "ag-grid-community": "^35.1.0",
+    "ag-grid-react": "^35.1.0",
     "chart.js": "^4.5.1",
     "lucide-react": "^0.460.0",
     "react": "^18.3.1",

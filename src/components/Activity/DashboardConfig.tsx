@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { api, ServerConfigEntry } from "../../lib/tauri";
 import { Loader2, Search, AlertTriangle, ChevronRight, ChevronDown, Settings } from "lucide-react";
 
@@ -13,21 +13,24 @@ export function DashboardConfig({ connectionId }: Props) {
   const [search, setSearch] = useState("");
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
 
-  const fetchConfig = useCallback(async () => {
-    try {
-      const result = await api.getServerConfig({ connection_id: connectionId });
-      setEntries(result);
-      setError(null);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [connectionId]);
-
   useEffect(() => {
+    let cancelled = false;
+    const fetchConfig = async () => {
+      try {
+        const result = await api.getServerConfig({ connection_id: connectionId });
+        if (cancelled) return;
+        setEntries(result);
+        setError(null);
+      } catch (e) {
+        if (cancelled) return;
+        setError(String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
     fetchConfig();
-  }, [fetchConfig]);
+    return () => { cancelled = true; };
+  }, [connectionId]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return entries;

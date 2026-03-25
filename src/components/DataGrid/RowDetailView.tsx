@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
-import { X, ChevronDown, ChevronRight, Copy, Check, Save, Lock } from "lucide-react";
+import { X, ChevronDown, ChevronRight, Copy, Check, CheckCheck, Lock } from "lucide-react";
 import type { ColumnInfo } from "../../lib/tauri";
 import "./RowDetailView.css";
 
@@ -281,6 +281,8 @@ export function RowDetailView({
   const editRef = useRef<HTMLTextAreaElement>(null);
   const resizeRef = useRef<{ startX: number; startW: number } | null>(null);
   const blurCommitRef = useRef(true);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const blurTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
   const resizeTextarea = useCallback(() => {
     if (editRef.current) {
@@ -307,6 +309,8 @@ export function RowDetailView({
   useEffect(() => {
     return () => {
       resizeRef.current = null;
+      clearTimeout(copyTimerRef.current);
+      clearTimeout(blurTimerRef.current);
     };
   }, []);
 
@@ -358,7 +362,8 @@ export function RowDetailView({
     });
     navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
     setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
   };
 
   const handleStartEdit = (colIndex: number, key: string, value: unknown, col: ColumnInfo) => {
@@ -423,7 +428,8 @@ export function RowDetailView({
   };
 
   const handleBlur = useCallback(() => {
-    setTimeout(() => {
+    clearTimeout(blurTimerRef.current);
+    blurTimerRef.current = setTimeout(() => {
       if (blurCommitRef.current) {
         commitField();
       }
@@ -455,8 +461,8 @@ export function RowDetailView({
         <div className="row-detail-header-actions">
           {hasPendingEdits && (
             <button className="json-save-all-btn" onClick={handleSaveAll}>
-              <Save size={13} />
-              Save {pendingEdits.size} change{pendingEdits.size > 1 ? "s" : ""}
+              <CheckCheck size={13} />
+              Apply {pendingEdits.size} edit{pendingEdits.size > 1 ? "s" : ""}
             </button>
           )}
           {(hasPendingEdits || editError) && (

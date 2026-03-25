@@ -165,6 +165,7 @@ export default function App() {
     setZoom(clamped);
     localStorage.setItem("dbstudio-zoom", String(clamped));
     document.documentElement.style.zoom = `${clamped}%`;
+    document.documentElement.style.setProperty("--app-zoom", String(clamped / 100));
     setShowZoom(true);
     if (zoomTimerRef.current) clearTimeout(zoomTimerRef.current);
     zoomTimerRef.current = setTimeout(() => setShowZoom(false), 1500);
@@ -172,6 +173,7 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.style.zoom = `${zoom}%`;
+    document.documentElement.style.setProperty("--app-zoom", String(zoom / 100));
   }, []);
 
   useEffect(() => {

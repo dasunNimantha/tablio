@@ -1,7 +1,7 @@
 import { useTabStore } from "../../stores/tabStore";
 import { useShallow } from "zustand/react/shallow";
 import { X, Table2, Terminal, Code, Columns3, Activity, BarChart3, Shield, TrendingUp } from "lucide-react";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import "./Tabs.css";
 
 export function TabBar() {
@@ -21,6 +21,12 @@ export function TabBar() {
   } | null>(null);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const tabsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!activeTabId || !tabsRef.current) return;
+    const el = tabsRef.current.querySelector(`[data-tab-id="${activeTabId}"]`) as HTMLElement | null;
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+  }, [activeTabId, tabs.length]);
 
   const handleContextMenu = (e: React.MouseEvent, tabId: string) => {
     e.preventDefault();
@@ -51,6 +57,7 @@ export function TabBar() {
         {tabs.map((tab, idx) => (
           <div
             key={tab.id}
+            data-tab-id={tab.id}
             className={`tab ${tab.id === activeTabId ? "active" : ""}`}
             onClick={() => setActiveTab(tab.id)}
             onContextMenu={(e) => handleContextMenu(e, tab.id)}

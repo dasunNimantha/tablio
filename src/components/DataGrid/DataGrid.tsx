@@ -8,6 +8,7 @@ import {
   CellChange,
   NewRow,
   DeleteRow,
+  ForeignKeyInfo,
 } from "../../lib/tauri";
 import { FilterBar } from "./FilterBar";
 import { RowDetailView } from "./RowDetailView";
@@ -18,13 +19,10 @@ import {
   Save,
   Undo2,
   Plus,
-  Trash2,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
-  ArrowUp,
-  ArrowDown,
   Loader2,
   Filter,
   Copy,
@@ -33,7 +31,79 @@ import {
   X,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
+import { AllCommunityModule, themeQuartz, type ColDef, type CellContextMenuEvent, type GridApi, type GridReadyEvent, type IHeaderParams } from "ag-grid-community";
+import { AgGridReact } from "ag-grid-react";
 import "./DataGrid.css";
+import "./ag-grid-theme.css";
+
+function DataTypeHeader(props: IHeaderParams & { dataType?: string; isPk?: boolean; fk?: ForeignKeyInfo }) {
+  const [sortState, setSortState] = useState<"asc" | "desc" | null>(null);
+
+  useEffect(() => {
+    const listener = () => {
+      if (props.column.isSortAscending()) setSortState("asc");
+      else if (props.column.isSortDescending()) setSortState("desc");
+      else setSortState(null);
+    };
+    props.column.addEventListener("sortChanged", listener);
+    listener();
+    return () => {
+      props.column.removeEventListener("sortChanged", listener);
+    };
+  }, [props.column]);
+
+  const onSortRequested = (e: React.MouseEvent) => {
+    props.progressSort(e.shiftKey);
+  };
+
+  return (
+    <div className="ag-custom-header" onClick={onSortRequested}>
+      <div className="ag-custom-header-labels">
+        <span className="ag-custom-header-name">
+          {props.isPk && <span className="ag-custom-pk-badge">PK</span>}
+          {props.fk && <span className="ag-custom-fk-badge" title={`→ ${props.fk.referenced_table}.${props.fk.referenced_column}`}>FK</span>}
+          {props.displayName}
+          {sortState && (
+            <svg className="ag-custom-sort-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              {sortState === "asc"
+                ? <><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></>
+                : <><line x1="12" y1="5" x2="12" y2="19" /><polyline points="5 12 12 19 19 12" /></>}
+            </svg>
+          )}
+        </span>
+        {props.dataType && (
+          <span className="ag-custom-header-type">
+            {props.dataType}
+            {props.fk && <span className="ag-custom-fk-ref"> → {props.fk.referenced_table}</span>}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const gridTheme = themeQuartz.withParams({
+  backgroundColor: "var(--bg-secondary)",
+  foregroundColor: "var(--text-primary)",
+  headerBackgroundColor: "var(--bg-header)",
+  accentColor: "var(--accent)",
+  borderColor: "var(--border)",
+  columnBorder: true,
+  oddRowBackgroundColor: "var(--bg-primary)",
+  rowHoverColor: "var(--bg-hover)",
+  selectedRowBackgroundColor: "var(--bg-selected)",
+  headerTextColor: "var(--text-secondary)",
+  cellTextColor: "var(--text-primary)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 14,
+  headerFontSize: 12,
+  rowHeight: 36,
+  headerHeight: 38,
+  cellHorizontalPadding: 10,
+  wrapperBorderRadius: 0,
+  borderRadius: 0,
+  headerColumnResizeHandleColor: "transparent",
+});
 
 interface Props {
   connectionId: string;
@@ -46,6 +116,12 @@ interface PendingChanges {
   updates: Map<string, CellChange>;
   inserts: NewRow[];
   deletedKeys: Set<string>;
+}
+
+interface RowObj {
+  __rowIdx: number;
+  __isInserted: boolean;
+  [key: string]: unknown;
 }
 
 const PAGE_SIZE = 50;
@@ -76,7 +152,6 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   });
 
   const [editingRows, setEditingRows] = useState<unknown[][]>([]);
-  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const [detailRowIdx, setDetailRowIdx] = useState<number | null>(null);
   const [rowContextMenu, setRowContextMenu] = useState<{ x: number; y: number; rowIdx: number } | null>(null);
   const [refreshInterval, setRefreshInterval] = useState(10);
@@ -85,14 +160,9 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   const [showSearch, setShowSearch] = useState(false);
   const refreshBtnRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const tableRef = useRef<HTMLDivElement>(null);
-  const resizingRef = useRef<{ col: string; startX: number; startWidth: number } | null>(null);
-  const [editingCell, setEditingCell] = useState<{ row: number; col: number } | null>(null);
-  const [editValue, setEditValue] = useState("");
-  const editInputRef = useRef<HTMLInputElement>(null);
-  const editCommittedRef = useRef(false);
-  const [scrollTop, setScrollTop] = useState(0);
-  const [viewportHeight, setViewportHeight] = useState(600);
+  const searchQueryRef = useRef("");
+  const gridApiRef = useRef<GridApi | null>(null);
+  const [fkMap, setFkMap] = useState<Map<string, ForeignKeyInfo>>(new Map());
 
   const [colSettings, setColSettings] = useState<ColumnSettings>(() => {
     return loadColumnSettings(connectionId, database, schema, table) || { order: [], hidden: new Set() };
@@ -113,7 +183,10 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     changes.inserts.length > 0 ||
     changes.deletedKeys.size > 0;
 
+  const fetchGenRef = useRef(0);
+
   const fetchData = useCallback(async () => {
+    const gen = ++fetchGenRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -127,6 +200,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         sort,
         filter: activeFilter,
       });
+      if (gen !== fetchGenRef.current) return;
       const pkIndices = result.columns
         .map((c, i) => ({ col: c, idx: i }))
         .filter((x) => x.col.is_primary_key)
@@ -148,9 +222,10 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         return prev;
       });
     } catch (e) {
+      if (gen !== fetchGenRef.current) return;
       setError(String(e));
     } finally {
-      setLoading(false);
+      if (gen === fetchGenRef.current) setLoading(false);
     }
   }, [connectionId, database, schema, table, page, sort, activeFilter]);
 
@@ -159,7 +234,17 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   }, [fetchData]);
 
   useEffect(() => {
+    let cancelled = false;
     setColSettings(loadColumnSettings(connectionId, database, schema, table) || { order: [], hidden: new Set() });
+    api.listForeignKeys(connectionId, database, schema, table)
+      .then((fks) => {
+        if (cancelled) return;
+        const map = new Map<string, ForeignKeyInfo>();
+        fks.forEach((fk) => map.set(fk.column, fk));
+        setFkMap(map);
+      })
+      .catch(() => { if (!cancelled) setFkMap(new Map()); });
+    return () => { cancelled = true; };
   }, [connectionId, database, schema, table]);
 
   useEffect(() => {
@@ -192,11 +277,12 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   }, [showRefreshMenu]);
 
   useEffect(() => {
+    let focusTimer: ReturnType<typeof setTimeout>;
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setShowSearch(true);
-        setTimeout(() => searchInputRef.current?.focus(), 0);
+        focusTimer = setTimeout(() => searchInputRef.current?.focus(), 0);
       }
       if (e.key === "Escape" && showSearch) {
         setShowSearch(false);
@@ -204,90 +290,36 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       }
     };
     document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
+    return () => {
+      document.removeEventListener("keydown", handler);
+      clearTimeout(focusTimer);
+    };
   }, [showSearch]);
-
-  const searchTokens = searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
-
-  const cellMatches = (value: unknown): boolean => {
-    if (!searchTokens.length) return false;
-    const str = (value === null || value === undefined)
-      ? "null"
-      : typeof value === "object" ? JSON.stringify(value) : String(value);
-    const lower = str.toLowerCase();
-    return searchTokens.every((t) => lower.includes(t));
-  };
 
   const searchMatchCount = useMemo(() => {
     if (!searchQuery || !data) return 0;
+    const q = searchQuery.toLowerCase();
     let count = 0;
     for (const row of editingRows) {
       for (const val of row) {
-        if (cellMatches(val)) count++;
+        const str = (val === null || val === undefined) ? "null" : typeof val === "object" ? JSON.stringify(val) : String(val);
+        if (str.toLowerCase().includes(q)) count++;
       }
     }
     return count;
   }, [searchQuery, editingRows, data]);
 
   useEffect(() => {
-    if (!searchQuery || !tableRef.current) return;
-    const firstMatch = tableRef.current.querySelector(".cell-search-match");
-    if (firstMatch) {
-      firstMatch.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-    }
+    searchQueryRef.current = searchQuery;
+    if (!gridApiRef.current) return;
+    gridApiRef.current.refreshCells({ force: true });
   }, [searchQuery]);
-
-  const ROW_HEIGHT = 36;
-  const HEADER_HEIGHT = 38;
-  const OVERSCAN = 5;
-
-  const viewportHeightRef = useRef(600);
-  useEffect(() => {
-    const el = tableRef.current;
-    if (!el) return;
-    let rafId = 0;
-    const onScroll = () => {
-      if (rafId) return;
-      rafId = requestAnimationFrame(() => {
-        setScrollTop(el.scrollTop);
-        rafId = 0;
-      });
-    };
-    el.addEventListener("scroll", onScroll, { passive: true });
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const h = Math.round(entry.contentRect.height);
-        if (Math.abs(h - viewportHeightRef.current) > 2) {
-          viewportHeightRef.current = h;
-          setViewportHeight(h);
-        }
-      }
-    });
-    ro.observe(el);
-    const h = Math.round(el.clientHeight);
-    viewportHeightRef.current = h;
-    setViewportHeight(h);
-    return () => {
-      el.removeEventListener("scroll", onScroll);
-      if (rafId) cancelAnimationFrame(rafId);
-      ro.disconnect();
-    };
-  }, [data]);
 
   const totalPages = data ? Math.ceil(data.total_rows / PAGE_SIZE) : 0;
 
-  const handleSort = (column: string) => {
-    setSort((prev) => {
-      if (prev?.column === column) {
-        if (prev.direction === "asc") return { column, direction: "desc" };
-        return null;
-      }
-      return { column, direction: "asc" };
-    });
-    setPage(0);
-  };
+  const originalRowCount = data?.rows.length ?? 0;
 
-  const getPkValues = (rowIndex: number): [string, unknown][] => {
+  const getPkValues = useCallback((rowIndex: number): [string, unknown][] => {
     if (!data || rowIndex < 0 || rowIndex >= data.rows.length) return [];
     const row = data.rows[rowIndex];
     return data.columns
@@ -296,12 +328,12 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         const colIdx = data.columns.findIndex((col) => col.name === c.name);
         return [c.name, colIdx >= 0 ? row[colIdx] : undefined] as [string, unknown];
       });
-  };
+  }, [data]);
 
-  const getPkKey = (rowIndex: number): string => {
+  const getPkKey = useCallback((rowIndex: number): string => {
     const values = getPkValues(rowIndex).map(([, v]) => v);
     return JSON.stringify(values);
-  };
+  }, [getPkValues]);
 
   const handleCellChange = useCallback((
     rowIndex: number,
@@ -340,37 +372,110 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     });
   }, [data, getPkValues, getPkKey]);
 
-  const startCellEdit = useCallback((rowIdx: number, colIdx: number, value: unknown) => {
-    editCommittedRef.current = false;
-    setEditingCell({ row: rowIdx, col: colIdx });
-    setEditValue(value === null || value === undefined ? "" : String(value));
-  }, []);
-
-  const commitCellEdit = useCallback(() => {
-    if (editCommittedRef.current || !editingCell || !data) return;
-    editCommittedRef.current = true;
-    const { row, col } = editingCell;
-    const column = data.columns[col];
-    setEditingCell(null);
-    if (editValue === "" && column.is_nullable) {
-      handleCellChange(row, col, null);
-      return;
+  // Convert array-of-arrays to array-of-objects for AG Grid
+  const agRowData = useMemo((): RowObj[] => {
+    if (!data) return [];
+    const inserted: RowObj[] = [];
+    const existing: RowObj[] = [];
+    for (let i = 0; i < editingRows.length; i++) {
+      const row = editingRows[i];
+      const obj: RowObj = { __rowIdx: i, __isInserted: i >= originalRowCount };
+      data.columns.forEach((col, colIdx) => { obj[col.name] = row[colIdx]; });
+      if (i >= originalRowCount) inserted.push(obj);
+      else existing.push(obj);
     }
-    const parsed = parseCellValue(editValue, column.data_type);
-    handleCellChange(row, col, parsed);
-  }, [editingCell, editValue, data, handleCellChange]);
+    return [...inserted, ...existing];
+  }, [editingRows, data, originalRowCount]);
 
-  const cancelCellEdit = useCallback(() => {
-    editCommittedRef.current = true;
-    setEditingCell(null);
-  }, []);
+  // Build AG Grid column definitions
+  const columnDefs = useMemo((): ColDef[] => {
+    if (!data) return [];
 
-  useEffect(() => {
-    if (editingCell && editInputRef.current) {
-      editInputRef.current.focus();
-      editInputRef.current.select();
-    }
-  }, [editingCell]);
+    const rowNumCol: ColDef = {
+      headerName: "#",
+      width: 60,
+      minWidth: 60,
+      maxWidth: 80,
+      pinned: "left",
+      editable: false,
+      sortable: false,
+      resizable: false,
+      suppressMovable: true,
+      cellClass: "grid-row-number",
+      headerClass: "grid-row-number",
+      valueGetter: (params) => {
+        if (!params.data) return "";
+        if (params.data.__isInserted) return "+";
+        return page * PAGE_SIZE + params.data.__rowIdx + 1;
+      },
+      onCellClicked: (params) => {
+        if (params.data) setDetailRowIdx(params.data.__rowIdx);
+      },
+    };
+
+    const dataCols: ColDef[] = visibleIndices.map((colIdx) => {
+      const col = data.columns[colIdx];
+      const isAutoGen = col.is_auto_generated;
+
+      return {
+        field: col.name,
+        headerName: col.name,
+        headerTooltip: `${col.name} (${col.data_type})`,
+        headerComponent: DataTypeHeader,
+        headerComponentParams: {
+          dataType: col.data_type,
+          isPk: col.is_primary_key,
+          fk: fkMap.get(col.name),
+        },
+        editable: (params) => {
+          if (!params.data) return false;
+          if (params.data.__isInserted && isAutoGen && (params.data[col.name] === null || params.data[col.name] === undefined)) return false;
+          return true;
+        },
+        cellClassRules: {
+          "cell-null": (params) => params.value === null || params.value === undefined,
+          "cell-modified": (params) => {
+            if (!params.data || params.data.__isInserted) return false;
+            const pkKey = getPkKey(params.data.__rowIdx);
+            return changes.updates.has(`${pkKey}:${col.name}`);
+          },
+          "cell-inserted": (params) => params.data?.__isInserted === true,
+          "cell-auto": (params) => {
+            return params.data?.__isInserted && isAutoGen && (params.value === null || params.value === undefined);
+          },
+          "cell-search-match": (params) => {
+            const q = searchQueryRef.current;
+            if (!q) return false;
+            const v = params.value;
+            const str = (v === null || v === undefined) ? "null" : typeof v === "object" ? JSON.stringify(v) : String(v);
+            return str.toLowerCase().includes(q.toLowerCase());
+          },
+        },
+        valueFormatter: (params) => {
+          if (params.data?.__isInserted && isAutoGen && (params.value === null || params.value === undefined)) return "auto";
+          if (params.value === null || params.value === undefined) return "NULL";
+          return String(params.value);
+        },
+        valueSetter: (params) => {
+          const rowIdx = params.data.__rowIdx;
+          const raw = params.newValue;
+          let parsed: unknown;
+          if ((raw === "" || raw === null || raw === undefined) && col.is_nullable) {
+            parsed = null;
+          } else if (raw === "" || raw === null || raw === undefined) {
+            parsed = raw;
+          } else {
+            parsed = parseCellValue(String(raw), col.data_type);
+          }
+          handleCellChange(rowIdx, colIdx, parsed);
+          return true;
+        },
+        minWidth: 80,
+      };
+    });
+
+    return [rowNumCol, ...dataCols];
+  }, [data, visibleIndices, page, changes, getPkKey, handleCellChange, fkMap]);
 
   const handleAddRow = () => {
     if (!data) return;
@@ -381,11 +486,6 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       ...prev,
       inserts: [...prev.inserts, { values }],
     }));
-    requestAnimationFrame(() => {
-      if (tableRef.current) {
-        tableRef.current.scrollTop = 0;
-      }
-    });
   };
 
   const handleDeleteRow = (rowIndex: number) => {
@@ -501,78 +601,64 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     return `INSERT INTO "${schema}"."${table}" (${cols}) VALUES (${vals});`;
   }, [data, schema, table]);
 
-  const handleCopyAsInsert = (rowIdx: number) => {
-    navigator.clipboard.writeText(formatRowAsInsert(editingRows[rowIdx]));
-  };
-
   const handleCopyAllAsInsert = () => {
     navigator.clipboard.writeText(editingRows.map(formatRowAsInsert).join("\n"));
   };
 
-  const handleResizeStart = useCallback(
-    (e: React.MouseEvent, colName: string, thEl: HTMLElement) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const startWidth = thEl.offsetWidth;
-      resizingRef.current = { col: colName, startX: e.clientX, startWidth };
-      let rafId = 0;
+  const onGridReady = useCallback((params: GridReadyEvent) => {
+    gridApiRef.current = params.api;
+  }, []);
 
-      const onMove = (ev: MouseEvent) => {
-        if (!resizingRef.current) return;
-        if (rafId) return;
-        rafId = requestAnimationFrame(() => {
-          if (!resizingRef.current) return;
-          const diff = ev.clientX - resizingRef.current.startX;
-          const newWidth = Math.max(60, resizingRef.current.startWidth + diff);
-          setColumnWidths((prev) => ({ ...prev, [resizingRef.current!.col]: newWidth }));
-          rafId = 0;
-        });
-      };
+  const onCellContextMenu = useCallback((event: CellContextMenuEvent) => {
+    if (!event.data) return;
+    const e = event.event as MouseEvent;
+    if (!e) return;
+    e.preventDefault();
+    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    setRowContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx });
+  }, []);
 
-      const onUp = () => {
-        resizingRef.current = null;
-        if (rafId) cancelAnimationFrame(rafId);
-        document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-      };
-
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-    },
-    []
-  );
-
-  const originalRowCount = data?.rows.length ?? 0;
-
-  const orderedRowIndices = useMemo(() => {
-    if (!editingRows.length) return [];
-    const inserted: number[] = [];
-    const existing: number[] = [];
-    for (let i = 0; i < editingRows.length; i++) {
-      if (i >= originalRowCount) inserted.push(i);
-      else existing.push(i);
+  const getRowClass = useCallback((params: { data: RowObj }) => {
+    if (!params.data) return "";
+    const classes: string[] = [];
+    if (params.data.__isInserted) classes.push("row-inserted");
+    else {
+      const pkKey = getPkKey(params.data.__rowIdx);
+      if (changes.deletedKeys.has(pkKey)) classes.push("row-deleted");
     }
-    return [...inserted, ...existing];
-  }, [editingRows.length, originalRowCount]);
+    if (detailRowIdx === params.data.__rowIdx) classes.push("row-selected");
+    return classes.join(" ");
+  }, [changes.deletedKeys, detailRowIdx, getPkKey]);
 
-  const virtualRange = useMemo(() => {
-    const totalRows = orderedRowIndices.length;
-    if (totalRows === 0) return { start: 0, end: 0, topPad: 0, bottomPad: 0 };
-    const visibleStart = Math.floor(Math.max(0, scrollTop - HEADER_HEIGHT) / ROW_HEIGHT);
-    const visibleCount = Math.ceil(viewportHeight / ROW_HEIGHT);
-    const start = Math.max(0, visibleStart - OVERSCAN);
-    const end = Math.min(totalRows, visibleStart + visibleCount + OVERSCAN);
-    return {
-      start,
-      end,
-      topPad: start * ROW_HEIGHT,
-      bottomPad: Math.max(0, (totalRows - end) * ROW_HEIGHT),
-    };
-  }, [orderedRowIndices.length, scrollTop, viewportHeight]);
+  const onSortChanged = useCallback(() => {
+    if (!gridApiRef.current) return;
+    const sortModel = gridApiRef.current.getColumnState()
+      .filter((c) => c.sort)
+      .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
+    if (sortModel.length === 0) {
+      setSort(null);
+    } else {
+      const first = sortModel[0];
+      setSort({ column: first.colId, direction: first.sort as "asc" | "desc" });
+    }
+    setPage(0);
+  }, []);
+
+  const defaultColDef = useMemo((): ColDef => ({
+    resizable: true,
+    sortable: true,
+    suppressHeaderMenuButton: true,
+    suppressKeyboardEvent: (params) => {
+      if (!params.editing) {
+        const key = params.event.key;
+        if (key === "Delete" || key === "Backspace" || key === "Enter" || key === "F2" ||
+          (key.length === 1 && !params.event.ctrlKey && !params.event.metaKey)) {
+          return true;
+        }
+      }
+      return false;
+    },
+  }), []);
 
   if (loading && !data) {
     return (
@@ -712,164 +798,26 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         </div>
       )}
 
-      <div className="grid-table-wrapper" ref={tableRef}>
-        <table className="grid-table">
-          <thead>
-            <tr>
-              <th className="grid-row-number">#</th>
-              {visibleIndices.map((colIdx) => {
-                const col = data.columns[colIdx];
-                return (
-                  <th
-                    key={col.name}
-                    className={col.is_primary_key ? "pk" : ""}
-                    style={columnWidths[col.name] ? { width: columnWidths[col.name], minWidth: columnWidths[col.name] } : undefined}
-                    onClick={() => handleSort(col.name)}
-                  >
-                    <div className="grid-header-content">
-                      <span className="grid-header-name">
-                        {col.is_primary_key && <span className="pk-badge">PK</span>}
-                        {col.name}
-                      </span>
-                      <span className="grid-header-type">{col.data_type}</span>
-                    </div>
-                    {sort?.column === col.name && (
-                      <span className="grid-sort-icon">
-                        {sort.direction === "asc" ? (
-                          <ArrowUp size={12} />
-                        ) : (
-                          <ArrowDown size={12} />
-                        )}
-                      </span>
-                    )}
-                    <div
-                      className="col-resize-handle"
-                      onMouseDown={(e) => {
-                        const th = e.currentTarget.parentElement as HTMLElement;
-                        handleResizeStart(e, col.name, th);
-                      }}
-                    />
-                  </th>
-                );
-              })}
-              <th className="grid-actions-header">
-                <Trash2 size={12} />
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {virtualRange.topPad > 0 && (
-              <tr style={{ height: virtualRange.topPad }} aria-hidden="true"><td colSpan={visibleIndices.length + 2} /></tr>
-            )}
-            {orderedRowIndices.slice(virtualRange.start, virtualRange.end).map((rowIdx) => {
-              const row = editingRows[rowIdx];
-              const isInserted = rowIdx >= originalRowCount;
-              const pkKey = !isInserted ? getPkKey(rowIdx) : "";
-              const isDeleted = !isInserted && changes.deletedKeys.has(pkKey);
-
-              return (
-                <tr
-                  key={rowIdx}
-                  className={[
-                    isDeleted && "row-deleted",
-                    isInserted && "row-inserted",
-                    detailRowIdx === rowIdx && "row-selected",
-                  ].filter(Boolean).join(" ")}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
-                    setRowContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx });
-                  }}
-                >
-                  <td
-                    className="grid-row-number"
-                    onClick={() => setDetailRowIdx(rowIdx)}
-                    title="Click to open row detail"
-                  >
-                    {isInserted ? "+" : page * PAGE_SIZE + rowIdx + 1}
-                  </td>
-                  {visibleIndices.map((colIdx) => {
-                    const col = data.columns[colIdx];
-                    const value = row[colIdx];
-                    const isNull = value === null || value === undefined;
-                    const changeKey = !isInserted ? `${pkKey}:${col.name}` : null;
-                    const isModified = changeKey !== null && changes.updates.has(changeKey);
-                    const isAutoOnInsert = isInserted && col.is_auto_generated && isNull;
-                    const isEditing = editingCell?.row === rowIdx && editingCell?.col === colIdx;
-
-                    let cls = "grid-cell";
-                    if (isAutoOnInsert) cls += " cell-auto";
-                    else if (isNull) cls += " cell-null";
-                    if (isModified) cls += " cell-modified";
-                    if (isInserted) cls += " cell-inserted";
-                    if (isEditing) cls += " cell-editing";
-
-                    if (isAutoOnInsert) {
-                      return <td key={colIdx} className={cls} title="Auto-generated by database"><span className="cell-value cell-auto-label">auto</span></td>;
-                    }
-
-                    if (isEditing) {
-                      return (
-                        <td key={colIdx} className={cls}>
-                          <input
-                            ref={editInputRef}
-                            className="cell-input"
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            onBlur={commitCellEdit}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") commitCellEdit();
-                              else if (e.key === "Escape") cancelCellEdit();
-                              else if (e.key === "Tab") { e.preventDefault(); commitCellEdit(); }
-                            }}
-                          />
-                        </td>
-                      );
-                    }
-
-                    const displayValue = isNull ? "NULL" : String(value);
-                    let content: React.ReactNode = displayValue;
-                    if (searchQuery) {
-                      const q = searchQuery.toLowerCase();
-                      const str = isNull ? "null" : (typeof value === "object" ? JSON.stringify(value) : String(value));
-                      if (str.toLowerCase().includes(q)) {
-                        cls += " cell-search-match";
-                        const idx = displayValue.toLowerCase().indexOf(q);
-                        if (idx !== -1) {
-                          content = <>{displayValue.slice(0, idx)}<mark className="cell-search-highlight">{displayValue.slice(idx, idx + searchQuery.length)}</mark>{displayValue.slice(idx + searchQuery.length)}</>;
-                        }
-                      }
-                    }
-
-                    return (
-                      <td key={colIdx} className={cls} onDoubleClick={() => startCellEdit(rowIdx, colIdx, value)}>
-                        <span className="cell-value">{content}</span>
-                      </td>
-                    );
-                  })}
-                  <td className="grid-actions-cell">
-                    {!isInserted && (
-                      <button
-                        className="btn-icon"
-                        onClick={(e) => { e.stopPropagation(); handleDeleteRow(rowIdx); }}
-                        title={isDeleted ? "Undo Delete" : "Mark for Delete"}
-                      >
-                        {isDeleted ? (
-                          <Undo2 size={12} />
-                        ) : (
-                          <Trash2 size={12} />
-                        )}
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-            {virtualRange.bottomPad > 0 && (
-              <tr style={{ height: virtualRange.bottomPad }} aria-hidden="true"><td colSpan={visibleIndices.length + 2} /></tr>
-            )}
-          </tbody>
-        </table>
+      <div className="grid-table-wrapper ag-grid-wrapper">
+        <AgGridReact
+          theme={gridTheme}
+          modules={[AllCommunityModule]}
+          rowData={agRowData}
+          columnDefs={columnDefs}
+          defaultColDef={defaultColDef}
+          getRowId={(params) => String(params.data.__rowIdx)}
+          getRowClass={getRowClass as any}
+          onGridReady={onGridReady}
+          onCellContextMenu={onCellContextMenu}
+          onSortChanged={onSortChanged}
+          preventDefaultOnContextMenu={true}
+          animateRows={false}
+          suppressCellFocus={false}
+          stopEditingWhenCellsLoseFocus={true}
+          singleClickEdit={false}
+          enableCellTextSelection={true}
+          suppressRowClickSelection={true}
+        />
       </div>
 
       <div className="grid-pagination">
@@ -958,6 +906,15 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
             }}
           >
             Copy row as JSON
+          </button>
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              navigator.clipboard.writeText(formatRowAsInsert(editingRows[rowContextMenu.rowIdx]));
+              setRowContextMenu(null);
+            }}
+          >
+            Copy as INSERT
           </button>
           <button
             className="context-menu-item"

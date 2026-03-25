@@ -78,6 +78,7 @@ export function ImportDialog({
   const [importError, setImportError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     const load = async () => {
       setColumnsLoading(true);
       try {
@@ -87,14 +88,17 @@ export function ImportDialog({
           schema,
           tableName
         );
+        if (cancelled) return;
         setTableColumns(cols);
       } catch (e) {
+        if (cancelled) return;
         setImportError(String(e));
       } finally {
-        setColumnsLoading(false);
+        if (!cancelled) setColumnsLoading(false);
       }
     };
     load();
+    return () => { cancelled = true; };
   }, [connectionId, database, schema, tableName]);
 
   useEffect(() => {

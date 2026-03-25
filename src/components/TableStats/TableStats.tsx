@@ -56,6 +56,7 @@ export function TableStats({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     const load = async () => {
       setLoading(true);
       setError(null);
@@ -66,14 +67,17 @@ export function TableStats({
           schema,
           table
         );
+        if (cancelled) return;
         setStats(data);
       } catch (e) {
+        if (cancelled) return;
         setError(String(e));
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
     load();
+    return () => { cancelled = true; };
   }, [connectionId, database, schema, table]);
 
   if (loading) {

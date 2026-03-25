@@ -33,7 +33,8 @@ export function CustomSelect({ value, options, onChange, className, searchable, 
   useEffect(() => {
     if (open && searchable) {
       setSearch("");
-      setTimeout(() => searchRef.current?.focus(), 0);
+      const timer = setTimeout(() => searchRef.current?.focus(), 0);
+      return () => clearTimeout(timer);
     }
   }, [open, searchable]);
 

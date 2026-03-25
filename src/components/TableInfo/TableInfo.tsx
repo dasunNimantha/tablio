@@ -21,6 +21,7 @@ export function TableInfo({ connectionId, database, schema, table }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     const load = async () => {
       setLoading(true);
       setError(null);
@@ -30,16 +31,19 @@ export function TableInfo({ connectionId, database, schema, table }: Props) {
           api.listIndexes(connectionId, database, schema, table),
           api.listForeignKeys(connectionId, database, schema, table),
         ]);
+        if (cancelled) return;
         setColumns(cols);
         setIndexes(idxs);
         setForeignKeys(fks);
       } catch (e) {
+        if (cancelled) return;
         setError(String(e));
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
     load();
+    return () => { cancelled = true; };
   }, [connectionId, database, schema, table]);
 
   if (loading) {

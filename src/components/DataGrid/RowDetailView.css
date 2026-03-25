@@ -131,14 +131,14 @@
   field-sizing: content;
 }
 
-.json-inline-input.json-string { color: var(--success); }
-.json-inline-input.json-number { color: var(--warning); }
-.json-inline-input.json-bool { color: var(--info); }
+.json-inline-input.json-string { color: color-mix(in srgb, var(--success) 80%, var(--text-secondary)); }
+.json-inline-input.json-number { color: color-mix(in srgb, var(--warning) 80%, var(--text-secondary)); }
+.json-inline-input.json-bool { color: color-mix(in srgb, var(--info) 75%, var(--text-secondary)); }
 .json-inline-input.json-null { color: var(--text-muted); font-style: italic; }
 
-[data-theme="light"] .json-inline-input.json-string { color: var(--success); }
-[data-theme="light"] .json-inline-input.json-number { color: var(--warning); }
-[data-theme="light"] .json-inline-input.json-bool { color: var(--info); }
+[data-theme="light"] .json-inline-input.json-string { color: color-mix(in srgb, var(--success) 85%, var(--text-secondary)); }
+[data-theme="light"] .json-inline-input.json-number { color: color-mix(in srgb, var(--warning) 85%, var(--text-secondary)); }
+[data-theme="light"] .json-inline-input.json-bool { color: color-mix(in srgb, var(--info) 80%, var(--text-secondary)); }
 
 .json-inline-input-error {
   text-decoration: wavy underline var(--error);
@@ -218,7 +218,7 @@
 }
 
 .json-key {
-  color: var(--purple);
+  color: color-mix(in srgb, var(--purple) 75%, var(--text-secondary));
 }
 
 .json-colon {
@@ -226,16 +226,16 @@
 }
 
 .json-string {
-  color: var(--success);
+  color: color-mix(in srgb, var(--success) 80%, var(--text-secondary));
   word-break: break-all;
 }
 
 .json-number {
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 80%, var(--text-secondary));
 }
 
 .json-bool {
-  color: var(--info);
+  color: color-mix(in srgb, var(--info) 75%, var(--text-secondary));
 }
 
 .json-null {
@@ -267,19 +267,19 @@
 }
 
 [data-theme="light"] .json-key {
-  color: var(--purple);
+  color: color-mix(in srgb, var(--purple) 80%, var(--text-secondary));
 }
 
 [data-theme="light"] .json-string {
-  color: var(--success);
+  color: color-mix(in srgb, var(--success) 85%, var(--text-secondary));
 }
 
 [data-theme="light"] .json-number {
-  color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 85%, var(--text-secondary));
 }
 
 [data-theme="light"] .json-bool {
-  color: var(--info);
+  color: color-mix(in srgb, var(--info) 80%, var(--text-secondary));
 }
 
 [data-theme="light"] .json-highlight {

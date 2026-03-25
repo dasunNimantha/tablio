@@ -36,11 +36,15 @@ export function ERDView({ connectionId, database, schema }: Props) {
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const containerRef = useRef<HTMLDivElement>(null);
 
+  const loadGenRef = useRef(0);
+
   const loadSchema = useCallback(async () => {
+    const gen = ++loadGenRef.current;
     setLoading(true);
     setError(null);
     try {
       const tables = await api.listTables(connectionId, database, schema);
+      if (gen !== loadGenRef.current) return;
       const baseTables = tables.filter(
         (t) => t.table_type === "BASE TABLE" || t.table_type === "TABLE"
       );
@@ -53,6 +57,7 @@ export function ERDView({ connectionId, database, schema }: Props) {
           return { table: t, columns, foreignKeys };
         })
       );
+      if (gen !== loadGenRef.current) return;
       const cols = Math.ceil(Math.sqrt(baseTables.length)) || 1;
       const tableNodes: TableNode[] = details.map((d, i) => ({
         name: d.table.name,
@@ -63,9 +68,10 @@ export function ERDView({ connectionId, database, schema }: Props) {
       }));
       setNodes(tableNodes);
     } catch (e) {
+      if (gen !== loadGenRef.current) return;
       setError(String(e));
     } finally {
-      setLoading(false);
+      if (gen === loadGenRef.current) setLoading(false);
     }
   }, [connectionId, database, schema]);
 
@@ -92,56 +98,68 @@ export function ERDView({ connectionId, database, schema }: Props) {
     setPan({ x: 0, y: 0 });
   };
 
+  const dragRef = useRef<{
+    type: "table" | "pan";
+    tableName?: string;
+    mouseX: number;
+    mouseY: number;
+    nodeX: number;
+    nodeY: number;
+  } | null>(null);
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+
   const handleTableMouseDown = (e: React.MouseEvent, tableName: string) => {
     e.stopPropagation();
     if (e.button !== 0) return;
     const node = nodes.find((n) => n.name === tableName);
     if (!node) return;
+    dragRef.current = { type: "table", tableName, mouseX: e.clientX, mouseY: e.clientY, nodeX: node.x, nodeY: node.y };
     setTableDragging(tableName);
-    setTableDragStart({ mouseX: e.clientX, mouseY: e.clientY, nodeX: node.x, nodeY: node.y });
+    window.addEventListener("mousemove", onDragMove);
+    window.addEventListener("mouseup", onDragEnd);
   };
 
   const handleCanvasMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0 || (e.target as SVGElement).closest(".erd-table-rect")) return;
+    dragRef.current = { type: "pan", mouseX: e.clientX, mouseY: e.clientY, nodeX: pan.x, nodeY: pan.y };
     setPanDragging(true);
-    setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+    window.addEventListener("mousemove", onDragMove);
+    window.addEventListener("mouseup", onDragEnd);
   };
 
-  const handleMouseMove = useCallback(
-    (e: MouseEvent) => {
-      if (tableDragging) {
-        const node = nodes.find((n) => n.name === tableDragging);
-        if (!node) return;
-        const dx = (e.clientX - tableDragStart.mouseX) / zoom;
-        const dy = (e.clientY - tableDragStart.mouseY) / zoom;
-        setNodes((prev) =>
-          prev.map((n) =>
-            n.name === tableDragging
-              ? { ...n, x: tableDragStart.nodeX + dx, y: tableDragStart.nodeY + dy }
-              : n
-          )
-        );
-      } else if (panDragging) {
-        setPan({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
-      }
-    },
-    [tableDragging, tableDragStart, panDragging, panStart, zoom, nodes]
-  );
-
-  const handleMouseUp = useCallback(() => {
-    setTableDragging(null);
-    setPanDragging(false);
+  const onDragMove = useCallback((e: MouseEvent) => {
+    const d = dragRef.current;
+    if (!d) return;
+    if (d.type === "table" && d.tableName) {
+      const dx = (e.clientX - d.mouseX) / zoomRef.current;
+      const dy = (e.clientY - d.mouseY) / zoomRef.current;
+      setNodes((prev) =>
+        prev.map((n) =>
+          n.name === d.tableName
+            ? { ...n, x: d.nodeX + dx, y: d.nodeY + dy }
+            : n
+        )
+      );
+    } else if (d.type === "pan") {
+      setPan({ x: d.nodeX + (e.clientX - d.mouseX), y: d.nodeY + (e.clientY - d.mouseY) });
+    }
   }, []);
 
+  const onDragEnd = useCallback(() => {
+    dragRef.current = null;
+    setTableDragging(null);
+    setPanDragging(false);
+    window.removeEventListener("mousemove", onDragMove);
+    window.removeEventListener("mouseup", onDragEnd);
+  }, [onDragMove]);
+
   useEffect(() => {
-    if (!tableDragging && !panDragging) return;
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
     return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
+      window.removeEventListener("mousemove", onDragMove);
+      window.removeEventListener("mouseup", onDragEnd);
     };
-  }, [tableDragging, panDragging, handleMouseMove, handleMouseUp]);
+  }, [onDragMove, onDragEnd]);
 
   if (loading) {
     return (

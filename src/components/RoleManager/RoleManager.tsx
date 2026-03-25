@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   api,
   RoleInfo,
@@ -65,16 +65,21 @@ export function RoleManager({ connectionId }: Props) {
   const [formError, setFormError] = useState<string | null>(null);
   const [form, setForm] = useState<RoleFormState>(emptyForm());
 
+  const fetchGenRef = useRef(0);
+
   const fetchRoles = useCallback(async () => {
+    const gen = ++fetchGenRef.current;
     setLoading(true);
     setError(null);
     try {
       const result = await api.listRoles(connectionId);
+      if (gen !== fetchGenRef.current) return;
       setRoles(result);
     } catch (e) {
+      if (gen !== fetchGenRef.current) return;
       setError(String(e));
     } finally {
-      setLoading(false);
+      if (gen === fetchGenRef.current) setLoading(false);
     }
   }, [connectionId]);
 

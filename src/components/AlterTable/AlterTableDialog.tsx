@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { api, AlterTableOperation, ColumnInfo } from "../../lib/tauri";
 import { X, Plus, Loader2, Eye } from "lucide-react";
 import "./AlterTableDialog.css";
@@ -209,27 +209,30 @@ export function AlterTableDialog({
     setTableNameLocal(tableName);
   }, [tableName]);
 
-  const loadColumns = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const cols = await api.listColumns(
-        connectionId,
-        database,
-        schema,
-        tableName
-      );
-      setColumns(cols);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [connectionId, database, schema, tableName]);
-
   useEffect(() => {
+    let cancelled = false;
+    const loadColumns = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const cols = await api.listColumns(
+          connectionId,
+          database,
+          schema,
+          tableName
+        );
+        if (cancelled) return;
+        setColumns(cols);
+      } catch (e) {
+        if (cancelled) return;
+        setError(String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
     loadColumns();
-  }, [loadColumns]);
+    return () => { cancelled = true; };
+  }, [connectionId, database, schema, tableName]);
 
   const effectiveState = applyOperations(columns, operations);
   const droppedColumnNames = new Set(

@@ -16,19 +16,23 @@ export function SavedQueries({ onSelectQuery, onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     const load = async () => {
       setLoading(true);
       setError(null);
       try {
         const data = await api.loadSavedQueries();
+        if (cancelled) return;
         setQueries(data);
       } catch (e) {
+        if (cancelled) return;
         setError(String(e));
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
     load();
+    return () => { cancelled = true; };
   }, []);
 
   const handleDelete = async (e: React.MouseEvent, queryId: string) => {

@@ -46,14 +46,17 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
   const sourceConn = connections.find((c) => c.id === sourceConnectionId);
 
   useEffect(() => {
+    let cancelled = false;
     const load = async () => {
       setLoadingTargets(true);
       const opts: TargetOption[] = [];
       const errors: string[] = [];
       const connected = connections.filter((c) => activeConnections.has(c.id));
       for (const conn of connected) {
+        if (cancelled) return;
         try {
           const dbs = await api.listDatabases(conn.id);
+          if (cancelled) return;
           const skip = new Set(["template0", "template1"]);
           for (const db of dbs) {
             if (skip.has(db.name)) continue;
@@ -72,12 +75,16 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
           errors.push(`Failed to list databases for ${conn.name}: ${e}`);
         }
       }
+      if (cancelled) return;
       setTargets(opts);
       setLoadErrors(errors);
       setLoadingTargets(false);
     };
     load();
+    return () => { cancelled = true; };
   }, [connections, activeConnections, sourceConnectionId, sourceDatabase]);
+
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
   const appendLog = useCallback((line: string) => {
     setLogs((prev) => {
@@ -86,7 +93,8 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
       }
       return [...prev, line];
     });
-    setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+    clearTimeout(scrollTimerRef.current);
+    scrollTimerRef.current = setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
   }, []);
 
   useEffect(() => {
