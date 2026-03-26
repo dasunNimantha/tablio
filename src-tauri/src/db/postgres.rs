@@ -78,6 +78,39 @@ fn pg_row_to_json_values(row: &sqlx::postgres::PgRow, col_count: usize) -> Vec<s
             "JSON" | "JSONB" => row
                 .try_get::<serde_json::Value, _>(i)
                 .unwrap_or(serde_json::Value::Null),
+            "TIMESTAMP" | "TIMESTAMPTZ" => row
+                .try_get::<chrono::NaiveDateTime, _>(i)
+                .ok()
+                .map(|dt| serde_json::Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string()))
+                .or_else(|| {
+                    row.try_get::<chrono::DateTime<chrono::Utc>, _>(i)
+                        .ok()
+                        .map(|dt| serde_json::Value::String(dt.to_rfc3339()))
+                })
+                .unwrap_or(serde_json::Value::Null),
+            "DATE" => row
+                .try_get::<chrono::NaiveDate, _>(i)
+                .ok()
+                .map(|d| serde_json::Value::String(d.format("%Y-%m-%d").to_string()))
+                .unwrap_or(serde_json::Value::Null),
+            "TIME" | "TIMETZ" => row
+                .try_get::<chrono::NaiveTime, _>(i)
+                .ok()
+                .map(|t| serde_json::Value::String(t.format("%H:%M:%S").to_string()))
+                .unwrap_or(serde_json::Value::Null),
+            "UUID" => row
+                .try_get::<uuid::Uuid, _>(i)
+                .ok()
+                .map(|u| serde_json::Value::String(u.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+            "BYTEA" => row
+                .try_get::<Vec<u8>, _>(i)
+                .ok()
+                .map(|b| {
+                    let hex_str: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
+                    serde_json::Value::String(format!("\\x{}", hex_str))
+                })
+                .unwrap_or(serde_json::Value::Null),
             _ => row
                 .try_get::<String, _>(i)
                 .ok()

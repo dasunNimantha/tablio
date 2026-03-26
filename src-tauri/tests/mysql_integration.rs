@@ -329,6 +329,8 @@ async fn mysql_get_table_stats() {
 
     let stats = driver.get_table_stats(&db, &db, &tbl).await.unwrap();
     assert_eq!(stats.table_name, tbl);
+    assert_eq!(stats.row_count, 3, "exact COUNT(*) should return 3 rows");
+    assert!(!stats.total_size.is_empty());
 
     driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }
@@ -612,7 +614,8 @@ async fn mysql_fetch_rows_various_data_types() {
                     flag TINYINT(1), \
                     amt DECIMAL(8,2), \
                     body TEXT, \
-                    jdoc JSON\
+                    jdoc JSON, \
+                    created_at DATETIME NULL\
                 ) ENGINE=InnoDB",
                 tbl
             ),
@@ -623,8 +626,8 @@ async fn mysql_fetch_rows_various_data_types() {
         .execute_query(
             &db,
             &format!(
-                "INSERT INTO `{}` (title, flag, amt, body, jdoc) VALUES \
-                ('hi', 1, 12.34, 'long', CAST('{{\"k\":1}}' AS JSON))",
+                "INSERT INTO `{}` (title, flag, amt, body, jdoc, created_at) VALUES \
+                ('hi', 1, 12.34, 'long', CAST('{{\"k\":1}}' AS JSON), '2020-01-15 10:30:00')",
                 tbl
             ),
         )
@@ -648,6 +651,16 @@ async fn mysql_fetch_rows_various_data_types() {
     assert!((amt - 12.34).abs() < 0.01);
     assert_eq!(row[4], serde_json::json!("long"));
     assert!(row[5].is_object() || row[5].is_string());
+    assert!(
+        row[6].is_string(),
+        "DATETIME should be a string, got: {:?}",
+        row[6]
+    );
+    assert!(
+        row[6].as_str().unwrap().contains("2020-01-15"),
+        "DATETIME should contain the date, got: {:?}",
+        row[6]
+    );
 
     driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }
@@ -719,6 +732,7 @@ async fn mysql_explain_query() {
         .await
         .unwrap();
     assert!(!ex.raw_text.is_empty());
+    assert!(!ex.plan.node_type.is_empty());
 
     driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }
@@ -1174,28 +1188,52 @@ async fn mysql_import_data_large_batch() {
 #[tokio::test]
 async fn mysql_get_server_activity() {
     let (driver, _db) = mysql_driver!();
-    driver.get_server_activity().await.unwrap();
+    let activity = driver.get_server_activity().await.unwrap();
+    assert!(
+        !activity.is_empty(),
+        "MySQL should report at least our own connection"
+    );
 }
 
 #[tokio::test]
 async fn mysql_get_database_stats() {
     let (driver, _db) = mysql_driver!();
-    let stats = driver.get_database_stats().await;
-    assert!(stats.is_ok());
+    let stats = driver.get_database_stats().await.unwrap();
+    assert!(
+        stats.total_connections >= 1,
+        "expected at least 1 connection, got {}",
+        stats.total_connections
+    );
+    assert!(stats.timestamp_ms > 0.0, "timestamp should be positive");
+    assert!(
+        stats.active_connections + stats.idle_connections > 0,
+        "should have at least 1 active or idle connection"
+    );
 }
 
 #[tokio::test]
 async fn mysql_get_locks() {
     let (driver, _db) = mysql_driver!();
-    let locks = driver.get_locks().await;
-    assert!(locks.is_ok());
+    let locks = driver.get_locks().await.unwrap();
+    let _ = locks;
 }
 
 #[tokio::test]
 async fn mysql_get_server_config() {
     let (driver, _db) = mysql_driver!();
-    let cfg = driver.get_server_config().await;
-    assert!(cfg.is_ok());
+    let cfg = driver.get_server_config().await.unwrap();
+    assert!(
+        !cfg.is_empty(),
+        "MySQL SHOW VARIABLES should return config entries"
+    );
+    assert!(
+        cfg.iter().any(|e| e.name == "version"),
+        "should include 'version' variable"
+    );
+    assert!(
+        cfg.iter().all(|e| !e.category.is_empty()),
+        "all entries should have a category"
+    );
 }
 
 #[tokio::test]
@@ -1209,7 +1247,245 @@ async fn mysql_get_query_stats() {
 #[tokio::test]
 async fn mysql_list_roles() {
     let (driver, _db) = mysql_driver!();
-    let _ = driver.list_roles().await;
+    let roles = driver.list_roles().await.unwrap();
+    let _ = roles;
+}
+
+// ---------------------------------------------------------------------------
+// alter_table: additional operations
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mysql_alter_table_change_column_type() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("alt_type");
+
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{}` (id INT PRIMARY KEY, n INT NOT NULL) ENGINE=InnoDB",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO `{}` VALUES (1, 42)", tbl))
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[AlterTableOperation::ChangeColumnType {
+                column_name: "n".into(),
+                new_type: "BIGINT".into(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, &db, &tbl).await.unwrap();
+    let n = cols.iter().find(|c| c.name == "n").unwrap();
+    assert!(
+        n.data_type.contains("bigint"),
+        "expected bigint, got: {}",
+        n.data_type
+    );
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_alter_table_set_nullable() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("alt_null");
+
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{}` (id INT PRIMARY KEY, note VARCHAR(100) NOT NULL) ENGINE=InnoDB",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[AlterTableOperation::SetNullable {
+                column_name: "note".into(),
+                nullable: true,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, &db, &tbl).await.unwrap();
+    let note = cols.iter().find(|c| c.name == "note").unwrap();
+    assert!(note.is_nullable);
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_alter_table_set_default() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("alt_def");
+
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{}` (id INT PRIMARY KEY, priority INT) ENGINE=InnoDB",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[AlterTableOperation::SetDefault {
+                column_name: "priority".into(),
+                default_value: Some("5".into()),
+            }],
+        )
+        .await
+        .unwrap();
+
+    driver
+        .execute_query(&db, &format!("INSERT INTO `{}` (id) VALUES (1)", tbl))
+        .await
+        .unwrap();
+
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 10, None, None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0][1], serde_json::json!(5));
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[AlterTableOperation::SetDefault {
+                column_name: "priority".into(),
+                default_value: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_alter_table_rename_table() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("alt_rn");
+    let new_name = unique_table("alt_rn_new");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{}` (id INT PRIMARY KEY) ENGINE=InnoDB", tbl),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[AlterTableOperation::RenameTable {
+                new_name: new_name.clone(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let tables = driver.list_tables(&db, &db).await.unwrap();
+    assert!(!tables.iter().any(|t| t.name == tbl));
+    assert!(tables.iter().any(|t| t.name == new_name));
+
+    driver
+        .drop_object(&db, &db, &new_name, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mysql_alter_table_change_type_unsafe_rejected() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("alt_bad");
+
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{}` (id INT PRIMARY KEY, n INT) ENGINE=InnoDB",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[AlterTableOperation::ChangeColumnType {
+                column_name: "n".into(),
+                new_type: "INT; DROP TABLE x; --".into(),
+            }],
+        )
+        .await;
+    assert!(result.is_err());
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// drop_object: VIEW
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mysql_drop_object_view() {
+    let (driver, db) = mysql_driver!();
+    let base = unique_table("vbase");
+    let vname = unique_table("vw");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{}` (id INT PRIMARY KEY) ENGINE=InnoDB", base),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE VIEW `{}` AS SELECT id FROM `{}`", vname, base),
+        )
+        .await
+        .unwrap();
+
+    driver.drop_object(&db, &db, &vname, "VIEW").await.unwrap();
+    driver.drop_object(&db, &db, &base, "TABLE").await.unwrap();
 }
 
 // ---------------------------------------------------------------------------

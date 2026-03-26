@@ -51,6 +51,15 @@ fn sqlite_row_to_json_values(
                 .and_then(serde_json::Number::from_f64)
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
+            "BLOB" => row
+                .try_get::<Option<Vec<u8>>, _>(i)
+                .ok()
+                .flatten()
+                .map(|b| {
+                    let hex_str: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
+                    serde_json::Value::String(format!("X'{}'", hex_str))
+                })
+                .unwrap_or(serde_json::Value::Null),
             _ => row
                 .try_get::<String, _>(i)
                 .ok()

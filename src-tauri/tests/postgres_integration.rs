@@ -727,6 +727,16 @@ async fn pg_fetch_rows_various_data_types() {
         row[4]
     );
     assert!(
+        row[5].is_string(),
+        "TIMESTAMP should be a string, got: {:?}",
+        row[5]
+    );
+    assert!(
+        row[5].as_str().unwrap().contains("2020-01-15"),
+        "TIMESTAMP should contain the date, got: {:?}",
+        row[5]
+    );
+    assert!(
         row.len() >= 7,
         "expected at least 7 columns, got {}",
         row.len()
@@ -803,17 +813,8 @@ async fn pg_execute_query_dml_insert() {
 #[tokio::test]
 async fn pg_execute_query_invalid_sql_errors() {
     let driver = pg_driver!();
-    let tbl = unique_table("pg_badsql");
-
-    driver
-        .execute_query(DB, &format!("CREATE TABLE {}.\"{}\" (id INT)", SCHEMA, tbl))
-        .await
-        .unwrap();
-
     let r = driver.execute_query(DB, "SELEC 1 FROM nowhere").await;
     assert!(r.is_err());
-
-    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
 }
 
 #[tokio::test]
@@ -1558,11 +1559,15 @@ async fn pg_create_drop_alter_role() {
         connection_limit: -1,
         valid_until: None,
     };
-    if driver.create_role(&create).await.is_err() {
-        return;
-    }
+    driver.create_role(&create).await.unwrap();
 
-    let _ = driver
+    let roles = driver.list_roles().await.unwrap();
+    assert!(
+        roles.iter().any(|r| r.name == role),
+        "newly created role should appear in list_roles"
+    );
+
+    driver
         .alter_role(&AlterRoleRequest {
             connection_id: "test".into(),
             name: role.clone(),
@@ -1574,7 +1579,113 @@ async fn pg_create_drop_alter_role() {
             connection_limit: Some(5),
             valid_until: None,
         })
-        .await;
+        .await
+        .unwrap();
 
     driver.drop_role(&role).await.unwrap();
+
+    let roles = driver.list_roles().await.unwrap();
+    assert!(
+        !roles.iter().any(|r| r.name == role),
+        "dropped role should no longer appear"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Missing alter_table operations: SetDefault, RenameTable
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pg_alter_table_set_default() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_alt_def");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {}.\"{}\" (id INT PRIMARY KEY, priority INT)",
+                SCHEMA, tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::SetDefault {
+                column_name: "priority".into(),
+                default_value: Some("5".into()),
+            }],
+        )
+        .await
+        .unwrap();
+
+    driver
+        .execute_query(
+            DB,
+            &format!("INSERT INTO {}.\"{}\" (id) VALUES (1)", SCHEMA, tbl),
+        )
+        .await
+        .unwrap();
+
+    let data = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0][1], serde_json::json!(5));
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::SetDefault {
+                column_name: "priority".into(),
+                default_value: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn pg_alter_table_rename_table() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_rn_tbl");
+    let new_name = unique_table("pg_rn_new");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {}.\"{}\" (id INT PRIMARY KEY)", SCHEMA, tbl),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::RenameTable {
+                new_name: new_name.clone(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let tables = driver.list_tables(DB, SCHEMA).await.unwrap();
+    assert!(!tables.iter().any(|t| t.name == tbl));
+    assert!(tables.iter().any(|t| t.name == new_name));
+
+    driver
+        .drop_object(DB, SCHEMA, &new_name, "TABLE")
+        .await
+        .unwrap();
 }

@@ -573,7 +573,7 @@ async fn sqlite_fetch_rows_null_values() {
         .unwrap();
     assert_eq!(data.total_rows, 1);
     let v = &data.rows[0][1];
-    assert!(v.is_null() || v.as_str().is_some_and(|s| s.is_empty()));
+    assert!(v.is_null(), "NULL BLOB should decode as null, got: {:?}", v);
 
     driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
     let _ = std::fs::remove_file(&path);
@@ -602,7 +602,10 @@ async fn sqlite_fetch_rows_various_data_types() {
     driver
         .execute_query(
             DB,
-            &format!("INSERT INTO \"{}\" (t, r, b) VALUES ('hi', 3.5, NULL)", tbl),
+            &format!(
+                "INSERT INTO \"{}\" (t, r, b) VALUES ('hi', 3.5, X'DEADBEEF')",
+                tbl
+            ),
         )
         .await
         .unwrap();
@@ -616,7 +619,16 @@ async fn sqlite_fetch_rows_various_data_types() {
     assert_eq!(row[1], serde_json::json!("hi"));
     assert!(row[2].as_f64().unwrap() - 3.5 < 1e-9);
     let b = &row[3];
-    assert!(b.is_null() || b.as_str().is_some_and(|s| s.is_empty()));
+    assert!(
+        b.is_string(),
+        "BLOB with data should decode as hex string, got: {:?}",
+        b
+    );
+    assert!(
+        b.as_str().unwrap().contains("deadbeef"),
+        "BLOB hex should contain deadbeef, got: {:?}",
+        b
+    );
 
     driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
     let _ = std::fs::remove_file(&path);
@@ -1046,6 +1058,179 @@ async fn sqlite_alter_table_rename_column() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[tokio::test]
+async fn sqlite_alter_table_drop_column() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("altdrp");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE \"{}\" (id INTEGER PRIMARY KEY, extra TEXT, keep TEXT)",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::DropColumn {
+                column_name: "extra".into(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    assert_eq!(cols.len(), 2);
+    assert!(!cols.iter().any(|c| c.name == "extra"));
+    assert!(cols.iter().any(|c| c.name == "keep"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_rename_table() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("altrn_tbl");
+    let new_name = unique_table("altrn_new");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{}\" (id INTEGER PRIMARY KEY)", tbl),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::RenameTable {
+                new_name: new_name.clone(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let tables = driver.list_tables(DB, SCHEMA).await.unwrap();
+    assert!(!tables.iter().any(|t| t.name == tbl));
+    assert!(tables.iter().any(|t| t.name == new_name));
+
+    driver
+        .drop_object(DB, SCHEMA, &new_name, "TABLE")
+        .await
+        .unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_change_type_unsupported() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("altchg");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE \"{}\" (id INTEGER PRIMARY KEY, n INTEGER)",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::ChangeColumnType {
+                column_name: "n".into(),
+                new_type: "TEXT".into(),
+            }],
+        )
+        .await;
+    assert!(result.is_err(), "SQLite should reject ChangeColumnType");
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_set_nullable_unsupported() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("altnul");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE \"{}\" (id INTEGER PRIMARY KEY, note TEXT NOT NULL)",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::SetNullable {
+                column_name: "note".into(),
+                nullable: true,
+            }],
+        )
+        .await;
+    assert!(result.is_err(), "SQLite should reject SetNullable");
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_set_default_unsupported() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("altdef");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE \"{}\" (id INTEGER PRIMARY KEY, val TEXT)",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::SetDefault {
+                column_name: "val".into(),
+                default_value: Some("hello".into()),
+            }],
+        )
+        .await;
+    assert!(result.is_err(), "SQLite should reject SetDefault");
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
 // ---------------------------------------------------------------------------
 // Truncate and drop
 // ---------------------------------------------------------------------------
@@ -1094,6 +1279,42 @@ async fn sqlite_drop_object() {
     driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
     let tables = driver.list_tables(DB, SCHEMA).await.unwrap();
     assert!(!tables.iter().any(|t| t.name == tbl));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_drop_object_view() {
+    let (driver, path) = create_driver().await;
+    let base = unique_table("vbase");
+    let vname = unique_table("vw");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{}\" (id INTEGER PRIMARY KEY)", base),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE VIEW \"{}\" AS SELECT id FROM \"{}\"", vname, base),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .drop_object(DB, SCHEMA, &vname, "VIEW")
+        .await
+        .unwrap();
+
+    let tables = driver.list_tables(DB, SCHEMA).await.unwrap();
+    assert!(!tables.iter().any(|t| t.name == vname));
+
+    driver
+        .drop_object(DB, SCHEMA, &base, "TABLE")
+        .await
+        .unwrap();
     let _ = std::fs::remove_file(&path);
 }
 

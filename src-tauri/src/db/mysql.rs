@@ -70,6 +70,29 @@ fn mysql_row_to_json_values(
             "JSON" => row
                 .try_get::<serde_json::Value, _>(i)
                 .unwrap_or(serde_json::Value::Null),
+            "DATETIME" | "TIMESTAMP" => row
+                .try_get::<chrono::NaiveDateTime, _>(i)
+                .ok()
+                .map(|dt| serde_json::Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string()))
+                .unwrap_or(serde_json::Value::Null),
+            "DATE" => row
+                .try_get::<chrono::NaiveDate, _>(i)
+                .ok()
+                .map(|d| serde_json::Value::String(d.format("%Y-%m-%d").to_string()))
+                .unwrap_or(serde_json::Value::Null),
+            "TIME" => row
+                .try_get::<chrono::NaiveTime, _>(i)
+                .ok()
+                .map(|t| serde_json::Value::String(t.format("%H:%M:%S").to_string()))
+                .unwrap_or(serde_json::Value::Null),
+            "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" => row
+                .try_get::<Vec<u8>, _>(i)
+                .ok()
+                .map(|b| {
+                    let hex_str: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
+                    serde_json::Value::String(format!("0x{}", hex_str))
+                })
+                .unwrap_or(serde_json::Value::Null),
             _ => row
                 .try_get::<String, _>(i)
                 .ok()
@@ -97,6 +120,38 @@ fn json_to_sql_literal(val: &serde_json::Value) -> String {
 
 fn sql_fragment_is_unsafe(s: &str) -> bool {
     s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") || s.contains('\'')
+}
+
+fn mysql_variable_category(name: &str) -> &str {
+    if name.starts_with("innodb_") {
+        "InnoDB"
+    } else if name.starts_with("performance_schema") {
+        "Performance Schema"
+    } else if name.starts_with("ssl_") || name.starts_with("tls_") {
+        "SSL / TLS"
+    } else if name.starts_with("log_")
+        || name.starts_with("binlog_")
+        || name.starts_with("relay_log")
+    {
+        "Logging"
+    } else if name.starts_with("max_") || name.starts_with("net_") || name.starts_with("wait_") {
+        "Limits & Timeouts"
+    } else if name.starts_with("character_set") || name.starts_with("collation") {
+        "Character Sets"
+    } else if name.starts_with("slave_")
+        || name.starts_with("replica_")
+        || name.starts_with("gtid_")
+    {
+        "Replication"
+    } else if name.starts_with("optimizer_")
+        || name.starts_with("sort_")
+        || name.starts_with("join_")
+        || name.starts_with("tmp_")
+    {
+        "Optimizer"
+    } else {
+        "General"
+    }
 }
 
 fn filter_is_unsafe(filter: &str) -> bool {
@@ -650,22 +705,30 @@ impl DatabaseDriver for MysqlDriver {
         _schema: &str,
         table: &str,
     ) -> Result<TableStats> {
-        let sql = "SELECT CAST(TABLE_NAME AS CHAR) AS TABLE_NAME, \
-                   TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH \
+        let meta_sql = "SELECT CAST(TABLE_NAME AS CHAR) AS TABLE_NAME, \
+                   DATA_LENGTH, INDEX_LENGTH \
                    FROM information_schema.TABLES \
                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?";
-        let row = sqlx::query(sql)
+        let meta_row = sqlx::query(meta_sql)
             .bind(database)
             .bind(table)
             .fetch_optional(&self.pool)
             .await?;
 
-        let row = row.ok_or_else(|| anyhow::anyhow!("Table {}.{} not found", database, table))?;
+        let meta_row =
+            meta_row.ok_or_else(|| anyhow::anyhow!("Table {}.{} not found", database, table))?;
 
-        let table_name: String = row.get("TABLE_NAME");
-        let table_rows: Option<i64> = row.try_get("TABLE_ROWS").ok();
-        let data_length: Option<i64> = row.try_get("DATA_LENGTH").ok();
-        let index_length: Option<i64> = row.try_get("INDEX_LENGTH").ok();
+        let table_name: String = meta_row.get("TABLE_NAME");
+        let data_length: Option<i64> = meta_row.try_get("DATA_LENGTH").ok();
+        let index_length: Option<i64> = meta_row.try_get("INDEX_LENGTH").ok();
+
+        let count_sql = format!(
+            "SELECT COUNT(*) AS cnt FROM {}.{}",
+            quote_ident(database),
+            quote_ident(table)
+        );
+        let count_row = sqlx::query(&count_sql).fetch_one(&self.pool).await?;
+        let exact_count: i64 = count_row.try_get("cnt").unwrap_or(0);
 
         let data_bytes = data_length.unwrap_or(0);
         let index_bytes = index_length.unwrap_or(0);
@@ -673,14 +736,14 @@ impl DatabaseDriver for MysqlDriver {
 
         Ok(TableStats {
             table_name: table_name.clone(),
-            row_count: table_rows.unwrap_or(0),
+            row_count: exact_count,
             total_size: format_bytes(Some(total_bytes)),
             index_size: format_bytes(index_length),
             data_size: format_bytes(data_length),
             last_vacuum: None,
             last_analyze: None,
             dead_tuples: None,
-            live_tuples: table_rows,
+            live_tuples: Some(exact_count),
         })
     }
 
@@ -923,29 +986,131 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     async fn get_database_stats(&self) -> Result<DatabaseStats> {
+        let activity = self.get_server_activity().await.unwrap_or_default();
+        let active = activity
+            .iter()
+            .filter(|a| a.state != "Sleep" && a.state != "Daemon")
+            .count() as i64;
+        let idle = activity.iter().filter(|a| a.state == "Sleep").count() as i64;
+        let total = activity.len() as i64;
+
+        let status_sql = "SHOW GLOBAL STATUS WHERE Variable_name IN (\
+            'Com_commit', 'Com_rollback', \
+            'Innodb_rows_inserted', 'Innodb_rows_updated', \
+            'Innodb_rows_deleted', 'Innodb_rows_read', \
+            'Innodb_buffer_pool_reads', 'Innodb_buffer_pool_read_requests')";
+        let status_rows = sqlx::raw_sql(status_sql)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+
+        let get_status = |name: &str| -> i64 {
+            status_rows
+                .iter()
+                .find(|r| {
+                    r.try_get::<String, _>(0)
+                        .ok()
+                        .map(|v| v == name)
+                        .unwrap_or(false)
+                })
+                .and_then(|r| {
+                    r.try_get::<String, _>(1)
+                        .ok()
+                        .and_then(|v| v.parse::<i64>().ok())
+                })
+                .unwrap_or(0)
+        };
+
+        let ts_row = sqlx::query("SELECT CAST(UNIX_TIMESTAMP() * 1000 AS DOUBLE) AS ts")
+            .fetch_one(&self.pool)
+            .await?;
+        let timestamp_ms: f64 = ts_row.try_get::<f64, _>("ts").unwrap_or(0.0);
+
         Ok(DatabaseStats {
-            active_connections: 0,
-            idle_connections: 0,
+            active_connections: active,
+            idle_connections: idle,
             idle_in_transaction: 0,
-            total_connections: 0,
-            xact_commit: 0,
-            xact_rollback: 0,
-            tup_inserted: 0,
-            tup_updated: 0,
-            tup_deleted: 0,
-            tup_fetched: 0,
-            blks_read: 0,
-            blks_hit: 0,
-            timestamp_ms: 0.0,
+            total_connections: total,
+            xact_commit: get_status("Com_commit"),
+            xact_rollback: get_status("Com_rollback"),
+            tup_inserted: get_status("Innodb_rows_inserted"),
+            tup_updated: get_status("Innodb_rows_updated"),
+            tup_deleted: get_status("Innodb_rows_deleted"),
+            tup_fetched: get_status("Innodb_rows_read"),
+            blks_read: get_status("Innodb_buffer_pool_reads"),
+            blks_hit: get_status("Innodb_buffer_pool_read_requests"),
+            timestamp_ms,
         })
     }
 
     async fn get_locks(&self) -> Result<Vec<LockInfo>> {
-        Ok(vec![])
+        let sql = "SELECT \
+            r.trx_mysql_thread_id AS pid, \
+            CAST(r.trx_id AS CHAR) AS lock_id, \
+            IFNULL(CAST(l.OBJECT_SCHEMA AS CHAR), '') AS db, \
+            IFNULL(CAST(l.OBJECT_NAME AS CHAR), '') AS relation, \
+            IFNULL(CAST(l.LOCK_MODE AS CHAR), '') AS mode, \
+            CASE WHEN l.LOCK_STATUS = 'GRANTED' THEN 1 ELSE 0 END AS granted, \
+            IFNULL(r.trx_query, '') AS query, \
+            IFNULL(CAST(p.USER AS CHAR), '') AS user, \
+            IFNULL(CAST(r.trx_state AS CHAR), '') AS state, \
+            TIMESTAMPDIFF(SECOND, r.trx_started, NOW()) AS duration_s \
+          FROM information_schema.INNODB_TRX r \
+          LEFT JOIN performance_schema.data_locks l \
+            ON r.trx_id = l.ENGINE_TRANSACTION_ID \
+          LEFT JOIN information_schema.PROCESSLIST p \
+            ON r.trx_mysql_thread_id = p.ID \
+          ORDER BY r.trx_started";
+        let rows = sqlx::raw_sql(sql)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+
+        Ok(rows
+            .iter()
+            .map(|r| LockInfo {
+                pid: r.try_get::<i64, _>("pid").unwrap_or(0) as i32,
+                locktype: r
+                    .try_get::<String, _>("lock_id")
+                    .unwrap_or_else(|_| "InnoDB".into()),
+                database: r.try_get::<String, _>("db").unwrap_or_default(),
+                relation: r.try_get::<String, _>("relation").unwrap_or_default(),
+                mode: r.try_get::<String, _>("mode").unwrap_or_default(),
+                granted: r.try_get::<i32, _>("granted").unwrap_or(0) == 1,
+                query: r.try_get::<String, _>("query").unwrap_or_default(),
+                user: r.try_get::<String, _>("user").unwrap_or_default(),
+                state: r.try_get::<String, _>("state").unwrap_or_default(),
+                duration_ms: r
+                    .try_get::<i64, _>("duration_s")
+                    .ok()
+                    .map(|s| s as f64 * 1000.0),
+            })
+            .collect())
     }
 
     async fn get_server_config(&self) -> Result<Vec<ServerConfigEntry>> {
-        Ok(vec![])
+        let rows = sqlx::raw_sql("SHOW VARIABLES")
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let name: String = r.try_get::<String, _>(0).unwrap_or_default();
+                let value: String = r.try_get::<String, _>(1).unwrap_or_default();
+                let category = mysql_variable_category(&name).to_string();
+                ServerConfigEntry {
+                    name,
+                    setting: value,
+                    unit: None,
+                    category,
+                    description: String::new(),
+                    context: "dynamic".into(),
+                    source: String::new(),
+                    pending_restart: false,
+                }
+            })
+            .collect())
     }
 
     async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
