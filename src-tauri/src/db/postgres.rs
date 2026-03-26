@@ -400,7 +400,10 @@ impl DatabaseDriver for PostgresDriver {
                     is_nullable: nullable_str == "YES",
                     is_primary_key: r.get("is_pk"),
                     default_value: default_val,
-                    ordinal_position: r.get("ordinal_position"),
+                    ordinal_position: r
+                        .try_get::<i32, _>("ordinal_position")
+                        .or_else(|_| r.try_get::<i64, _>("ordinal_position").map(|v| v as i32))
+                        .unwrap_or(0),
                     is_auto_generated: is_identity == "YES"
                         || is_generated == "ALWAYS"
                         || has_serial_default,
@@ -616,17 +619,44 @@ impl DatabaseDriver for PostgresDriver {
 
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
         let start = Instant::now();
+
+        // Try EXPLAIN (ANALYZE, FORMAT JSON) first; fall back to plain EXPLAIN
+        // for CockroachDB and other PG-compatible DBs that don't support ANALYZE+JSON.
         let explain_sql = format!("EXPLAIN (ANALYZE, FORMAT JSON) {}", sql);
-        let row = sqlx::query(&explain_sql).fetch_one(&self.pool).await?;
+        if let Ok(row) = sqlx::query(&explain_sql).fetch_one(&self.pool).await {
+            let elapsed = start.elapsed().as_millis() as u64;
+            let raw_json: serde_json::Value = row.try_get(0)?;
+            let raw_text = serde_json::to_string_pretty(&raw_json)?;
+            let plan = parse_pg_explain_node(&raw_json);
+            return Ok(ExplainResult {
+                plan,
+                raw_text,
+                execution_time_ms: elapsed,
+            });
+        }
+
+        let fallback_sql = format!("EXPLAIN {}", sql);
+        let rows = sqlx::query(&fallback_sql).fetch_all(&self.pool).await?;
         let elapsed = start.elapsed().as_millis() as u64;
-
-        let raw_json: serde_json::Value = row.try_get(0)?;
-        let raw_text = serde_json::to_string_pretty(&raw_json)?;
-
-        let plan = parse_pg_explain_node(&raw_json);
+        let raw_text = rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>(0).ok())
+            .collect::<Vec<_>>()
+            .join("\n");
 
         Ok(ExplainResult {
-            plan,
+            plan: ExplainNode {
+                node_type: "Unknown".to_string(),
+                relation: None,
+                startup_cost: 0.0,
+                total_cost: 0.0,
+                actual_time_ms: None,
+                rows_estimated: 0,
+                rows_actual: None,
+                width: 0,
+                filter: None,
+                children: vec![],
+            },
             raw_text,
             execution_time_ms: elapsed,
         })
@@ -1216,13 +1246,15 @@ impl DatabaseDriver for PostgresDriver {
         for row in rows {
             entries.push(ServerConfigEntry {
                 name: row.get::<String, _>("name"),
-                setting: row.get::<String, _>("setting"),
+                setting: row.try_get::<String, _>("setting").unwrap_or_default(),
                 unit: row.try_get::<String, _>("unit").ok(),
-                category: row.get::<String, _>("category"),
-                description: row.get::<String, _>("short_desc"),
-                context: row.get::<String, _>("context"),
-                source: row.get::<String, _>("source"),
-                pending_restart: row.get::<bool, _>("pending_restart"),
+                category: row
+                    .try_get::<String, _>("category")
+                    .unwrap_or_else(|_| "Uncategorized".to_string()),
+                description: row.try_get::<String, _>("short_desc").unwrap_or_default(),
+                context: row.try_get::<String, _>("context").unwrap_or_default(),
+                source: row.try_get::<String, _>("source").unwrap_or_default(),
+                pending_restart: row.try_get::<bool, _>("pending_restart").unwrap_or(false),
             });
         }
         Ok(entries)

@@ -91,7 +91,10 @@ async fn crdb_list_tables_after_create() {
     driver
         .execute_query(
             &db,
-            &format!("CREATE TABLE \"{}\".\"{}\" (id INT PRIMARY KEY)", SCHEMA, tbl),
+            &format!(
+                "CREATE TABLE \"{}\".\"{}\" (id INT PRIMARY KEY)",
+                SCHEMA, tbl
+            ),
         )
         .await
         .unwrap();
@@ -469,15 +472,7 @@ async fn crdb_fetch_rows_filter() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(
-            &db,
-            SCHEMA,
-            &tbl,
-            0,
-            50,
-            None,
-            Some("\"val\" > 15".into()),
-        )
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, None, Some("\"val\" > 15".into()))
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -609,10 +604,7 @@ async fn crdb_execute_query_dml() {
     let result = driver
         .execute_query(
             &db,
-            &format!(
-                "INSERT INTO \"{}\".\"{}\" VALUES (1),(2),(3)",
-                SCHEMA, tbl
-            ),
+            &format!("INSERT INTO \"{}\".\"{}\" VALUES (1),(2),(3)", SCHEMA, tbl),
         )
         .await
         .unwrap();
@@ -654,10 +646,7 @@ async fn crdb_explain_query() {
     let ex = driver
         .explain_query(
             &db,
-            &format!(
-                "SELECT * FROM \"{}\".\"{}\" WHERE id = 1",
-                SCHEMA, tbl
-            ),
+            &format!("SELECT * FROM \"{}\".\"{}\" WHERE id = 1", SCHEMA, tbl),
         )
         .await
         .unwrap();
@@ -758,10 +747,7 @@ async fn crdb_apply_changes_update() {
     driver
         .execute_query(
             &db,
-            &format!(
-                "INSERT INTO \"{}\".\"{}\" VALUES (1, 'old')",
-                SCHEMA, tbl
-            ),
+            &format!("INSERT INTO \"{}\".\"{}\" VALUES (1, 'old')", SCHEMA, tbl),
         )
         .await
         .unwrap();
@@ -869,10 +855,7 @@ async fn crdb_create_table_basic() {
             default_value: None,
         },
     ];
-    driver
-        .create_table(&db, SCHEMA, &tbl, &cols)
-        .await
-        .unwrap();
+    driver.create_table(&db, SCHEMA, &tbl, &cols).await.unwrap();
 
     let tables = driver.list_tables(&db, SCHEMA).await.unwrap();
     assert!(tables.iter().any(|t| t.name == tbl));
@@ -1041,10 +1024,7 @@ async fn crdb_truncate_table() {
     driver
         .execute_query(
             &db,
-            &format!(
-                "INSERT INTO \"{}\".\"{}\" VALUES (1),(2),(3)",
-                SCHEMA, tbl
-            ),
+            &format!("INSERT INTO \"{}\".\"{}\" VALUES (1),(2),(3)", SCHEMA, tbl),
         )
         .await
         .unwrap();

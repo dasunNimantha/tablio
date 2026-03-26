@@ -108,11 +108,9 @@ impl PoolManager {
         };
 
         let driver_result = match effective_config.db_type {
-            DbType::Postgres | DbType::Cockroachdb => {
-                PostgresDriver::connect(&effective_config)
-                    .await
-                    .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>)
-            }
+            DbType::Postgres | DbType::Cockroachdb => PostgresDriver::connect(&effective_config)
+                .await
+                .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
             DbType::Mysql | DbType::Mariadb | DbType::Tidb => {
                 MysqlDriver::connect(&effective_config)
                     .await

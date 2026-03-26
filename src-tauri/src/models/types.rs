@@ -534,10 +534,7 @@ mod tests {
             serde_json::to_string(&DbType::Cockroachdb).unwrap(),
             r#""cockroachdb""#
         );
-        assert_eq!(
-            serde_json::to_string(&DbType::Tidb).unwrap(),
-            r#""tidb""#
-        );
+        assert_eq!(serde_json::to_string(&DbType::Tidb).unwrap(), r#""tidb""#);
     }
 
     #[test]
