@@ -13,6 +13,9 @@ const DB_TYPES = [
   { value: "postgres" as const, label: "PostgreSQL", defaultPort: 5432 },
   { value: "mysql" as const, label: "MySQL", defaultPort: 3306 },
   { value: "sqlite" as const, label: "SQLite", defaultPort: 0 },
+  { value: "mariadb" as const, label: "MariaDB", defaultPort: 3306 },
+  { value: "cockroachdb" as const, label: "CockroachDB", defaultPort: 26257 },
+  { value: "tidb" as const, label: "TiDB", defaultPort: 4000 },
 ];
 
 type ValidationField = "name" | "host" | "port" | "user" | "database";

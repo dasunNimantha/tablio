@@ -108,12 +108,16 @@ impl PoolManager {
         };
 
         let driver_result = match effective_config.db_type {
-            DbType::Postgres => PostgresDriver::connect(&effective_config)
-                .await
-                .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
-            DbType::Mysql => MysqlDriver::connect(&effective_config)
-                .await
-                .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
+            DbType::Postgres | DbType::Cockroachdb => {
+                PostgresDriver::connect(&effective_config)
+                    .await
+                    .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>)
+            }
+            DbType::Mysql | DbType::Mariadb | DbType::Tidb => {
+                MysqlDriver::connect(&effective_config)
+                    .await
+                    .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>)
+            }
             DbType::Sqlite => SqliteDriver::connect(&effective_config)
                 .await
                 .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
@@ -178,8 +182,12 @@ impl PoolManager {
 
         let result = async {
             let driver: Box<dyn DatabaseDriver> = match effective_config.db_type {
-                DbType::Postgres => Box::new(PostgresDriver::connect(&effective_config).await?),
-                DbType::Mysql => Box::new(MysqlDriver::connect(&effective_config).await?),
+                DbType::Postgres | DbType::Cockroachdb => {
+                    Box::new(PostgresDriver::connect(&effective_config).await?)
+                }
+                DbType::Mysql | DbType::Mariadb | DbType::Tidb => {
+                    Box::new(MysqlDriver::connect(&effective_config).await?)
+                }
                 DbType::Sqlite => Box::new(SqliteDriver::connect(&effective_config).await?),
             };
             driver.test_connection().await

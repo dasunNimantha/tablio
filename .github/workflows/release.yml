@@ -111,6 +111,113 @@ jobs:
           TEST_MYSQL_URL: "mysql://root:test@localhost:3306/testdb"
         run: cargo test --manifest-path src-tauri/Cargo.toml --test mysql_integration
 
+  test-mariadb:
+    name: MariaDB ${{ matrix.mariadb_version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mariadb_version: ["10.11", "11.4"]
+    services:
+      mariadb:
+        image: mariadb:${{ matrix.mariadb_version }}
+        env:
+          MARIADB_ROOT_PASSWORD: test
+          MARIADB_DATABASE: testdb
+          MARIADB_USER: test
+          MARIADB_PASSWORD: test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run MariaDB integration tests
+        env:
+          TEST_MARIADB_URL: "mysql://root:test@localhost:3306/testdb"
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test mariadb_integration
+
+  test-cockroachdb:
+    name: CockroachDB
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start CockroachDB
+        run: |
+          docker run -d --name crdb -p 26257:26257 cockroachdb/cockroach:latest start-single-node --insecure
+          for i in $(seq 1 30); do
+            if docker exec crdb cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec crdb cockroach sql --insecure -e "CREATE DATABASE testdb;"
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run CockroachDB integration tests
+        env:
+          TEST_COCKROACHDB_URL: "postgres://root@localhost:26257/testdb?sslmode=disable"
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test cockroachdb_integration
+
+  test-tidb:
+    name: TiDB
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start TiDB
+        run: |
+          docker run -d --name tidb -p 4000:4000 pingcap/tidb:latest
+          for i in $(seq 1 30); do
+            if mysql -h 127.0.0.1 -P 4000 -u root --skip-password -e "SELECT 1" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          mysql -h 127.0.0.1 -P 4000 -u root --skip-password -e "CREATE DATABASE testdb;"
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run TiDB integration tests
+        env:
+          TEST_TIDB_URL: "mysql://root@localhost:4000/testdb"
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test tidb_integration
+
   test-sqlite:
     name: SQLite
     runs-on: ubuntu-latest
@@ -133,7 +240,7 @@ jobs:
 
   release:
     name: Build & Release (${{ matrix.platform }})
-    needs: [test-frontend, test-postgres, test-mysql, test-sqlite]
+    needs: [test-frontend, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite]
     strategy:
       fail-fast: false
       matrix:
@@ -177,7 +284,6 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CI: ""
         with:
           tagName: v__VERSION__
           releaseName: "Tablio v__VERSION__"

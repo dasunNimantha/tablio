@@ -7,6 +7,9 @@ pub enum DbType {
     Postgres,
     Mysql,
     Sqlite,
+    Mariadb,
+    Cockroachdb,
+    Tidb,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -523,6 +526,18 @@ mod tests {
             serde_json::to_string(&DbType::Sqlite).unwrap(),
             r#""sqlite""#
         );
+        assert_eq!(
+            serde_json::to_string(&DbType::Mariadb).unwrap(),
+            r#""mariadb""#
+        );
+        assert_eq!(
+            serde_json::to_string(&DbType::Cockroachdb).unwrap(),
+            r#""cockroachdb""#
+        );
+        assert_eq!(
+            serde_json::to_string(&DbType::Tidb).unwrap(),
+            r#""tidb""#
+        );
     }
 
     #[test]
@@ -531,6 +546,12 @@ mod tests {
         matches!(p, DbType::Postgres);
         let m: DbType = serde_json::from_str(r#""mysql""#).unwrap();
         matches!(m, DbType::Mysql);
+        let mb: DbType = serde_json::from_str(r#""mariadb""#).unwrap();
+        matches!(mb, DbType::Mariadb);
+        let cr: DbType = serde_json::from_str(r#""cockroachdb""#).unwrap();
+        matches!(cr, DbType::Cockroachdb);
+        let ti: DbType = serde_json::from_str(r#""tidb""#).unwrap();
+        matches!(ti, DbType::Tidb);
     }
 
     #[test]

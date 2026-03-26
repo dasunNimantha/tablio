@@ -213,8 +213,8 @@ pub async fn backup_database(
         .map_err(|e| e.to_string())?;
 
     match config.db_type {
-        DbType::Postgres => backup_postgres(&config, &request).await,
-        DbType::Mysql => backup_mysql(&config, &request).await,
+        DbType::Postgres | DbType::Cockroachdb => backup_postgres(&config, &request).await,
+        DbType::Mysql | DbType::Mariadb | DbType::Tidb => backup_mysql(&config, &request).await,
         DbType::Sqlite => backup_sqlite(&config, &request).await,
     }
 }
@@ -230,8 +230,8 @@ pub async fn restore_database(
         .map_err(|e| e.to_string())?;
 
     match config.db_type {
-        DbType::Postgres => restore_postgres(&config, &request).await,
-        DbType::Mysql => restore_mysql(&config, &request).await,
+        DbType::Postgres | DbType::Cockroachdb => restore_postgres(&config, &request).await,
+        DbType::Mysql | DbType::Mariadb | DbType::Tidb => restore_mysql(&config, &request).await,
         DbType::Sqlite => restore_sqlite(&config, &request).await,
     }
 }
