@@ -1,4 +1,4 @@
-use tablio_lib::db::mysql::MysqlDriver;
+use tablio_lib::db::tidb::TidbDriver;
 use tablio_lib::db::DatabaseDriver;
 use tablio_lib::models::*;
 
@@ -37,7 +37,7 @@ macro_rules! tidb_driver {
             ssh_key_path: String::new(),
         };
         (
-            MysqlDriver::connect(&config).await.unwrap(),
+            TidbDriver::connect(&config).await.unwrap(),
             database.to_string(),
         )
     }};
@@ -584,7 +584,7 @@ async fn tidb_execute_query_invalid_sql_errors() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn tidb_explain_query_json_unsupported() {
+async fn tidb_explain_query() {
     let (driver, db) = tidb_driver!();
     let tbl = unique_table("ti_expl");
     driver
@@ -592,18 +592,11 @@ async fn tidb_explain_query_json_unsupported() {
         .await
         .unwrap();
 
-    let result = driver
+    let ex = driver
         .explain_query(&db, &format!("SELECT * FROM `{}` WHERE id = 1", tbl))
-        .await;
-    // TiDB does not support EXPLAIN FORMAT JSON — accept either success or error
-    match result {
-        Ok(ex) => assert!(!ex.raw_text.is_empty()),
-        Err(e) => assert!(
-            e.to_string().contains("not supported"),
-            "unexpected error: {}",
-            e
-        ),
-    }
+        .await
+        .unwrap();
+    assert!(!ex.raw_text.is_empty());
 
     driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }

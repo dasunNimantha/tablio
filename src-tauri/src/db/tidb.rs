@@ -1,18 +1,18 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::mysql::MySqlPoolOptions;
-use sqlx::{MySqlPool, Row};
+use sqlx::{Column, MySqlPool, Row};
 use std::time::Instant;
 
 use crate::db::mysql_common::*;
 use crate::db::DatabaseDriver;
 use crate::models::*;
 
-pub struct MysqlDriver {
+pub struct TidbDriver {
     pool: MySqlPool,
 }
 
-impl MysqlDriver {
+impl TidbDriver {
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
         let ssl_mode = if config.ssl { "REQUIRED" } else { "PREFERRED" };
         let url = format!(
@@ -28,7 +28,7 @@ impl MysqlDriver {
 }
 
 #[async_trait]
-impl DatabaseDriver for MysqlDriver {
+impl DatabaseDriver for TidbDriver {
     // Shared MySQL-wire methods
     async fn list_roles(&self) -> Result<Vec<RoleInfo>> {
         my_list_roles(&self.pool).await
@@ -150,9 +150,6 @@ impl DatabaseDriver for MysqlDriver {
     async fn get_server_config(&self) -> Result<Vec<ServerConfigEntry>> {
         my_get_server_config(&self.pool).await
     }
-    async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
-        my_get_query_stats(&self.pool).await
-    }
 
     async fn fetch_rows(
         &self,
@@ -172,106 +169,63 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     // -----------------------------------------------------------------------
-    // MySQL-specific implementations
+    // TiDB-specific implementations
     // -----------------------------------------------------------------------
 
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
         let start = Instant::now();
-        let explain_sql = format!("EXPLAIN FORMAT=JSON {}", sql);
-        let row = sqlx::query(&explain_sql).fetch_one(&self.pool).await?;
+        // TiDB does not support EXPLAIN FORMAT=JSON — use plain EXPLAIN
+        let explain_sql = format!("EXPLAIN {}", sql);
+        let rows = sqlx::query(&explain_sql).fetch_all(&self.pool).await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
-        let raw_text: String = row.try_get(0)?;
-        let json: serde_json::Value = serde_json::from_str(&raw_text)?;
-        let query_block = json.get("query_block").unwrap_or(&serde_json::Value::Null);
+        let columns: Vec<String> = rows
+            .first()
+            .map(|r| {
+                (0..r.columns().len())
+                    .map(|i| r.columns()[i].name().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        let plan = ExplainNode {
-            node_type: "Query Block".to_string(),
-            relation: query_block
-                .get("table")
-                .and_then(|t| t.get("table_name"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            startup_cost: 0.0,
-            total_cost: query_block
-                .get("cost_info")
-                .and_then(|c| c.get("query_cost"))
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0.0),
-            actual_time_ms: None,
-            rows_estimated: query_block
-                .get("table")
-                .and_then(|t| t.get("rows_examined_per_scan"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-            rows_actual: None,
-            width: 0,
-            filter: None,
-            children: vec![],
-        };
+        let mut lines = vec![columns.join("\t")];
+        for row in &rows {
+            let vals: Vec<String> = (0..row.columns().len())
+                .map(|i| row.try_get::<String, _>(i).unwrap_or_default())
+                .collect();
+            lines.push(vals.join("\t"));
+        }
+        let raw_text = lines.join("\n");
 
         Ok(ExplainResult {
-            plan,
-            raw_text: serde_json::to_string_pretty(&json)?,
+            plan: ExplainNode {
+                node_type: "TiDB Plan".to_string(),
+                relation: None,
+                startup_cost: 0.0,
+                total_cost: 0.0,
+                actual_time_ms: None,
+                rows_estimated: 0,
+                rows_actual: None,
+                width: 0,
+                filter: None,
+                children: vec![],
+            },
+            raw_text,
             execution_time_ms: elapsed,
         })
     }
 
-    async fn list_functions(&self, database: &str, _schema: &str) -> Result<Vec<FunctionInfo>> {
-        let sql = "SELECT CAST(ROUTINE_NAME AS CHAR) AS name, \
-                   CAST(ROUTINE_SCHEMA AS CHAR) AS `schema`, \
-                   COALESCE(CAST(DATA_TYPE AS CHAR), '') AS return_type, \
-                   CAST(ROUTINE_BODY AS CHAR) AS language, \
-                   CAST(ROUTINE_TYPE AS CHAR) AS kind \
-                   FROM information_schema.ROUTINES \
-                   WHERE ROUTINE_SCHEMA = ? \
-                   ORDER BY ROUTINE_NAME";
-        let rows = sqlx::query(sql)
-            .bind(database)
-            .fetch_all(&self.pool)
-            .await?;
-
-        Ok(rows
-            .iter()
-            .map(|r| FunctionInfo {
-                name: r.get("name"),
-                schema: r.get("schema"),
-                return_type: r.get("return_type"),
-                language: r.get("language"),
-                kind: r.get("kind"),
-            })
-            .collect())
+    async fn list_functions(&self, _database: &str, _schema: &str) -> Result<Vec<FunctionInfo>> {
+        Ok(vec![])
     }
 
     async fn list_triggers(
         &self,
-        database: &str,
+        _database: &str,
         _schema: &str,
-        table: &str,
+        _table: &str,
     ) -> Result<Vec<TriggerInfo>> {
-        let sql = "SELECT CAST(TRIGGER_NAME AS CHAR) AS name, \
-                   CAST(EVENT_OBJECT_TABLE AS CHAR) AS table_name, \
-                   CAST(EVENT_MANIPULATION AS CHAR) AS event, \
-                   CAST(ACTION_TIMING AS CHAR) AS timing \
-                   FROM information_schema.TRIGGERS \
-                   WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? \
-                   ORDER BY TRIGGER_NAME";
-        let rows = sqlx::query(sql)
-            .bind(database)
-            .bind(table)
-            .fetch_all(&self.pool)
-            .await?;
-
-        Ok(rows
-            .iter()
-            .map(|r| TriggerInfo {
-                name: r.get("name"),
-                table_name: r.get("table_name"),
-                event: r.get("event"),
-                timing: r.get("timing"),
-            })
-            .collect())
+        Ok(vec![])
     }
 
     async fn get_database_stats(&self) -> Result<DatabaseStats> {
@@ -284,10 +238,7 @@ impl DatabaseDriver for MysqlDriver {
         let total = activity.len() as i64;
 
         let status_sql = "SHOW GLOBAL STATUS WHERE Variable_name IN (\
-            'Com_commit', 'Com_rollback', \
-            'Innodb_rows_inserted', 'Innodb_rows_updated', \
-            'Innodb_rows_deleted', 'Innodb_rows_read', \
-            'Innodb_buffer_pool_reads', 'Innodb_buffer_pool_read_requests')";
+            'Com_commit', 'Com_rollback')";
         let status_rows = sqlx::raw_sql(status_sql).fetch_all(&self.pool).await?;
 
         let get_status = |name: &str| -> i64 {
@@ -319,34 +270,25 @@ impl DatabaseDriver for MysqlDriver {
             total_connections: total,
             xact_commit: get_status("Com_commit"),
             xact_rollback: get_status("Com_rollback"),
-            tup_inserted: get_status("Innodb_rows_inserted"),
-            tup_updated: get_status("Innodb_rows_updated"),
-            tup_deleted: get_status("Innodb_rows_deleted"),
-            tup_fetched: get_status("Innodb_rows_read"),
-            blks_read: get_status("Innodb_buffer_pool_reads"),
-            blks_hit: get_status("Innodb_buffer_pool_read_requests"),
+            tup_inserted: 0,
+            tup_updated: 0,
+            tup_deleted: 0,
+            tup_fetched: 0,
+            blks_read: 0,
+            blks_hit: 0,
             timestamp_ms,
         })
     }
 
     async fn get_locks(&self) -> Result<Vec<LockInfo>> {
         let sql = "SELECT \
-            r.trx_mysql_thread_id AS pid, \
-            CAST(r.trx_id AS CHAR) AS lock_id, \
-            IFNULL(CAST(l.OBJECT_SCHEMA AS CHAR), '') AS db, \
-            IFNULL(CAST(l.OBJECT_NAME AS CHAR), '') AS relation, \
-            IFNULL(CAST(l.LOCK_MODE AS CHAR), '') AS mode, \
-            CASE WHEN l.LOCK_STATUS = 'GRANTED' THEN 1 ELSE 0 END AS granted, \
-            IFNULL(r.trx_query, '') AS query, \
-            IFNULL(CAST(p.USER AS CHAR), '') AS user, \
-            IFNULL(CAST(r.trx_state AS CHAR), '') AS state, \
-            TIMESTAMPDIFF(SECOND, r.trx_started, NOW()) AS duration_s \
-          FROM information_schema.INNODB_TRX r \
-          LEFT JOIN performance_schema.data_locks l \
-            ON r.trx_id = l.ENGINE_TRANSACTION_ID \
-          LEFT JOIN information_schema.PROCESSLIST p \
-            ON r.trx_mysql_thread_id = p.ID \
-          ORDER BY r.trx_started";
+            trx_mysql_thread_id AS pid, \
+            CAST(trx_id AS CHAR) AS lock_id, \
+            IFNULL(trx_query, '') AS query, \
+            IFNULL(CAST(trx_state AS CHAR), '') AS state, \
+            TIMESTAMPDIFF(SECOND, trx_started, NOW()) AS duration_s \
+          FROM information_schema.INNODB_TRX \
+          ORDER BY trx_started";
         let rows = sqlx::raw_sql(sql).fetch_all(&self.pool).await?;
 
         Ok(rows
@@ -355,13 +297,13 @@ impl DatabaseDriver for MysqlDriver {
                 pid: r.try_get::<i64, _>("pid").unwrap_or(0) as i32,
                 locktype: r
                     .try_get::<String, _>("lock_id")
-                    .unwrap_or_else(|_| "InnoDB".into()),
-                database: r.try_get::<String, _>("db").unwrap_or_default(),
-                relation: r.try_get::<String, _>("relation").unwrap_or_default(),
-                mode: r.try_get::<String, _>("mode").unwrap_or_default(),
-                granted: r.try_get::<i32, _>("granted").unwrap_or(0) == 1,
+                    .unwrap_or_else(|_| "TiDB".into()),
+                database: String::new(),
+                relation: String::new(),
+                mode: String::new(),
+                granted: true,
                 query: r.try_get::<String, _>("query").unwrap_or_default(),
-                user: r.try_get::<String, _>("user").unwrap_or_default(),
+                user: String::new(),
                 state: r.try_get::<String, _>("state").unwrap_or_default(),
                 duration_ms: r
                     .try_get::<i64, _>("duration_s")
@@ -369,5 +311,13 @@ impl DatabaseDriver for MysqlDriver {
                     .map(|s| s as f64 * 1000.0),
             })
             .collect())
+    }
+
+    async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
+        Ok(QueryStatsResponse {
+            available: false,
+            message: Some("Query statistics are not available in TiDB. Use the TiDB Dashboard for query insights.".to_string()),
+            entries: vec![],
+        })
     }
 }

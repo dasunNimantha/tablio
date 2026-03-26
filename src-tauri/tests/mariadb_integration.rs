@@ -1,4 +1,4 @@
-use tablio_lib::db::mysql::MysqlDriver;
+use tablio_lib::db::mariadb::MariadbDriver;
 use tablio_lib::db::DatabaseDriver;
 use tablio_lib::models::*;
 
@@ -37,7 +37,7 @@ macro_rules! mariadb_driver {
             ssh_key_path: String::new(),
         };
         (
-            MysqlDriver::connect(&config).await.unwrap(),
+            MariadbDriver::connect(&config).await.unwrap(),
             database.to_string(),
         )
     }};

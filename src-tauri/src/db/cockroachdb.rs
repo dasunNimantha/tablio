@@ -8,13 +8,13 @@ use crate::db::pg_common::*;
 use crate::db::DatabaseDriver;
 use crate::models::*;
 
-pub struct PostgresDriver {
+pub struct CockroachdbDriver {
     pool: PgPool,
 }
 
-impl PostgresDriver {
+impl CockroachdbDriver {
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
-        let ssl_mode = if config.ssl { "require" } else { "prefer" };
+        let ssl_mode = if config.ssl { "require" } else { "disable" };
         let url = format!(
             "postgres://{}:{}@{}:{}/{}?sslmode={}",
             config.user, config.password, config.host, config.port, config.database, ssl_mode
@@ -28,7 +28,8 @@ impl PostgresDriver {
 }
 
 #[async_trait]
-impl DatabaseDriver for PostgresDriver {
+impl DatabaseDriver for CockroachdbDriver {
+    // Shared PG-wire methods
     async fn list_roles(&self) -> Result<Vec<RoleInfo>> {
         pg_list_roles(&self.pool).await
     }
@@ -71,14 +72,6 @@ impl DatabaseDriver for PostgresDriver {
     }
     async fn list_functions(&self, database: &str, schema: &str) -> Result<Vec<FunctionInfo>> {
         pg_list_functions(&self.pool, database, schema).await
-    }
-    async fn list_triggers(
-        &self,
-        database: &str,
-        schema: &str,
-        table: &str,
-    ) -> Result<Vec<TriggerInfo>> {
-        pg_list_triggers(&self.pool, database, schema, table).await
     }
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult> {
         pg_execute_query(&self.pool, database, sql).await
@@ -143,7 +136,7 @@ impl DatabaseDriver for PostgresDriver {
     }
 
     // -----------------------------------------------------------------------
-    // Postgres-specific implementations (not shared with CockroachDB)
+    // CockroachDB-specific implementations
     // -----------------------------------------------------------------------
 
     async fn list_columns(
@@ -184,7 +177,7 @@ impl DatabaseDriver for PostgresDriver {
                 let is_generated: String = r.get("is_generated");
                 let has_serial_default = default_val
                     .as_deref()
-                    .map(|d| d.starts_with("nextval("))
+                    .map(|d| d.starts_with("nextval(") || d.starts_with("unique_rowid("))
                     .unwrap_or(false);
                 let raw_type: String = r.get("data_type");
                 let char_max_len: Option<i32> =
@@ -202,13 +195,15 @@ impl DatabaseDriver for PostgresDriver {
                 } else {
                     raw_type
                 };
+                // CockroachDB returns ordinal_position as INT8
+                let ordinal: i32 = r.get::<i64, _>("ordinal_position") as i32;
                 ColumnInfo {
                     name: r.get("column_name"),
                     data_type,
                     is_nullable: nullable_str == "YES",
                     is_primary_key: r.get("is_pk"),
                     default_value: default_val,
-                    ordinal_position: r.get::<i32, _>("ordinal_position"),
+                    ordinal_position: ordinal,
                     is_auto_generated: is_identity == "YES"
                         || is_generated == "ALWAYS"
                         || has_serial_default,
@@ -234,18 +229,40 @@ impl DatabaseDriver for PostgresDriver {
         .await
     }
 
+    async fn list_triggers(
+        &self,
+        _database: &str,
+        _schema: &str,
+        _table: &str,
+    ) -> Result<Vec<TriggerInfo>> {
+        Ok(vec![])
+    }
+
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
         let start = Instant::now();
-        let explain_sql = format!("EXPLAIN (ANALYZE, FORMAT JSON) {}", sql);
-        let row = sqlx::query(&explain_sql).fetch_one(&self.pool).await?;
+        let explain_sql = format!("EXPLAIN {}", sql);
+        let rows = sqlx::query(&explain_sql).fetch_all(&self.pool).await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
-        let raw_json: serde_json::Value = row.try_get(0)?;
-        let raw_text = serde_json::to_string_pretty(&raw_json)?;
-        let plan = parse_pg_explain_node(&raw_json);
+        let raw_text = rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>(0).ok())
+            .collect::<Vec<_>>()
+            .join("\n");
 
         Ok(ExplainResult {
-            plan,
+            plan: ExplainNode {
+                node_type: "CockroachDB Plan".to_string(),
+                relation: None,
+                startup_cost: 0.0,
+                total_cost: 0.0,
+                actual_time_ms: None,
+                rows_estimated: 0,
+                rows_actual: None,
+                width: 0,
+                filter: None,
+                children: vec![],
+            },
             raw_text,
             execution_time_ms: elapsed,
         })
@@ -261,14 +278,9 @@ impl DatabaseDriver for PostgresDriver {
                    GREATEST(c.reltuples, 0)::bigint AS row_count,
                    pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size,
                    pg_size_pretty(pg_indexes_size(c.oid)) AS index_size,
-                   pg_size_pretty(pg_relation_size(c.oid)) AS data_size,
-                   s.last_vacuum::text AS last_vacuum,
-                   s.last_analyze::text AS last_analyze,
-                   s.n_dead_tup AS dead_tuples,
-                   s.n_live_tup AS live_tuples
+                   pg_size_pretty(pg_relation_size(c.oid)) AS data_size
                    FROM pg_class c
                    JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
-                   LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
                    WHERE c.relname = $2 AND c.relkind = 'r'";
         let row = sqlx::query(sql)
             .bind(schema)
@@ -283,10 +295,10 @@ impl DatabaseDriver for PostgresDriver {
             total_size: row.get("total_size"),
             index_size: row.get("index_size"),
             data_size: row.get("data_size"),
-            last_vacuum: row.try_get::<String, _>("last_vacuum").ok(),
-            last_analyze: row.try_get::<String, _>("last_analyze").ok(),
-            dead_tuples: row.try_get("dead_tuples").ok(),
-            live_tuples: row.try_get("live_tuples").ok(),
+            last_vacuum: None,
+            last_analyze: None,
+            dead_tuples: None,
+            live_tuples: None,
         })
     }
 
@@ -302,61 +314,23 @@ impl DatabaseDriver for PostgresDriver {
         .fetch_one(&self.pool)
         .await?;
 
-        let db_row_opt = sqlx::query(
-            "SELECT COALESCE(xact_commit, 0) AS xact_commit, \
-                    COALESCE(xact_rollback, 0) AS xact_rollback, \
-                    COALESCE(tup_inserted, 0) AS tup_inserted, \
-                    COALESCE(tup_updated, 0) AS tup_updated, \
-                    COALESCE(tup_deleted, 0) AS tup_deleted, \
-                    COALESCE(tup_fetched, 0) AS tup_fetched, \
-                    COALESCE(blks_read, 0) AS blks_read, \
-                    COALESCE(blks_hit, 0) AS blks_hit \
-            FROM pg_stat_database WHERE datname = current_database()",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-
         let ts_row = sqlx::query("SELECT CAST(EXTRACT(EPOCH FROM now()) * 1000 AS FLOAT8) AS ts")
             .fetch_one(&self.pool)
             .await?;
-
-        let (
-            xact_commit,
-            xact_rollback,
-            tup_inserted,
-            tup_updated,
-            tup_deleted,
-            tup_fetched,
-            blks_read,
-            blks_hit,
-        ) = if let Some(db_row) = db_row_opt {
-            (
-                db_row.get::<i64, _>("xact_commit"),
-                db_row.get::<i64, _>("xact_rollback"),
-                db_row.get::<i64, _>("tup_inserted"),
-                db_row.get::<i64, _>("tup_updated"),
-                db_row.get::<i64, _>("tup_deleted"),
-                db_row.get::<i64, _>("tup_fetched"),
-                db_row.get::<i64, _>("blks_read"),
-                db_row.get::<i64, _>("blks_hit"),
-            )
-        } else {
-            (0, 0, 0, 0, 0, 0, 0, 0)
-        };
 
         Ok(DatabaseStats {
             active_connections: conn_row.get::<i64, _>("active"),
             idle_connections: conn_row.get::<i64, _>("idle"),
             idle_in_transaction: conn_row.get::<i64, _>("idle_tx"),
             total_connections: conn_row.get::<i64, _>("total"),
-            xact_commit,
-            xact_rollback,
-            tup_inserted,
-            tup_updated,
-            tup_deleted,
-            tup_fetched,
-            blks_read,
-            blks_hit,
+            xact_commit: 0,
+            xact_rollback: 0,
+            tup_inserted: 0,
+            tup_updated: 0,
+            tup_deleted: 0,
+            tup_fetched: 0,
+            blks_read: 0,
+            blks_hit: 0,
             timestamp_ms: ts_row.get::<f64, _>("ts"),
         })
     }
@@ -409,168 +383,28 @@ impl DatabaseDriver for PostgresDriver {
             .iter()
             .map(|row| ServerConfigEntry {
                 name: row.get::<String, _>("name"),
-                setting: row.get::<String, _>("setting"),
+                setting: row.try_get::<String, _>("setting").unwrap_or_default(),
                 unit: row.try_get::<String, _>("unit").ok(),
-                category: row.get::<String, _>("category"),
-                description: row.get::<String, _>("short_desc"),
-                context: row.get::<String, _>("context"),
-                source: row.get::<String, _>("source"),
-                pending_restart: row.get::<bool, _>("pending_restart"),
+                category: row
+                    .try_get::<String, _>("category")
+                    .unwrap_or_else(|_| "Uncategorized".to_string()),
+                description: row.try_get::<String, _>("short_desc").unwrap_or_default(),
+                context: row.try_get::<String, _>("context").unwrap_or_default(),
+                source: row.try_get::<String, _>("source").unwrap_or_default(),
+                pending_restart: row.try_get::<bool, _>("pending_restart").unwrap_or(false),
             })
             .collect())
     }
 
     async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
-        let ext_check =
-            sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
-                .fetch_optional(&self.pool)
-                .await?;
-
-        if ext_check.is_none() {
-            return Ok(QueryStatsResponse {
-                available: false,
-                message: Some(
-                    "The pg_stat_statements extension is not installed. To enable it:\n\n\
-                     1. Add to postgresql.conf:\n   shared_preload_libraries = 'pg_stat_statements'\n\n\
-                     2. Restart PostgreSQL\n\n\
-                     3. Run in your database:\n   CREATE EXTENSION pg_stat_statements;"
-                        .to_string(),
-                ),
-                entries: vec![],
-            });
-        }
-
-        let version_row = sqlx::query("SHOW server_version_num")
-            .fetch_one(&self.pool)
-            .await?;
-        let version_num: i32 = version_row
-            .try_get::<String, _>("server_version_num")
-            .unwrap_or_default()
-            .parse()
-            .unwrap_or(0);
-
-        let sql = if version_num >= 130000 {
-            "SELECT s.query, s.queryid, s.calls, \
-                COALESCE(r.rolname, '') as username, \
-                s.total_exec_time as total_exec_time_ms, \
-                s.mean_exec_time as mean_exec_time_ms, \
-                s.min_exec_time as min_exec_time_ms, \
-                s.max_exec_time as max_exec_time_ms, \
-                s.rows, s.shared_blks_hit, s.shared_blks_read, \
-                CASE WHEN (s.shared_blks_hit + s.shared_blks_read) > 0 \
-                     THEN s.shared_blks_hit::float / (s.shared_blks_hit + s.shared_blks_read) * 100 \
-                     ELSE 0 END as cache_hit_ratio, \
-                s.total_plan_time as total_plan_time_ms, \
-                s.mean_plan_time as mean_plan_time_ms \
-             FROM pg_stat_statements s \
-             LEFT JOIN pg_roles r ON s.userid = r.oid \
-             ORDER BY s.total_exec_time DESC"
-        } else {
-            "SELECT s.query, s.queryid, s.calls, \
-                COALESCE(r.rolname, '') as username, \
-                s.total_time as total_exec_time_ms, \
-                s.mean_time as mean_exec_time_ms, \
-                s.min_time as min_exec_time_ms, \
-                s.max_time as max_exec_time_ms, \
-                s.rows, s.shared_blks_hit, s.shared_blks_read, \
-                CASE WHEN (s.shared_blks_hit + s.shared_blks_read) > 0 \
-                     THEN s.shared_blks_hit::float / (s.shared_blks_hit + s.shared_blks_read) * 100 \
-                     ELSE 0 END as cache_hit_ratio, \
-                0::float as total_plan_time_ms, \
-                0::float as mean_plan_time_ms \
-             FROM pg_stat_statements s \
-             LEFT JOIN pg_roles r ON s.userid = r.oid \
-             ORDER BY s.total_time DESC"
-        };
-
-        let rows = sqlx::query(sql).fetch_all(&self.pool).await?;
-
-        let entries = rows
-            .iter()
-            .map(|r| QueryStatEntry {
-                query: r.try_get::<String, _>("query").unwrap_or_default(),
-                queryid: r.try_get::<i64, _>("queryid").ok(),
-                user: r.try_get::<String, _>("username").unwrap_or_default(),
-                calls: r.try_get::<i64, _>("calls").unwrap_or(0),
-                total_exec_time_ms: r.try_get::<f64, _>("total_exec_time_ms").unwrap_or(0.0),
-                mean_exec_time_ms: r.try_get::<f64, _>("mean_exec_time_ms").unwrap_or(0.0),
-                min_exec_time_ms: r.try_get::<f64, _>("min_exec_time_ms").unwrap_or(0.0),
-                max_exec_time_ms: r.try_get::<f64, _>("max_exec_time_ms").unwrap_or(0.0),
-                rows: r.try_get::<i64, _>("rows").unwrap_or(0),
-                shared_blks_hit: r.try_get::<i64, _>("shared_blks_hit").unwrap_or(0),
-                shared_blks_read: r.try_get::<i64, _>("shared_blks_read").unwrap_or(0),
-                cache_hit_ratio: r.try_get::<f64, _>("cache_hit_ratio").unwrap_or(0.0),
-                total_plan_time_ms: r.try_get::<f64, _>("total_plan_time_ms").ok(),
-                mean_plan_time_ms: r.try_get::<f64, _>("mean_plan_time_ms").ok(),
-            })
-            .collect();
-
         Ok(QueryStatsResponse {
-            available: true,
-            message: None,
-            entries,
+            available: false,
+            message: Some(
+                "Query statistics (pg_stat_statements) are not available in CockroachDB. \
+                Use the CockroachDB Admin UI for query insights."
+                    .to_string(),
+            ),
+            entries: vec![],
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    fn format_column_data_type(
-        raw_type: &str,
-        char_max_len: Option<i32>,
-        num_precision: Option<i32>,
-        num_scale: Option<i32>,
-    ) -> String {
-        if let Some(len) = char_max_len {
-            format!("{}({})", raw_type, len)
-        } else if raw_type == "numeric" || raw_type == "decimal" {
-            match (num_precision, num_scale) {
-                (Some(p), Some(s)) if s > 0 => format!("{}({},{})", raw_type, p, s),
-                (Some(p), _) => format!("{}({})", raw_type, p),
-                _ => raw_type.to_string(),
-            }
-        } else {
-            raw_type.to_string()
-        }
-    }
-
-    #[test]
-    fn column_type_varchar_with_length() {
-        assert_eq!(
-            format_column_data_type("character varying", Some(50), None, None),
-            "character varying(50)"
-        );
-    }
-    #[test]
-    fn column_type_no_length() {
-        assert_eq!(format_column_data_type("text", None, None, None), "text");
-    }
-    #[test]
-    fn column_type_numeric_precision_and_scale() {
-        assert_eq!(
-            format_column_data_type("numeric", None, Some(10), Some(2)),
-            "numeric(10,2)"
-        );
-    }
-    #[test]
-    fn column_type_numeric_precision_only() {
-        assert_eq!(
-            format_column_data_type("numeric", None, Some(10), Some(0)),
-            "numeric(10)"
-        );
-    }
-    #[test]
-    fn column_type_numeric_no_modifiers() {
-        assert_eq!(
-            format_column_data_type("numeric", None, None, None),
-            "numeric"
-        );
-    }
-    #[test]
-    fn column_type_boolean_unchanged() {
-        assert_eq!(
-            format_column_data_type("boolean", None, None, None),
-            "boolean"
-        );
     }
 }

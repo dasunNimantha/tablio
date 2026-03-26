@@ -1,4 +1,4 @@
-use tablio_lib::db::postgres::PostgresDriver;
+use tablio_lib::db::cockroachdb::CockroachdbDriver;
 use tablio_lib::db::DatabaseDriver;
 use tablio_lib::models::*;
 
@@ -40,7 +40,7 @@ macro_rules! crdb_driver {
             ssh_key_path: String::new(),
         };
         (
-            PostgresDriver::connect(&config).await.unwrap(),
+            CockroachdbDriver::connect(&config).await.unwrap(),
             database.to_string(),
         )
     }};

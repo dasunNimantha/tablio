@@ -3,9 +3,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::db::cockroachdb::CockroachdbDriver;
+use crate::db::mariadb::MariadbDriver;
 use crate::db::mysql::MysqlDriver;
 use crate::db::postgres::PostgresDriver;
 use crate::db::sqlite::SqliteDriver;
+use crate::db::tidb::TidbDriver;
 use crate::db::DatabaseDriver;
 use crate::models::*;
 
@@ -108,14 +111,21 @@ impl PoolManager {
         };
 
         let driver_result = match effective_config.db_type {
-            DbType::Postgres | DbType::Cockroachdb => PostgresDriver::connect(&effective_config)
+            DbType::Postgres => PostgresDriver::connect(&effective_config)
                 .await
                 .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
-            DbType::Mysql | DbType::Mariadb | DbType::Tidb => {
-                MysqlDriver::connect(&effective_config)
-                    .await
-                    .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>)
-            }
+            DbType::Cockroachdb => CockroachdbDriver::connect(&effective_config)
+                .await
+                .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
+            DbType::Mysql => MysqlDriver::connect(&effective_config)
+                .await
+                .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
+            DbType::Mariadb => MariadbDriver::connect(&effective_config)
+                .await
+                .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
+            DbType::Tidb => TidbDriver::connect(&effective_config)
+                .await
+                .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
             DbType::Sqlite => SqliteDriver::connect(&effective_config)
                 .await
                 .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
@@ -180,12 +190,13 @@ impl PoolManager {
 
         let result = async {
             let driver: Box<dyn DatabaseDriver> = match effective_config.db_type {
-                DbType::Postgres | DbType::Cockroachdb => {
-                    Box::new(PostgresDriver::connect(&effective_config).await?)
+                DbType::Postgres => Box::new(PostgresDriver::connect(&effective_config).await?),
+                DbType::Cockroachdb => {
+                    Box::new(CockroachdbDriver::connect(&effective_config).await?)
                 }
-                DbType::Mysql | DbType::Mariadb | DbType::Tidb => {
-                    Box::new(MysqlDriver::connect(&effective_config).await?)
-                }
+                DbType::Mysql => Box::new(MysqlDriver::connect(&effective_config).await?),
+                DbType::Mariadb => Box::new(MariadbDriver::connect(&effective_config).await?),
+                DbType::Tidb => Box::new(TidbDriver::connect(&effective_config).await?),
                 DbType::Sqlite => Box::new(SqliteDriver::connect(&effective_config).await?),
             };
             driver.test_connection().await

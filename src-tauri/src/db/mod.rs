@@ -1,7 +1,12 @@
+pub mod cockroachdb;
+pub mod mariadb;
 pub mod mysql;
+pub mod mysql_common;
+pub mod pg_common;
 pub mod pool;
 pub mod postgres;
 pub mod sqlite;
+pub mod tidb;
 
 use crate::models::*;
 use anyhow::Result;

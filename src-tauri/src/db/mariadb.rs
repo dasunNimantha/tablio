@@ -8,11 +8,11 @@ use crate::db::mysql_common::*;
 use crate::db::DatabaseDriver;
 use crate::models::*;
 
-pub struct MysqlDriver {
+pub struct MariadbDriver {
     pool: MySqlPool,
 }
 
-impl MysqlDriver {
+impl MariadbDriver {
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
         let ssl_mode = if config.ssl { "REQUIRED" } else { "PREFERRED" };
         let url = format!(
@@ -28,7 +28,7 @@ impl MysqlDriver {
 }
 
 #[async_trait]
-impl DatabaseDriver for MysqlDriver {
+impl DatabaseDriver for MariadbDriver {
     // Shared MySQL-wire methods
     async fn list_roles(&self) -> Result<Vec<RoleInfo>> {
         my_list_roles(&self.pool).await
@@ -172,7 +172,7 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     // -----------------------------------------------------------------------
-    // MySQL-specific implementations
+    // MariaDB-specific implementations
     // -----------------------------------------------------------------------
 
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
@@ -330,20 +330,15 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     async fn get_locks(&self) -> Result<Vec<LockInfo>> {
+        // MariaDB uses information_schema.INNODB_LOCKS instead of performance_schema.data_locks
         let sql = "SELECT \
             r.trx_mysql_thread_id AS pid, \
             CAST(r.trx_id AS CHAR) AS lock_id, \
-            IFNULL(CAST(l.OBJECT_SCHEMA AS CHAR), '') AS db, \
-            IFNULL(CAST(l.OBJECT_NAME AS CHAR), '') AS relation, \
-            IFNULL(CAST(l.LOCK_MODE AS CHAR), '') AS mode, \
-            CASE WHEN l.LOCK_STATUS = 'GRANTED' THEN 1 ELSE 0 END AS granted, \
             IFNULL(r.trx_query, '') AS query, \
             IFNULL(CAST(p.USER AS CHAR), '') AS user, \
             IFNULL(CAST(r.trx_state AS CHAR), '') AS state, \
             TIMESTAMPDIFF(SECOND, r.trx_started, NOW()) AS duration_s \
           FROM information_schema.INNODB_TRX r \
-          LEFT JOIN performance_schema.data_locks l \
-            ON r.trx_id = l.ENGINE_TRANSACTION_ID \
           LEFT JOIN information_schema.PROCESSLIST p \
             ON r.trx_mysql_thread_id = p.ID \
           ORDER BY r.trx_started";
@@ -356,10 +351,10 @@ impl DatabaseDriver for MysqlDriver {
                 locktype: r
                     .try_get::<String, _>("lock_id")
                     .unwrap_or_else(|_| "InnoDB".into()),
-                database: r.try_get::<String, _>("db").unwrap_or_default(),
-                relation: r.try_get::<String, _>("relation").unwrap_or_default(),
-                mode: r.try_get::<String, _>("mode").unwrap_or_default(),
-                granted: r.try_get::<i32, _>("granted").unwrap_or(0) == 1,
+                database: String::new(),
+                relation: String::new(),
+                mode: String::new(),
+                granted: true,
                 query: r.try_get::<String, _>("query").unwrap_or_default(),
                 user: r.try_get::<String, _>("user").unwrap_or_default(),
                 state: r.try_get::<String, _>("state").unwrap_or_default(),
