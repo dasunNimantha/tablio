@@ -169,7 +169,8 @@ impl DatabaseDriver for MysqlDriver {
 
     async fn list_tables(&self, database: &str, _schema: &str) -> Result<Vec<TableInfo>> {
         let rows = sqlx::query(
-            "SELECT TABLE_NAME, TABLE_TYPE, TABLE_ROWS \
+            "SELECT CAST(TABLE_NAME AS CHAR) AS TABLE_NAME, \
+             CAST(TABLE_TYPE AS CHAR) AS TABLE_TYPE, TABLE_ROWS \
              FROM information_schema.TABLES \
              WHERE TABLE_SCHEMA = ? \
              ORDER BY TABLE_NAME",
@@ -195,8 +196,13 @@ impl DatabaseDriver for MysqlDriver {
         _schema: &str,
         table: &str,
     ) -> Result<Vec<ColumnInfo>> {
-        let sql = "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY, \
-                   COLUMN_DEFAULT, ORDINAL_POSITION, EXTRA \
+        let sql = "SELECT CAST(COLUMN_NAME AS CHAR) AS COLUMN_NAME, \
+                   CAST(DATA_TYPE AS CHAR) AS DATA_TYPE, \
+                   CAST(IS_NULLABLE AS CHAR) AS IS_NULLABLE, \
+                   CAST(COLUMN_KEY AS CHAR) AS COLUMN_KEY, \
+                   CAST(COLUMN_DEFAULT AS CHAR) AS COLUMN_DEFAULT, \
+                   ORDINAL_POSITION, \
+                   CAST(EXTRA AS CHAR) AS EXTRA \
                    FROM information_schema.COLUMNS \
                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
                    ORDER BY ORDINAL_POSITION";
@@ -270,8 +276,10 @@ impl DatabaseDriver for MysqlDriver {
         _schema: &str,
         table: &str,
     ) -> Result<Vec<ForeignKeyInfo>> {
-        let sql = "SELECT CONSTRAINT_NAME, COLUMN_NAME, \
-                   REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
+        let sql = "SELECT CAST(CONSTRAINT_NAME AS CHAR) AS CONSTRAINT_NAME, \
+                   CAST(COLUMN_NAME AS CHAR) AS COLUMN_NAME, \
+                   CAST(REFERENCED_TABLE_NAME AS CHAR) AS REFERENCED_TABLE_NAME, \
+                   CAST(REFERENCED_COLUMN_NAME AS CHAR) AS REFERENCED_COLUMN_NAME \
                    FROM information_schema.KEY_COLUMN_USAGE \
                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
                    AND REFERENCED_TABLE_NAME IS NOT NULL \
@@ -282,7 +290,9 @@ impl DatabaseDriver for MysqlDriver {
             .fetch_all(&self.pool)
             .await?;
 
-        let fk_rules_sql = "SELECT CONSTRAINT_NAME, DELETE_RULE, UPDATE_RULE \
+        let fk_rules_sql = "SELECT CAST(CONSTRAINT_NAME AS CHAR) AS CONSTRAINT_NAME, \
+                            CAST(DELETE_RULE AS CHAR) AS DELETE_RULE, \
+                            CAST(UPDATE_RULE AS CHAR) AS UPDATE_RULE \
                             FROM information_schema.REFERENTIAL_CONSTRAINTS \
                             WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ?";
         let rule_rows = sqlx::query(fk_rules_sql)
@@ -569,10 +579,13 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     async fn list_functions(&self, database: &str, _schema: &str) -> Result<Vec<FunctionInfo>> {
-        let sql = "SELECT ROUTINE_NAME AS name, ROUTINE_SCHEMA AS schema,
-                   COALESCE(DATA_TYPE, '') AS return_type, ROUTINE_BODY AS language, ROUTINE_TYPE AS kind
-                   FROM information_schema.ROUTINES
-                   WHERE ROUTINE_SCHEMA = ?
+        let sql = "SELECT CAST(ROUTINE_NAME AS CHAR) AS name, \
+                   CAST(ROUTINE_SCHEMA AS CHAR) AS `schema`, \
+                   COALESCE(CAST(DATA_TYPE AS CHAR), '') AS return_type, \
+                   CAST(ROUTINE_BODY AS CHAR) AS language, \
+                   CAST(ROUTINE_TYPE AS CHAR) AS kind \
+                   FROM information_schema.ROUTINES \
+                   WHERE ROUTINE_SCHEMA = ? \
                    ORDER BY ROUTINE_NAME";
         let rows = sqlx::query(sql)
             .bind(database)
@@ -597,10 +610,12 @@ impl DatabaseDriver for MysqlDriver {
         _schema: &str,
         table: &str,
     ) -> Result<Vec<TriggerInfo>> {
-        let sql = "SELECT TRIGGER_NAME AS name, EVENT_OBJECT_TABLE AS table_name,
-                   EVENT_MANIPULATION AS event, ACTION_TIMING AS timing
-                   FROM information_schema.TRIGGERS
-                   WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?
+        let sql = "SELECT CAST(TRIGGER_NAME AS CHAR) AS name, \
+                   CAST(EVENT_OBJECT_TABLE AS CHAR) AS table_name, \
+                   CAST(EVENT_MANIPULATION AS CHAR) AS event, \
+                   CAST(ACTION_TIMING AS CHAR) AS timing \
+                   FROM information_schema.TRIGGERS \
+                   WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? \
                    ORDER BY TRIGGER_NAME";
         let rows = sqlx::query(sql)
             .bind(database)
@@ -625,8 +640,9 @@ impl DatabaseDriver for MysqlDriver {
         _schema: &str,
         table: &str,
     ) -> Result<TableStats> {
-        let sql = "SELECT TABLE_NAME, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH
-                   FROM information_schema.TABLES
+        let sql = "SELECT CAST(TABLE_NAME AS CHAR) AS TABLE_NAME, \
+                   TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH \
+                   FROM information_schema.TABLES \
                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?";
         let row = sqlx::query(sql)
             .bind(database)
@@ -750,7 +766,8 @@ impl DatabaseDriver for MysqlDriver {
                     column_name,
                     nullable,
                 } => {
-                    let col_sql = "SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+                    let col_sql = "SELECT CAST(COLUMN_TYPE AS CHAR) AS COLUMN_TYPE \
+                                   FROM information_schema.COLUMNS \
                                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?";
                     let row = sqlx::query(col_sql)
                         .bind(database)

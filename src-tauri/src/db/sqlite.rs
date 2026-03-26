@@ -234,8 +234,10 @@ impl DatabaseDriver for SqliteDriver {
         _schema: &str,
         table: &str,
     ) -> Result<Vec<ForeignKeyInfo>> {
-        let sql = format!("PRAGMA foreign_key_list({})", quote_ident(table));
-        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query("SELECT * FROM pragma_foreign_key_list(?)")
+            .bind(table)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(rows
             .iter()
