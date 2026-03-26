@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for DB Studio",
+  "description": "Default capabilities for Tablio",
   "windows": ["*"],
   "permissions": [
     "core:default",
@@ -16,7 +16,7 @@
       "identifier": "fs:scope",
       "allow": [
         { "path": "$APPDATA/**" },
-        { "path": "$HOME/.dbstudio/**" },
+        { "path": "$HOME/.tablio/**" },
         { "path": "$HOME/**" },
         { "path": "$DOWNLOAD/**" },
         { "path": "$DESKTOP/**" }

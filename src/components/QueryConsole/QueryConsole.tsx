@@ -67,7 +67,7 @@ export function QueryConsole({ connectionId, database }: Props) {
   const [editorHeight, setEditorHeight] = useState(45);
   const [pinnedQueries, setPinnedQueries] = useState<Set<number>>(() => new Set());
   const [monacoTheme, setMonacoTheme] = useState<string>(() =>
-    document.documentElement.getAttribute("data-theme") === "light" ? "dbstudio-light-0" : "dbstudio-dark-0"
+    document.documentElement.getAttribute("data-theme") === "light" ? "tablio-light-0" : "tablio-dark-0"
   );
 
   const saveInputRef = useRef<HTMLInputElement>(null);
@@ -105,8 +105,8 @@ export function QueryConsole({ connectionId, database }: Props) {
       "editorWidget.background": bgSurface,
       "editorWidget.border": bgSurface,
     };
-    const darkName = `dbstudio-dark-${ver}`;
-    const lightName = `dbstudio-light-${ver}`;
+    const darkName = `tablio-dark-${ver}`;
+    const lightName = `tablio-light-${ver}`;
     monaco.editor.defineTheme(darkName, {
       base: "vs-dark", inherit: true,
       rules: [

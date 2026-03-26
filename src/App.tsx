@@ -93,14 +93,14 @@ export default function App() {
   const zoomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const themePickerRef = useRef<HTMLDivElement>(null);
   const [themeId, setThemeId] = useState<string>(() => {
-    return localStorage.getItem("dbstudio-theme") || "dark";
+    return localStorage.getItem("tablio-theme") || "dark";
   });
   const [zoom, setZoom] = useState<number>(() => {
-    const saved = localStorage.getItem("dbstudio-zoom");
+    const saved = localStorage.getItem("tablio-zoom");
     return saved ? parseFloat(saved) : 110;
   });
   const [sidebarWidth, setSidebarWidth] = useState(() => {
-    const saved = localStorage.getItem("dbstudio-sidebar-width");
+    const saved = localStorage.getItem("tablio-sidebar-width");
     return saved ? parseInt(saved, 10) : 270;
   });
   const sidebarWidthRef = useRef(sidebarWidth);
@@ -125,7 +125,7 @@ export default function App() {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       setSidebarWidth(sidebarWidthRef.current);
-      localStorage.setItem("dbstudio-sidebar-width", String(sidebarWidthRef.current));
+      localStorage.setItem("tablio-sidebar-width", String(sidebarWidthRef.current));
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
@@ -145,7 +145,7 @@ export default function App() {
   useEffect(() => {
     const t = getThemeById(themeId);
     applyTheme(t);
-    localStorage.setItem("dbstudio-theme", themeId);
+    localStorage.setItem("tablio-theme", themeId);
   }, [themeId]);
 
   useEffect(() => {
@@ -163,7 +163,7 @@ export default function App() {
   const applyZoom = useCallback((level: number) => {
     const clamped = Math.min(200, Math.max(50, Math.round(level)));
     setZoom(clamped);
-    localStorage.setItem("dbstudio-zoom", String(clamped));
+    localStorage.setItem("tablio-zoom", String(clamped));
     document.documentElement.style.zoom = `${clamped}%`;
     document.documentElement.style.setProperty("--app-zoom", String(clamped / 100));
     setShowZoom(true);
@@ -263,7 +263,7 @@ export default function App() {
           <div className="empty-state">
             <Database size={56} strokeWidth={1.2} />
             <div className="empty-state-text">
-              <h2>Welcome to DB Studio</h2>
+              <h2>Welcome to Tablio</h2>
               <p>
                 Connect to a database and open a table or start a new query to get started.
               </p>

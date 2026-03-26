@@ -1,7 +1,7 @@
 {
-  "productName": "DB Studio",
+  "productName": "Tablio",
   "version": "2.0.0",
-  "identifier": "com.dbstudio.app",
+  "identifier": "com.tablio.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "DB Studio",
+        "title": "Tablio",
         "width": 1400,
         "height": 900,
         "resizable": true,

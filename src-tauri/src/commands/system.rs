@@ -1,6 +1,6 @@
 use serde::Serialize;
-use sysinfo::{Pid, System};
 use std::sync::Mutex;
+use sysinfo::{Pid, System};
 
 #[derive(Serialize)]
 pub struct AppResourceUsage {

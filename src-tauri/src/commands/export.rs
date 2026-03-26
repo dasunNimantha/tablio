@@ -70,17 +70,16 @@ pub async fn export_table_to_file(
         _ => return Err(format!("Unsupported format: {}", request.format)),
     };
 
-    std::fs::write(&file_path, content)
-        .map_err(|e| format!("Failed to write file: {}", e))?;
+    std::fs::write(&file_path, content).map_err(|e| format!("Failed to write file: {}", e))?;
 
     Ok(())
 }
 
 #[tauri::command]
-pub async fn export_query_result(
-    request: ExportResultRequest,
-) -> Result<String, String> {
-    let table_name = request.table_name.unwrap_or_else(|| "query_result".to_string());
+pub async fn export_query_result(request: ExportResultRequest) -> Result<String, String> {
+    let table_name = request
+        .table_name
+        .unwrap_or_else(|| "query_result".to_string());
     let content = match request.format.as_str() {
         "csv" => export::to_csv(&request.columns, &request.rows),
         "json" => export::to_json(&request.columns, &request.rows),
@@ -95,7 +94,9 @@ pub async fn export_query_result_to_file(
     request: ExportResultRequest,
     file_path: String,
 ) -> Result<(), String> {
-    let table_name = request.table_name.unwrap_or_else(|| "query_result".to_string());
+    let table_name = request
+        .table_name
+        .unwrap_or_else(|| "query_result".to_string());
     let content = match request.format.as_str() {
         "csv" => export::to_csv(&request.columns, &request.rows),
         "json" => export::to_json(&request.columns, &request.rows),
@@ -103,8 +104,7 @@ pub async fn export_query_result_to_file(
         _ => return Err(format!("Unsupported format: {}", request.format)),
     };
 
-    std::fs::write(&file_path, content)
-        .map_err(|e| format!("Failed to write file: {}", e))?;
+    std::fs::write(&file_path, content).map_err(|e| format!("Failed to write file: {}", e))?;
 
     Ok(())
 }

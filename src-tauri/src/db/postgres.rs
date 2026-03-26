@@ -184,16 +184,32 @@ impl DatabaseDriver for PostgresDriver {
     async fn alter_role(&self, req: &AlterRoleRequest) -> Result<()> {
         let mut options: Vec<String> = Vec::new();
         if let Some(v) = req.is_superuser {
-            options.push(if v { "SUPERUSER".to_string() } else { "NOSUPERUSER".to_string() });
+            options.push(if v {
+                "SUPERUSER".to_string()
+            } else {
+                "NOSUPERUSER".to_string()
+            });
         }
         if let Some(v) = req.can_login {
-            options.push(if v { "LOGIN".to_string() } else { "NOLOGIN".to_string() });
+            options.push(if v {
+                "LOGIN".to_string()
+            } else {
+                "NOLOGIN".to_string()
+            });
         }
         if let Some(v) = req.can_create_db {
-            options.push(if v { "CREATEDB".to_string() } else { "NOCREATEDB".to_string() });
+            options.push(if v {
+                "CREATEDB".to_string()
+            } else {
+                "NOCREATEDB".to_string()
+            });
         }
         if let Some(v) = req.can_create_role {
-            options.push(if v { "CREATEROLE".to_string() } else { "NOCREATEROLE".to_string() });
+            options.push(if v {
+                "CREATEROLE".to_string()
+            } else {
+                "NOCREATEROLE".to_string()
+            });
         }
         if let Some(v) = req.connection_limit {
             options.push(format!("CONNECTION LIMIT {}", v));
@@ -319,7 +335,8 @@ impl DatabaseDriver for PostgresDriver {
                     .map(|d| d.starts_with("nextval("))
                     .unwrap_or(false);
                 let raw_type: String = r.get("data_type");
-                let char_max_len: Option<i32> = r.try_get("character_maximum_length").ok().flatten();
+                let char_max_len: Option<i32> =
+                    r.try_get("character_maximum_length").ok().flatten();
                 let num_precision: Option<i32> = r.try_get("numeric_precision").ok().flatten();
                 let num_scale: Option<i32> = r.try_get("numeric_scale").ok().flatten();
                 let data_type = if let Some(len) = char_max_len {
@@ -340,7 +357,9 @@ impl DatabaseDriver for PostgresDriver {
                     is_primary_key: r.get("is_pk"),
                     default_value: default_val,
                     ordinal_position: r.get("ordinal_position"),
-                    is_auto_generated: is_identity == "YES" || is_generated == "ALWAYS" || has_serial_default,
+                    is_auto_generated: is_identity == "YES"
+                        || is_generated == "ALWAYS"
+                        || has_serial_default,
                 }
             })
             .collect())
@@ -455,7 +474,8 @@ impl DatabaseDriver for PostgresDriver {
                 format!("ORDER BY {} {}", quote_ident(&s.column), dir)
             })
             .unwrap_or_else(|| {
-                let pk_cols: Vec<String> = columns.iter()
+                let pk_cols: Vec<String> = columns
+                    .iter()
                     .filter(|c| c.is_primary_key)
                     .map(|c| quote_ident(&c.name))
                     .collect();
@@ -553,9 +573,7 @@ impl DatabaseDriver for PostgresDriver {
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
         let start = Instant::now();
         let explain_sql = format!("EXPLAIN (ANALYZE, FORMAT JSON) {}", sql);
-        let row = sqlx::query(&explain_sql)
-            .fetch_one(&self.pool)
-            .await?;
+        let row = sqlx::query(&explain_sql).fetch_one(&self.pool).await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let raw_json: serde_json::Value = row.try_get(0)?;
@@ -713,11 +731,7 @@ impl DatabaseDriver for PostgresDriver {
         Ok(())
     }
 
-    async fn list_functions(
-        &self,
-        _database: &str,
-        schema: &str,
-    ) -> Result<Vec<FunctionInfo>> {
+    async fn list_functions(&self, _database: &str, schema: &str) -> Result<Vec<FunctionInfo>> {
         let sql = "SELECT p.proname AS name, n.nspname AS schema, t.typname AS return_type, l.lanname AS language,
                    CASE p.prokind
                        WHEN 'f' THEN 'function'
@@ -733,10 +747,7 @@ impl DatabaseDriver for PostgresDriver {
                    WHERE n.nspname = $1
                      AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
                    ORDER BY p.proname";
-        let rows = sqlx::query(sql)
-            .bind(schema)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(sql).bind(schema).fetch_all(&self.pool).await?;
 
         Ok(rows
             .iter()
@@ -897,7 +908,11 @@ impl DatabaseDriver for PostgresDriver {
                     column_name,
                     nullable,
                 } => {
-                    let action = if *nullable { "DROP NOT NULL" } else { "SET NOT NULL" };
+                    let action = if *nullable {
+                        "DROP NOT NULL"
+                    } else {
+                        "SET NOT NULL"
+                    };
                     format!(
                         "ALTER TABLE {} ALTER COLUMN {} {}",
                         table_ref,
@@ -922,7 +937,11 @@ impl DatabaseDriver for PostgresDriver {
                 }
                 AlterTableOperation::RenameTable { new_name } => {
                     current_table = new_name.clone();
-                    format!("ALTER TABLE {} RENAME TO {}", table_ref, quote_ident(new_name))
+                    format!(
+                        "ALTER TABLE {} RENAME TO {}",
+                        table_ref,
+                        quote_ident(new_name)
+                    )
                 }
             };
             sqlx::query(&sql).execute(&self.pool).await?;
@@ -954,18 +973,13 @@ impl DatabaseDriver for PostgresDriver {
         for chunk in rows.chunks(BATCH_SIZE) {
             let mut values_list = Vec::with_capacity(chunk.len());
             for row in chunk {
-                let vals: Vec<String> = row
-                    .iter()
-                    .map(json_to_sql_literal)
-                    .collect();
+                let vals: Vec<String> = row.iter().map(json_to_sql_literal).collect();
                 values_list.push(format!("({})", vals.join(", ")));
             }
             let values_str = values_list.join(", ");
             let sql = format!(
                 "INSERT INTO {} ({}) VALUES {}",
-                table_ref,
-                col_str,
-                values_str
+                table_ref, col_str, values_str
             );
             let result = sqlx::query(&sql).execute(&mut *tx).await?;
             total_inserted += result.rows_affected();
@@ -996,12 +1010,7 @@ impl DatabaseDriver for PostgresDriver {
         Ok(())
     }
 
-    async fn truncate_table(
-        &self,
-        _database: &str,
-        schema: &str,
-        table_name: &str,
-    ) -> Result<()> {
+    async fn truncate_table(&self, _database: &str, schema: &str, table_name: &str) -> Result<()> {
         let sql = format!(
             "TRUNCATE TABLE {}.{} CASCADE",
             quote_ident(schema),
@@ -1018,7 +1027,7 @@ impl DatabaseDriver for PostgresDriver {
              client_addr::text \
              FROM pg_stat_activity \
              WHERE state IS NOT NULL AND pid <> pg_backend_pid() \
-             ORDER BY query_start DESC NULLS LAST"
+             ORDER BY query_start DESC NULLS LAST",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1026,7 +1035,10 @@ impl DatabaseDriver for PostgresDriver {
         Ok(rows
             .iter()
             .map(|r| ServerActivity {
-                pid: r.try_get::<i32, _>("pid").map(|v| v.to_string()).unwrap_or_default(),
+                pid: r
+                    .try_get::<i32, _>("pid")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
                 user: r.try_get::<String, _>("usename").unwrap_or_default(),
                 database: r.try_get::<String, _>("datname").unwrap_or_default(),
                 state: r.try_get::<String, _>("state").unwrap_or_default(),
@@ -1044,7 +1056,7 @@ impl DatabaseDriver for PostgresDriver {
                 count(*) FILTER (WHERE state = 'idle') AS idle, \
                 count(*) FILTER (WHERE state = 'idle in transaction') AS idle_tx, \
                 count(*) AS total \
-            FROM pg_stat_activity"
+            FROM pg_stat_activity",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -1058,7 +1070,7 @@ impl DatabaseDriver for PostgresDriver {
                     COALESCE(tup_fetched, 0) AS tup_fetched, \
                     COALESCE(blks_read, 0) AS blks_read, \
                     COALESCE(blks_hit, 0) AS blks_hit \
-            FROM pg_stat_database WHERE datname = current_database()"
+            FROM pg_stat_database WHERE datname = current_database()",
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -1068,21 +1080,29 @@ impl DatabaseDriver for PostgresDriver {
             .await?;
 
         use sqlx::Row;
-        let (xact_commit, xact_rollback, tup_inserted, tup_updated, tup_deleted, tup_fetched, blks_read, blks_hit) =
-            if let Some(db_row) = db_row_opt {
-                (
-                    db_row.get::<i64, _>("xact_commit"),
-                    db_row.get::<i64, _>("xact_rollback"),
-                    db_row.get::<i64, _>("tup_inserted"),
-                    db_row.get::<i64, _>("tup_updated"),
-                    db_row.get::<i64, _>("tup_deleted"),
-                    db_row.get::<i64, _>("tup_fetched"),
-                    db_row.get::<i64, _>("blks_read"),
-                    db_row.get::<i64, _>("blks_hit"),
-                )
-            } else {
-                (0, 0, 0, 0, 0, 0, 0, 0)
-            };
+        let (
+            xact_commit,
+            xact_rollback,
+            tup_inserted,
+            tup_updated,
+            tup_deleted,
+            tup_fetched,
+            blks_read,
+            blks_hit,
+        ) = if let Some(db_row) = db_row_opt {
+            (
+                db_row.get::<i64, _>("xact_commit"),
+                db_row.get::<i64, _>("xact_rollback"),
+                db_row.get::<i64, _>("tup_inserted"),
+                db_row.get::<i64, _>("tup_updated"),
+                db_row.get::<i64, _>("tup_deleted"),
+                db_row.get::<i64, _>("tup_fetched"),
+                db_row.get::<i64, _>("blks_read"),
+                db_row.get::<i64, _>("blks_hit"),
+            )
+        } else {
+            (0, 0, 0, 0, 0, 0, 0, 0)
+        };
 
         Ok(DatabaseStats {
             active_connections: conn_row.get::<i64, _>("active"),
@@ -1115,7 +1135,7 @@ impl DatabaseDriver for PostgresDriver {
             LEFT JOIN pg_class c ON l.relation = c.oid \
             LEFT JOIN pg_stat_activity a ON l.pid = a.pid \
             LEFT JOIN pg_database d ON l.database = d.oid \
-            ORDER BY l.granted, l.pid"
+            ORDER BY l.granted, l.pid",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1142,7 +1162,7 @@ impl DatabaseDriver for PostgresDriver {
     async fn get_server_config(&self) -> Result<Vec<ServerConfigEntry>> {
         let rows = sqlx::query(
             "SELECT name, setting, unit, category, short_desc, context, source, pending_restart \
-            FROM pg_settings ORDER BY category, name"
+            FROM pg_settings ORDER BY category, name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1165,9 +1185,10 @@ impl DatabaseDriver for PostgresDriver {
     }
 
     async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
-        let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
-            .fetch_optional(&self.pool)
-            .await?;
+        let ext_check =
+            sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
+                .fetch_optional(&self.pool)
+                .await?;
 
         if ext_check.is_none() {
             return Ok(QueryStatsResponse {
@@ -1230,9 +1251,7 @@ impl DatabaseDriver for PostgresDriver {
              ORDER BY s.total_time DESC"
         };
 
-        let rows = sqlx::query(sql)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(sql).fetch_all(&self.pool).await?;
 
         let entries = rows
             .iter()
@@ -1287,9 +1306,7 @@ impl DatabaseDriver for PostgresDriver {
             let where_clause: Vec<String> = update
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| {
-                    format!("{} = {}", quote_ident(col), json_to_sql_literal(val))
-                })
+                .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_sql_literal(val)))
                 .collect();
             let sql = format!(
                 "UPDATE {} SET {} WHERE {}",
@@ -1320,9 +1337,7 @@ impl DatabaseDriver for PostgresDriver {
             let where_clause: Vec<String> = delete
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| {
-                    format!("{} = {}", quote_ident(col), json_to_sql_literal(val))
-                })
+                .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_sql_literal(val)))
                 .collect();
             let sql = format!(
                 "DELETE FROM {} WHERE {}",
@@ -1376,18 +1391,10 @@ fn parse_pg_plan_node(plan: &serde_json::Value) -> ExplainNode {
             .get("Total Cost")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
-        actual_time_ms: plan
-            .get("Actual Total Time")
-            .and_then(|v| v.as_f64()),
-        rows_estimated: plan
-            .get("Plan Rows")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
+        actual_time_ms: plan.get("Actual Total Time").and_then(|v| v.as_f64()),
+        rows_estimated: plan.get("Plan Rows").and_then(|v| v.as_u64()).unwrap_or(0),
         rows_actual: plan.get("Actual Rows").and_then(|v| v.as_u64()),
-        width: plan
-            .get("Plan Width")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
+        width: plan.get("Plan Width").and_then(|v| v.as_u64()).unwrap_or(0),
         filter: plan
             .get("Filter")
             .and_then(|v| v.as_str())
@@ -1501,12 +1508,18 @@ mod tests {
     #[test]
     fn json_to_sql_bool() {
         assert_eq!(json_to_sql_literal(&serde_json::Value::Bool(true)), "true");
-        assert_eq!(json_to_sql_literal(&serde_json::Value::Bool(false)), "false");
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::Bool(false)),
+            "false"
+        );
     }
 
     #[test]
     fn json_to_sql_integer() {
-        assert_eq!(json_to_sql_literal(&serde_json::Value::Number(42i64.into())), "42");
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::Number(42i64.into())),
+            "42"
+        );
     }
 
     #[test]
@@ -1564,12 +1577,18 @@ mod tests {
 
     #[test]
     fn json_to_sql_negative_number() {
-        assert_eq!(json_to_sql_literal(&serde_json::Value::Number((-5i64).into())), "-5");
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::Number((-5i64).into())),
+            "-5"
+        );
     }
 
     #[test]
     fn json_to_sql_zero() {
-        assert_eq!(json_to_sql_literal(&serde_json::Value::Number(0i64.into())), "0");
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::Number(0i64.into())),
+            "0"
+        );
     }
 
     fn format_column_data_type(
@@ -1617,10 +1636,7 @@ mod tests {
 
     #[test]
     fn column_type_no_length() {
-        assert_eq!(
-            format_column_data_type("text", None, None, None),
-            "text"
-        );
+        assert_eq!(format_column_data_type("text", None, None, None), "text");
     }
 
     #[test]
@@ -1697,9 +1713,6 @@ mod tests {
 
     #[test]
     fn column_type_uuid_unchanged() {
-        assert_eq!(
-            format_column_data_type("uuid", None, None, None),
-            "uuid"
-        );
+        assert_eq!(format_column_data_type("uuid", None, None, None), "uuid");
     }
 }

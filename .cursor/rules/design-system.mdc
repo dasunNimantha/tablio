@@ -1,5 +1,5 @@
 ---
-description: Design system tokens and CSS conventions for DB Studio
+description: Design system tokens and CSS conventions for Tablio
 globs: **/*.css
 alwaysApply: false
 ---

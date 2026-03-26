@@ -128,15 +128,21 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     async fn create_role(&self, _req: &CreateRoleRequest) -> Result<()> {
-        Err(anyhow::anyhow!("Role management not yet implemented for MySQL"))
+        Err(anyhow::anyhow!(
+            "Role management not yet implemented for MySQL"
+        ))
     }
 
     async fn drop_role(&self, _name: &str) -> Result<()> {
-        Err(anyhow::anyhow!("Role management not yet implemented for MySQL"))
+        Err(anyhow::anyhow!(
+            "Role management not yet implemented for MySQL"
+        ))
     }
 
     async fn alter_role(&self, _req: &AlterRoleRequest) -> Result<()> {
-        Err(anyhow::anyhow!("Role management not yet implemented for MySQL"))
+        Err(anyhow::anyhow!(
+            "Role management not yet implemented for MySQL"
+        ))
     }
 
     async fn test_connection(&self) -> Result<bool> {
@@ -145,9 +151,7 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
-        let rows = sqlx::query("SHOW DATABASES")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query("SHOW DATABASES").fetch_all(&self.pool).await?;
 
         Ok(rows
             .iter()
@@ -168,7 +172,7 @@ impl DatabaseDriver for MysqlDriver {
             "SELECT TABLE_NAME, TABLE_TYPE, TABLE_ROWS \
              FROM information_schema.TABLES \
              WHERE TABLE_SCHEMA = ? \
-             ORDER BY TABLE_NAME"
+             ORDER BY TABLE_NAME",
         )
         .bind(database)
         .fetch_all(&self.pool)
@@ -215,7 +219,9 @@ impl DatabaseDriver for MysqlDriver {
                     is_primary_key: key == "PRI",
                     default_value: r.try_get("COLUMN_DEFAULT").ok(),
                     ordinal_position: r.get("ORDINAL_POSITION"),
-                    is_auto_generated: extra.contains("auto_increment") || extra.contains("VIRTUAL GENERATED") || extra.contains("STORED GENERATED"),
+                    is_auto_generated: extra.contains("auto_increment")
+                        || extra.contains("VIRTUAL GENERATED")
+                        || extra.contains("STORED GENERATED"),
                 }
             })
             .collect())
@@ -227,15 +233,22 @@ impl DatabaseDriver for MysqlDriver {
         _schema: &str,
         table: &str,
     ) -> Result<Vec<IndexInfo>> {
-        let sql = format!("SHOW INDEX FROM {}.{}", quote_ident(database), quote_ident(table));
+        let sql = format!(
+            "SHOW INDEX FROM {}.{}",
+            quote_ident(database),
+            quote_ident(table)
+        );
         let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
 
-        let mut index_map: std::collections::HashMap<String, IndexInfo> = std::collections::HashMap::new();
+        let mut index_map: std::collections::HashMap<String, IndexInfo> =
+            std::collections::HashMap::new();
         for r in &rows {
             let name: String = r.get("Key_name");
             let col: String = r.get("Column_name");
             let non_unique: i64 = r.try_get::<i64, _>("Non_unique").unwrap_or(1);
-            let idx_type: String = r.try_get::<String, _>("Index_type").unwrap_or_else(|_| "BTREE".into());
+            let idx_type: String = r
+                .try_get::<String, _>("Index_type")
+                .unwrap_or_else(|_| "BTREE".into());
             index_map
                 .entry(name.clone())
                 .and_modify(|e| e.columns.push(col.clone()))
@@ -339,7 +352,8 @@ impl DatabaseDriver for MysqlDriver {
                 format!("ORDER BY {} {}", quote_ident(&s.column), dir)
             })
             .unwrap_or_else(|| {
-                let pk_cols: Vec<String> = columns.iter()
+                let pk_cols: Vec<String> = columns
+                    .iter()
                     .filter(|c| c.is_primary_key)
                     .map(|c| quote_ident(&c.name))
                     .collect();
@@ -437,17 +451,13 @@ impl DatabaseDriver for MysqlDriver {
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
         let start = Instant::now();
         let explain_sql = format!("EXPLAIN FORMAT=JSON {}", sql);
-        let row = sqlx::query(&explain_sql)
-            .fetch_one(&self.pool)
-            .await?;
+        let row = sqlx::query(&explain_sql).fetch_one(&self.pool).await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let raw_text: String = row.try_get(0)?;
         let json: serde_json::Value = serde_json::from_str(&raw_text)?;
 
-        let query_block = json
-            .get("query_block")
-            .unwrap_or(&serde_json::Value::Null);
+        let query_block = json.get("query_block").unwrap_or(&serde_json::Value::Null);
 
         let plan = ExplainNode {
             node_type: "Query Block".to_string(),
@@ -490,8 +500,16 @@ impl DatabaseDriver for MysqlDriver {
         object_type: &str,
     ) -> Result<String> {
         let sql = match object_type.to_uppercase().as_str() {
-            "VIEW" => format!("SHOW CREATE VIEW {}.{}", quote_ident(database), quote_ident(object_name)),
-            _ => format!("SHOW CREATE TABLE {}.{}", quote_ident(database), quote_ident(object_name)),
+            "VIEW" => format!(
+                "SHOW CREATE VIEW {}.{}",
+                quote_ident(database),
+                quote_ident(object_name)
+            ),
+            _ => format!(
+                "SHOW CREATE TABLE {}.{}",
+                quote_ident(database),
+                quote_ident(object_name)
+            ),
         };
         let row = sqlx::query(&sql).fetch_one(&self.pool).await?;
         let ddl: String = row.try_get(1)?;
@@ -550,11 +568,7 @@ impl DatabaseDriver for MysqlDriver {
         Ok(())
     }
 
-    async fn list_functions(
-        &self,
-        database: &str,
-        _schema: &str,
-    ) -> Result<Vec<FunctionInfo>> {
+    async fn list_functions(&self, database: &str, _schema: &str) -> Result<Vec<FunctionInfo>> {
         let sql = "SELECT ROUTINE_NAME AS name, ROUTINE_SCHEMA AS schema,
                    COALESCE(DATA_TYPE, '') AS return_type, ROUTINE_BODY AS language, ROUTINE_TYPE AS kind
                    FROM information_schema.ROUTINES
@@ -659,7 +673,10 @@ impl DatabaseDriver for MysqlDriver {
                     }
                     if let Some(d) = &column.default_value {
                         if !d.is_empty() && sql_fragment_is_unsafe(d) {
-                            anyhow::bail!("Invalid character in default value for column {}", column.name);
+                            anyhow::bail!(
+                                "Invalid character in default value for column {}",
+                                column.name
+                            );
                         }
                     }
                 }
@@ -668,7 +685,10 @@ impl DatabaseDriver for MysqlDriver {
                         anyhow::bail!("Invalid character in column type");
                     }
                 }
-                AlterTableOperation::SetDefault { default_value: Some(d), .. } if !d.is_empty() => {
+                AlterTableOperation::SetDefault {
+                    default_value: Some(d),
+                    ..
+                } if !d.is_empty() => {
                     if sql_fragment_is_unsafe(d) {
                         anyhow::bail!("Invalid character in default value");
                     }
@@ -680,11 +700,7 @@ impl DatabaseDriver for MysqlDriver {
         let mut current_table = table_name.to_string();
 
         for op in operations {
-            let table_ref = format!(
-                "{}.{}",
-                quote_ident(database),
-                quote_ident(&current_table)
-            );
+            let table_ref = format!("{}.{}", quote_ident(database), quote_ident(&current_table));
 
             let sql = match op {
                 AlterTableOperation::AddColumn { column } => {
@@ -744,7 +760,11 @@ impl DatabaseDriver for MysqlDriver {
                         .await?;
                     let col_type: String = row
                         .ok_or_else(|| {
-                            anyhow::anyhow!("Column {} not found in table {}", column_name, current_table)
+                            anyhow::anyhow!(
+                                "Column {} not found in table {}",
+                                column_name,
+                                current_table
+                            )
                         })?
                         .get("COLUMN_TYPE");
                     let null_part = if *nullable { "" } else { " NOT NULL" };
@@ -772,11 +792,7 @@ impl DatabaseDriver for MysqlDriver {
                     )
                 }
                 AlterTableOperation::RenameTable { new_name } => {
-                    let new_ref = format!(
-                        "{}.{}",
-                        quote_ident(database),
-                        quote_ident(new_name)
-                    );
+                    let new_ref = format!("{}.{}", quote_ident(database), quote_ident(new_name));
                     current_table = new_name.clone();
                     format!("RENAME TABLE {} TO {}", table_ref, new_ref)
                 }
@@ -799,11 +815,7 @@ impl DatabaseDriver for MysqlDriver {
             return Ok(0);
         }
 
-        let table_ref = format!(
-            "{}.{}",
-            quote_ident(database),
-            quote_ident(table)
-        );
+        let table_ref = format!("{}.{}", quote_ident(database), quote_ident(table));
         let col_list: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
         let col_str = col_list.join(", ");
 
@@ -820,9 +832,7 @@ impl DatabaseDriver for MysqlDriver {
             let values_str = values_list.join(", ");
             let sql = format!(
                 "INSERT INTO {} ({}) VALUES {}",
-                table_ref,
-                col_str,
-                values_str
+                table_ref, col_str, values_str
             );
             let result = sqlx::query(&sql).execute(&mut *tx).await?;
             total_inserted += result.rows_affected();
@@ -853,12 +863,7 @@ impl DatabaseDriver for MysqlDriver {
         Ok(())
     }
 
-    async fn truncate_table(
-        &self,
-        database: &str,
-        _schema: &str,
-        table_name: &str,
-    ) -> Result<()> {
+    async fn truncate_table(&self, database: &str, _schema: &str, table_name: &str) -> Result<()> {
         let sql = format!(
             "TRUNCATE TABLE {}.{}",
             quote_ident(database),
@@ -876,7 +881,10 @@ impl DatabaseDriver for MysqlDriver {
         Ok(rows
             .iter()
             .map(|r| ServerActivity {
-                pid: r.try_get::<i64, _>("Id").map(|v| v.to_string()).unwrap_or_default(),
+                pid: r
+                    .try_get::<i64, _>("Id")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
                 user: r.try_get::<String, _>("User").unwrap_or_default(),
                 database: r.try_get::<String, _>("db").unwrap_or_default(),
                 state: r.try_get::<String, _>("Command").unwrap_or_default(),
@@ -889,10 +897,19 @@ impl DatabaseDriver for MysqlDriver {
 
     async fn get_database_stats(&self) -> Result<DatabaseStats> {
         Ok(DatabaseStats {
-            active_connections: 0, idle_connections: 0, idle_in_transaction: 0,
-            total_connections: 0, xact_commit: 0, xact_rollback: 0,
-            tup_inserted: 0, tup_updated: 0, tup_deleted: 0, tup_fetched: 0,
-            blks_read: 0, blks_hit: 0, timestamp_ms: 0.0,
+            active_connections: 0,
+            idle_connections: 0,
+            idle_in_transaction: 0,
+            total_connections: 0,
+            xact_commit: 0,
+            xact_rollback: 0,
+            tup_inserted: 0,
+            tup_updated: 0,
+            tup_deleted: 0,
+            tup_fetched: 0,
+            blks_read: 0,
+            blks_hit: 0,
+            timestamp_ms: 0.0,
         })
     }
 
@@ -913,7 +930,9 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     async fn cancel_query(&self, pid: &str) -> Result<()> {
-        let pid_num: u64 = pid.parse().map_err(|_| anyhow!("Invalid PID: must be numeric"))?;
+        let pid_num: u64 = pid
+            .parse()
+            .map_err(|_| anyhow!("Invalid PID: must be numeric"))?;
         let sql = format!("KILL QUERY {}", pid_num);
         sqlx::query(&sql).execute(&self.pool).await?;
         Ok(())
@@ -936,9 +955,7 @@ impl DatabaseDriver for MysqlDriver {
             let where_clause: Vec<String> = update
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| {
-                    format!("{} = {}", quote_ident(col), json_to_sql_literal(val))
-                })
+                .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_sql_literal(val)))
                 .collect();
             let sql = format!(
                 "UPDATE {} SET {} WHERE {}",
@@ -969,9 +986,7 @@ impl DatabaseDriver for MysqlDriver {
             let where_clause: Vec<String> = delete
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| {
-                    format!("{} = {}", quote_ident(col), json_to_sql_literal(val))
-                })
+                .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_sql_literal(val)))
                 .collect();
             let sql = format!(
                 "DELETE FROM {} WHERE {}",
@@ -1040,12 +1055,18 @@ mod tests {
     #[test]
     fn json_to_sql_bool() {
         assert_eq!(json_to_sql_literal(&serde_json::Value::Bool(true)), "true");
-        assert_eq!(json_to_sql_literal(&serde_json::Value::Bool(false)), "false");
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::Bool(false)),
+            "false"
+        );
     }
 
     #[test]
     fn json_to_sql_number() {
-        assert_eq!(json_to_sql_literal(&serde_json::Value::Number(42i64.into())), "42");
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::Number(42i64.into())),
+            "42"
+        );
     }
 
     #[test]

@@ -1,9 +1,9 @@
 ---
-description: DB Studio project structure and tech stack conventions
+description: Tablio project structure and tech stack conventions
 alwaysApply: true
 ---
 
-# DB Studio
+# Tablio
 
 Tauri v2 desktop database management app (PostgreSQL, MySQL, SQLite).
 

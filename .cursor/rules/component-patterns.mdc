@@ -1,5 +1,5 @@
 ---
-description: React component and dialog UI patterns for DB Studio
+description: React component and dialog UI patterns for Tablio
 globs: **/*.tsx
 alwaysApply: false
 ---

@@ -13,7 +13,12 @@ pub async fn get_ddl(
         .await
         .map_err(|e| e.to_string())?;
     driver
-        .get_ddl(&request.database, &request.schema, &request.object_name, &request.object_type)
+        .get_ddl(
+            &request.database,
+            &request.schema,
+            &request.object_name,
+            &request.object_type,
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -28,7 +33,12 @@ pub async fn create_table(
         .await
         .map_err(|e| e.to_string())?;
     driver
-        .create_table(&request.database, &request.schema, &request.table_name, &request.columns)
+        .create_table(
+            &request.database,
+            &request.schema,
+            &request.table_name,
+            &request.columns,
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -38,7 +48,10 @@ pub async fn list_databases(
     pool: State<'_, Arc<PoolManager>>,
     connection_id: String,
 ) -> Result<Vec<DatabaseInfo>, String> {
-    let driver = pool.get_driver(&connection_id).await.map_err(|e| e.to_string())?;
+    let driver = pool
+        .get_driver(&connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
     driver.list_databases().await.map_err(|e| e.to_string())
 }
 
@@ -48,8 +61,14 @@ pub async fn list_schemas(
     connection_id: String,
     database: String,
 ) -> Result<Vec<SchemaInfo>, String> {
-    let driver = pool.get_driver(&connection_id).await.map_err(|e| e.to_string())?;
-    driver.list_schemas(&database).await.map_err(|e| e.to_string())
+    let driver = pool
+        .get_driver(&connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    driver
+        .list_schemas(&database)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -59,8 +78,14 @@ pub async fn list_tables(
     database: String,
     schema: String,
 ) -> Result<Vec<TableInfo>, String> {
-    let driver = pool.get_driver(&connection_id).await.map_err(|e| e.to_string())?;
-    driver.list_tables(&database, &schema).await.map_err(|e| e.to_string())
+    let driver = pool
+        .get_driver(&connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    driver
+        .list_tables(&database, &schema)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -71,7 +96,10 @@ pub async fn list_columns(
     schema: String,
     table: String,
 ) -> Result<Vec<ColumnInfo>, String> {
-    let driver = pool.get_driver(&connection_id).await.map_err(|e| e.to_string())?;
+    let driver = pool
+        .get_driver(&connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
     driver
         .list_columns(&database, &schema, &table)
         .await
@@ -86,7 +114,10 @@ pub async fn list_indexes(
     schema: String,
     table: String,
 ) -> Result<Vec<IndexInfo>, String> {
-    let driver = pool.get_driver(&connection_id).await.map_err(|e| e.to_string())?;
+    let driver = pool
+        .get_driver(&connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
     driver
         .list_indexes(&database, &schema, &table)
         .await
@@ -101,7 +132,10 @@ pub async fn list_foreign_keys(
     schema: String,
     table: String,
 ) -> Result<Vec<ForeignKeyInfo>, String> {
-    let driver = pool.get_driver(&connection_id).await.map_err(|e| e.to_string())?;
+    let driver = pool
+        .get_driver(&connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
     driver
         .list_foreign_keys(&database, &schema, &table)
         .await
@@ -118,7 +152,12 @@ pub async fn alter_table(
         .await
         .map_err(|e| e.to_string())?;
     driver
-        .alter_table(&request.database, &request.schema, &request.table_name, &request.operations)
+        .alter_table(
+            &request.database,
+            &request.schema,
+            &request.table_name,
+            &request.operations,
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -130,7 +169,10 @@ pub async fn list_functions(
     database: String,
     schema: String,
 ) -> Result<Vec<FunctionInfo>, String> {
-    let driver = pool.get_driver(&connection_id).await.map_err(|e| e.to_string())?;
+    let driver = pool
+        .get_driver(&connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
     driver
         .list_functions(&database, &schema)
         .await
@@ -145,7 +187,10 @@ pub async fn list_triggers(
     schema: String,
     table: String,
 ) -> Result<Vec<TriggerInfo>, String> {
-    let driver = pool.get_driver(&connection_id).await.map_err(|e| e.to_string())?;
+    let driver = pool
+        .get_driver(&connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
     driver
         .list_triggers(&database, &schema, &table)
         .await
@@ -160,7 +205,10 @@ pub async fn get_table_stats(
     schema: String,
     table: String,
 ) -> Result<TableStats, String> {
-    let driver = pool.get_driver(&connection_id).await.map_err(|e| e.to_string())?;
+    let driver = pool
+        .get_driver(&connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
     driver
         .get_table_stats(&database, &schema, &table)
         .await
@@ -177,7 +225,13 @@ pub async fn import_data(
         .await
         .map_err(|e| e.to_string())?;
     driver
-        .import_data(&request.database, &request.schema, &request.table, &request.columns, &request.rows)
+        .import_data(
+            &request.database,
+            &request.schema,
+            &request.table,
+            &request.columns,
+            &request.rows,
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -192,7 +246,12 @@ pub async fn drop_object(
         .await
         .map_err(|e| e.to_string())?;
     driver
-        .drop_object(&request.database, &request.schema, &request.object_name, &request.object_type)
+        .drop_object(
+            &request.database,
+            &request.schema,
+            &request.object_name,
+            &request.object_type,
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -251,10 +310,7 @@ pub async fn get_database_stats(
         .get_driver(&request.connection_id)
         .await
         .map_err(|e| e.to_string())?;
-    driver
-        .get_database_stats()
-        .await
-        .map_err(|e| e.to_string())
+    driver.get_database_stats().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -266,10 +322,7 @@ pub async fn get_locks(
         .get_driver(&request.connection_id)
         .await
         .map_err(|e| e.to_string())?;
-    driver
-        .get_locks()
-        .await
-        .map_err(|e| e.to_string())
+    driver.get_locks().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -281,10 +334,7 @@ pub async fn get_server_config(
         .get_driver(&request.connection_id)
         .await
         .map_err(|e| e.to_string())?;
-    driver
-        .get_server_config()
-        .await
-        .map_err(|e| e.to_string())
+    driver.get_server_config().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -296,8 +346,5 @@ pub async fn get_query_stats(
         .get_driver(&request.connection_id)
         .await
         .map_err(|e| e.to_string())?;
-    driver
-        .get_query_stats()
-        .await
-        .map_err(|e| e.to_string())
+    driver.get_query_stats().await.map_err(|e| e.to_string())
 }

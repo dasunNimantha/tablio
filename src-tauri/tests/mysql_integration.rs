@@ -1,0 +1,511 @@
+use tablio_lib::db::mysql::MysqlDriver;
+use tablio_lib::db::DatabaseDriver;
+use tablio_lib::models::*;
+
+macro_rules! mysql_driver {
+    () => {{
+        let url = match std::env::var("TEST_MYSQL_URL") {
+            Ok(v) if !v.is_empty() => v,
+            _ => {
+                eprintln!("Skipping: TEST_MYSQL_URL not set");
+                return;
+            }
+        };
+        let parts = url.strip_prefix("mysql://").expect("bad TEST_MYSQL_URL");
+        let (user_pass, rest) = parts.split_once('@').expect("missing @");
+        let (user, password) = user_pass.split_once(':').expect("missing :");
+        let (host_port, database) = rest.split_once('/').expect("missing /");
+        let database = database.split('?').next().unwrap();
+        let (host, port) = host_port.split_once(':').expect("missing port");
+        let config = ConnectionConfig {
+            id: "test".into(),
+            name: "test".into(),
+            db_type: DbType::Mysql,
+            host: host.into(),
+            port: port.parse().unwrap(),
+            user: user.into(),
+            password: password.into(),
+            database: database.into(),
+            color: "#000".into(),
+            ssl: false,
+            group: None,
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 22,
+            ssh_user: String::new(),
+            ssh_password: String::new(),
+            ssh_key_path: String::new(),
+        };
+        (
+            MysqlDriver::connect(&config).await.unwrap(),
+            database.to_string(),
+        )
+    }};
+}
+
+fn unique_table(prefix: &str) -> String {
+    format!(
+        "{}_{}",
+        prefix,
+        uuid::Uuid::new_v4().simple().to_string().get(..8).unwrap()
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Connection
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mysql_test_connection() {
+    let (driver, _db) = mysql_driver!();
+    assert!(driver.test_connection().await.unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// Schema introspection
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mysql_list_schemas() {
+    let (driver, db) = mysql_driver!();
+    let schemas = driver.list_schemas(&db).await.unwrap();
+    assert_eq!(schemas.len(), 1);
+    assert_eq!(schemas[0].name, db);
+}
+
+#[tokio::test]
+async fn mysql_create_table_and_list() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("my_tbl");
+
+    let cols = vec![
+        ColumnDefinition {
+            name: "id".into(),
+            data_type: "INT AUTO_INCREMENT".into(),
+            is_nullable: false,
+            is_primary_key: true,
+            default_value: None,
+        },
+        ColumnDefinition {
+            name: "name".into(),
+            data_type: "VARCHAR(100)".into(),
+            is_nullable: true,
+            is_primary_key: false,
+            default_value: None,
+        },
+    ];
+    driver.create_table(&db, &db, &tbl, &cols).await.unwrap();
+
+    let tables = driver.list_tables(&db, &db).await.unwrap();
+    assert!(tables.iter().any(|t| t.name == tbl));
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_list_columns_metadata() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("my_cols");
+
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{}` (\
+                   id INT AUTO_INCREMENT PRIMARY KEY, \
+                   name VARCHAR(50) NOT NULL, \
+                   active TINYINT(1) DEFAULT 1, \
+                   amount DECIMAL(10,2)\
+                 )",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, &db, &tbl).await.unwrap();
+    assert_eq!(cols.len(), 4);
+
+    assert_eq!(cols[0].name, "id");
+    assert!(cols[0].is_primary_key);
+    assert!(cols[0].is_auto_generated);
+
+    assert_eq!(cols[1].name, "name");
+    assert!(!cols[1].is_nullable);
+
+    assert_eq!(cols[2].name, "active");
+
+    assert_eq!(cols[3].name, "amount");
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Fetch rows
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mysql_fetch_rows_empty_table() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("my_empty");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{}` (id INT PRIMARY KEY, val TEXT)", tbl),
+        )
+        .await
+        .unwrap();
+
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .await
+        .unwrap();
+    assert_eq!(data.total_rows, 0);
+    assert!(data.rows.is_empty());
+    assert_eq!(data.columns.len(), 2);
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_insert_and_fetch() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("my_ins");
+
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{}` (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL)",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let changes = DataChanges {
+        connection_id: "test".into(),
+        database: db.clone(),
+        schema: db.clone(),
+        table: tbl.clone(),
+        updates: vec![],
+        inserts: vec![NewRow {
+            values: vec![("name".into(), serde_json::json!("Alice"))],
+        }],
+        deletes: vec![],
+    };
+    driver.apply_changes(&changes).await.unwrap();
+
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .await
+        .unwrap();
+    assert_eq!(data.total_rows, 1);
+    assert_eq!(data.rows[0][1], serde_json::json!("Alice"));
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_update_via_apply_changes() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("my_upd");
+
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{}` (id INT PRIMARY KEY, val VARCHAR(50))",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO `{}` VALUES (1, 'old')", tbl))
+        .await
+        .unwrap();
+
+    let changes = DataChanges {
+        connection_id: "test".into(),
+        database: db.clone(),
+        schema: db.clone(),
+        table: tbl.clone(),
+        updates: vec![CellChange {
+            row_index: 0,
+            column_name: "val".into(),
+            old_value: serde_json::json!("old"),
+            new_value: serde_json::json!("new"),
+            primary_key_values: vec![("id".into(), serde_json::json!(1))],
+        }],
+        inserts: vec![],
+        deletes: vec![],
+    };
+    driver.apply_changes(&changes).await.unwrap();
+
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0][1], serde_json::json!("new"));
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_delete_via_apply_changes() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("my_del");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{}` (id INT PRIMARY KEY, val TEXT)", tbl),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            &db,
+            &format!("INSERT INTO `{}` VALUES (1,'a'),(2,'b')", tbl),
+        )
+        .await
+        .unwrap();
+
+    let changes = DataChanges {
+        connection_id: "test".into(),
+        database: db.clone(),
+        schema: db.clone(),
+        table: tbl.clone(),
+        updates: vec![],
+        inserts: vec![],
+        deletes: vec![DeleteRow {
+            primary_key_values: vec![("id".into(), serde_json::json!(1))],
+        }],
+    };
+    driver.apply_changes(&changes).await.unwrap();
+
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .await
+        .unwrap();
+    assert_eq!(data.total_rows, 1);
+    assert_eq!(data.rows[0][0], serde_json::json!(2));
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_fetch_rows_pagination() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("my_page");
+
+    driver
+        .execute_query(&db, &format!("CREATE TABLE `{}` (id INT PRIMARY KEY)", tbl))
+        .await
+        .unwrap();
+
+    let values: Vec<String> = (1..=10).map(|i| format!("({})", i)).collect();
+    driver
+        .execute_query(
+            &db,
+            &format!("INSERT INTO `{}` VALUES {}", tbl, values.join(", ")),
+        )
+        .await
+        .unwrap();
+
+    let page1 = driver
+        .fetch_rows(&db, &db, &tbl, 0, 5, None, None)
+        .await
+        .unwrap();
+    assert_eq!(page1.rows.len(), 5);
+    assert_eq!(page1.total_rows, 10);
+
+    let page2 = driver
+        .fetch_rows(&db, &db, &tbl, 5, 5, None, None)
+        .await
+        .unwrap();
+    assert_eq!(page2.rows.len(), 5);
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_fetch_rows_sort() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("my_sort");
+
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{}` (id INT PRIMARY KEY, name VARCHAR(50))",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            &db,
+            &format!("INSERT INTO `{}` VALUES (1,'c'),(2,'a'),(3,'b')", tbl),
+        )
+        .await
+        .unwrap();
+
+    let asc = driver
+        .fetch_rows(
+            &db,
+            &db,
+            &tbl,
+            0,
+            10,
+            Some(SortSpec {
+                column: "name".into(),
+                direction: SortDirection::Asc,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(asc.rows[0][1], serde_json::json!("a"));
+    assert_eq!(asc.rows[2][1], serde_json::json!("c"));
+
+    let desc = driver
+        .fetch_rows(
+            &db,
+            &db,
+            &tbl,
+            0,
+            10,
+            Some(SortSpec {
+                column: "name".into(),
+                direction: SortDirection::Desc,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(desc.rows[0][1], serde_json::json!("c"));
+    assert_eq!(desc.rows[2][1], serde_json::json!("a"));
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_fetch_rows_unsafe_filter_rejected() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("my_unsafe");
+
+    driver
+        .execute_query(&db, &format!("CREATE TABLE `{}` (id INT PRIMARY KEY)", tbl))
+        .await
+        .unwrap();
+
+    let result = driver
+        .fetch_rows(
+            &db,
+            &db,
+            &tbl,
+            0,
+            50,
+            None,
+            Some("1=1; DROP TABLE x".into()),
+        )
+        .await;
+    assert!(result.is_err());
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Execute query
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mysql_execute_query_select() {
+    let (driver, db) = mysql_driver!();
+    let result = driver
+        .execute_query(&db, "SELECT 1 AS num, 'hello' AS greeting")
+        .await
+        .unwrap();
+    assert!(result.is_select);
+    assert_eq!(result.columns.len(), 2);
+    assert_eq!(result.rows.len(), 1);
+}
+
+#[tokio::test]
+async fn mysql_execute_query_dml() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("my_dml");
+
+    driver
+        .execute_query(&db, &format!("CREATE TABLE `{}` (id INT PRIMARY KEY)", tbl))
+        .await
+        .unwrap();
+
+    let result = driver
+        .execute_query(&db, &format!("INSERT INTO `{}` VALUES (1),(2),(3)", tbl))
+        .await
+        .unwrap();
+    assert!(!result.is_select);
+    assert_eq!(result.rows_affected, 3);
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Truncate & drop
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mysql_truncate_and_drop() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("my_trunc");
+
+    driver
+        .execute_query(&db, &format!("CREATE TABLE `{}` (id INT PRIMARY KEY)", tbl))
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO `{}` VALUES (1),(2),(3)", tbl))
+        .await
+        .unwrap();
+
+    driver.truncate_table(&db, &db, &tbl).await.unwrap();
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .await
+        .unwrap();
+    assert_eq!(data.total_rows, 0);
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+    let tables = driver.list_tables(&db, &db).await.unwrap();
+    assert!(!tables.iter().any(|t| t.name == tbl));
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mysql_create_table_no_columns_error() {
+    let (driver, db) = mysql_driver!();
+    let result = driver.create_table(&db, &db, "should_fail", &[]).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn mysql_create_table_unsafe_type_error() {
+    let (driver, db) = mysql_driver!();
+    let cols = vec![ColumnDefinition {
+        name: "x".into(),
+        data_type: "INT); DROP TABLE evil; --".into(),
+        is_nullable: true,
+        is_primary_key: false,
+        default_value: None,
+    }];
+    let result = driver.create_table(&db, &db, "should_fail", &cols).await;
+    assert!(result.is_err());
+}

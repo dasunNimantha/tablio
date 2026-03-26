@@ -206,7 +206,9 @@ impl DatabaseDriver for SqliteDriver {
         for r in &rows {
             let name: String = r.get("name");
             let unique: i32 = r.get("unique");
-            let origin: String = r.try_get::<String, _>("origin").unwrap_or_else(|_| "c".into());
+            let origin: String = r
+                .try_get::<String, _>("origin")
+                .unwrap_or_else(|_| "c".into());
 
             let info_sql = format!("PRAGMA index_info({})", quote_ident(&name));
             let info_rows = sqlx::query(&info_sql).fetch_all(&self.pool).await?;
@@ -216,7 +218,11 @@ impl DatabaseDriver for SqliteDriver {
                 name,
                 columns,
                 is_unique: unique != 0,
-                index_type: if origin == "pk" { "PRIMARY".into() } else { "BTREE".into() },
+                index_type: if origin == "pk" {
+                    "PRIMARY".into()
+                } else {
+                    "BTREE".into()
+                },
             });
         }
         Ok(indexes)
@@ -240,8 +246,12 @@ impl DatabaseDriver for SqliteDriver {
                     column: r.get("from"),
                     referenced_table: r.get("table"),
                     referenced_column: r.get("to"),
-                    on_delete: r.try_get::<String, _>("on_delete").unwrap_or_else(|_| "NO ACTION".into()),
-                    on_update: r.try_get::<String, _>("on_update").unwrap_or_else(|_| "NO ACTION".into()),
+                    on_delete: r
+                        .try_get::<String, _>("on_delete")
+                        .unwrap_or_else(|_| "NO ACTION".into()),
+                    on_update: r
+                        .try_get::<String, _>("on_update")
+                        .unwrap_or_else(|_| "NO ACTION".into()),
                 }
             })
             .collect())
@@ -279,7 +289,8 @@ impl DatabaseDriver for SqliteDriver {
                 format!("ORDER BY {} {}", quote_ident(&s.column), dir)
             })
             .unwrap_or_else(|| {
-                let pk_cols: Vec<String> = columns.iter()
+                let pk_cols: Vec<String> = columns
+                    .iter()
                     .filter(|c| c.is_primary_key)
                     .map(|c| quote_ident(&c.name))
                     .collect();
@@ -290,7 +301,11 @@ impl DatabaseDriver for SqliteDriver {
                 }
             });
 
-        let count_sql = format!("SELECT COUNT(*) as cnt FROM {} {}", quote_ident(table), where_clause);
+        let count_sql = format!(
+            "SELECT COUNT(*) as cnt FROM {} {}",
+            quote_ident(table),
+            where_clause
+        );
         let count_row = sqlx::query(&count_sql).fetch_one(&self.pool).await?;
         let total_rows: i64 = count_row.get("cnt");
 
@@ -370,9 +385,7 @@ impl DatabaseDriver for SqliteDriver {
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
         let start = Instant::now();
         let explain_sql = format!("EXPLAIN QUERY PLAN {}", sql);
-        let rows = sqlx::query(&explain_sql)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(&explain_sql).fetch_all(&self.pool).await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let mut raw_lines = Vec::new();
@@ -382,7 +395,10 @@ impl DatabaseDriver for SqliteDriver {
         }
         let raw_text = raw_lines.join("\n");
 
-        let node_type = raw_lines.first().cloned().unwrap_or_else(|| "Query Plan".to_string());
+        let node_type = raw_lines
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "Query Plan".to_string());
         let plan = ExplainNode {
             node_type,
             relation: None,
@@ -393,18 +409,22 @@ impl DatabaseDriver for SqliteDriver {
             rows_actual: None,
             width: 0,
             filter: None,
-            children: raw_lines.iter().skip(1).map(|line| ExplainNode {
-                node_type: line.clone(),
-                relation: None,
-                startup_cost: 0.0,
-                total_cost: 0.0,
-                actual_time_ms: None,
-                rows_estimated: 0,
-                rows_actual: None,
-                width: 0,
-                filter: None,
-                children: vec![],
-            }).collect(),
+            children: raw_lines
+                .iter()
+                .skip(1)
+                .map(|line| ExplainNode {
+                    node_type: line.clone(),
+                    relation: None,
+                    startup_cost: 0.0,
+                    total_cost: 0.0,
+                    actual_time_ms: None,
+                    rows_estimated: 0,
+                    rows_actual: None,
+                    width: 0,
+                    filter: None,
+                    children: vec![],
+                })
+                .collect(),
         };
 
         Ok(ExplainResult {
@@ -481,11 +501,7 @@ impl DatabaseDriver for SqliteDriver {
         Ok(())
     }
 
-    async fn list_functions(
-        &self,
-        _database: &str,
-        _schema: &str,
-    ) -> Result<Vec<FunctionInfo>> {
+    async fn list_functions(&self, _database: &str, _schema: &str) -> Result<Vec<FunctionInfo>> {
         // SQLite doesn't have user-defined functions accessible via SQL
         Ok(vec![])
     }
@@ -589,7 +605,10 @@ impl DatabaseDriver for SqliteDriver {
                 }
                 if let Some(d) = &column.default_value {
                     if !d.is_empty() && sql_fragment_is_unsafe(d) {
-                        anyhow::bail!("Invalid character in default value for column {}", column.name);
+                        anyhow::bail!(
+                            "Invalid character in default value for column {}",
+                            column.name
+                        );
                     }
                 }
             }
@@ -684,9 +703,7 @@ impl DatabaseDriver for SqliteDriver {
             let values_str = values_list.join(", ");
             let sql = format!(
                 "INSERT INTO {} ({}) VALUES {}",
-                table_ref,
-                col_str,
-                values_str
+                table_ref, col_str, values_str
             );
             let result = sqlx::query(&sql).execute(&mut *tx).await?;
             total_inserted += result.rows_affected();
@@ -712,12 +729,7 @@ impl DatabaseDriver for SqliteDriver {
         Ok(())
     }
 
-    async fn truncate_table(
-        &self,
-        _database: &str,
-        _schema: &str,
-        table_name: &str,
-    ) -> Result<()> {
+    async fn truncate_table(&self, _database: &str, _schema: &str, table_name: &str) -> Result<()> {
         let sql = format!("DELETE FROM {}", quote_ident(table_name));
         sqlx::query(&sql).execute(&self.pool).await?;
         Ok(())
@@ -729,10 +741,19 @@ impl DatabaseDriver for SqliteDriver {
 
     async fn get_database_stats(&self) -> Result<DatabaseStats> {
         Ok(DatabaseStats {
-            active_connections: 0, idle_connections: 0, idle_in_transaction: 0,
-            total_connections: 1, xact_commit: 0, xact_rollback: 0,
-            tup_inserted: 0, tup_updated: 0, tup_deleted: 0, tup_fetched: 0,
-            blks_read: 0, blks_hit: 0, timestamp_ms: 0.0,
+            active_connections: 0,
+            idle_connections: 0,
+            idle_in_transaction: 0,
+            total_connections: 1,
+            xact_commit: 0,
+            xact_rollback: 0,
+            tup_inserted: 0,
+            tup_updated: 0,
+            tup_deleted: 0,
+            tup_fetched: 0,
+            blks_read: 0,
+            blks_hit: 0,
+            timestamp_ms: 0.0,
         })
     }
 
@@ -768,9 +789,7 @@ impl DatabaseDriver for SqliteDriver {
             let where_clause: Vec<String> = update
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| {
-                    format!("{} = {}", quote_ident(col), json_to_sql_literal(val))
-                })
+                .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_sql_literal(val)))
                 .collect();
             let sql = format!(
                 "UPDATE {} SET {} WHERE {}",
@@ -801,9 +820,7 @@ impl DatabaseDriver for SqliteDriver {
             let where_clause: Vec<String> = delete
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| {
-                    format!("{} = {}", quote_ident(col), json_to_sql_literal(val))
-                })
+                .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_sql_literal(val)))
                 .collect();
             let sql = format!(
                 "DELETE FROM {} WHERE {}",
@@ -877,7 +894,10 @@ mod tests {
 
     #[test]
     fn json_to_sql_number() {
-        assert_eq!(json_to_sql_literal(&serde_json::Value::Number(42i64.into())), "42");
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::Number(42i64.into())),
+            "42"
+        );
     }
 
     #[test]

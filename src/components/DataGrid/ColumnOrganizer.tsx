@@ -15,7 +15,7 @@ interface Props {
 }
 
 function getStorageKey(connectionId: string, database: string, schema: string, table: string) {
-  return `dbstudio-cols:${connectionId}:${database}:${schema}:${table}`;
+  return `tablio-cols:${connectionId}:${database}:${schema}:${table}`;
 }
 
 export function loadColumnSettings(

@@ -29,8 +29,8 @@ export function DDLViewer({
   const [copied, setCopied] = useState(false);
   const [monacoTheme, setMonacoTheme] = useState<string>(() =>
     document.documentElement.getAttribute("data-theme") === "light"
-      ? "dbstudio-light-0"
-      : "dbstudio-dark-0"
+      ? "tablio-light-0"
+      : "tablio-dark-0"
   );
   const monacoRef = useRef<Monaco | null>(null);
   const themeVersionRef = useRef(0);
@@ -88,8 +88,8 @@ export function DDLViewer({
       "editorWidget.border": bgSurface,
     };
 
-    const darkName = `dbstudio-dark-${ver}`;
-    const lightName = `dbstudio-light-${ver}`;
+    const darkName = `tablio-dark-${ver}`;
+    const lightName = `tablio-light-${ver}`;
 
     monaco.editor.defineTheme(darkName, {
       base: "vs-dark",

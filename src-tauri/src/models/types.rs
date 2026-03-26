@@ -362,11 +362,17 @@ pub enum AlterTableOperation {
     #[serde(rename = "rename_column")]
     RenameColumn { old_name: String, new_name: String },
     #[serde(rename = "change_type")]
-    ChangeColumnType { column_name: String, new_type: String },
+    ChangeColumnType {
+        column_name: String,
+        new_type: String,
+    },
     #[serde(rename = "set_nullable")]
     SetNullable { column_name: String, nullable: bool },
     #[serde(rename = "set_default")]
-    SetDefault { column_name: String, default_value: Option<String> },
+    SetDefault {
+        column_name: String,
+        default_value: Option<String>,
+    },
     #[serde(rename = "rename_table")]
     RenameTable { new_name: String },
 }
@@ -508,9 +514,15 @@ mod tests {
 
     #[test]
     fn db_type_serializes_lowercase() {
-        assert_eq!(serde_json::to_string(&DbType::Postgres).unwrap(), r#""postgres""#);
+        assert_eq!(
+            serde_json::to_string(&DbType::Postgres).unwrap(),
+            r#""postgres""#
+        );
         assert_eq!(serde_json::to_string(&DbType::Mysql).unwrap(), r#""mysql""#);
-        assert_eq!(serde_json::to_string(&DbType::Sqlite).unwrap(), r#""sqlite""#);
+        assert_eq!(
+            serde_json::to_string(&DbType::Sqlite).unwrap(),
+            r#""sqlite""#
+        );
     }
 
     #[test]
@@ -529,8 +541,14 @@ mod tests {
 
     #[test]
     fn sort_direction_serializes() {
-        assert_eq!(serde_json::to_string(&SortDirection::Asc).unwrap(), r#""asc""#);
-        assert_eq!(serde_json::to_string(&SortDirection::Desc).unwrap(), r#""desc""#);
+        assert_eq!(
+            serde_json::to_string(&SortDirection::Asc).unwrap(),
+            r#""asc""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SortDirection::Desc).unwrap(),
+            r#""desc""#
+        );
     }
 
     #[test]

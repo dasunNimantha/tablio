@@ -1,5 +1,5 @@
 ---
-description: Theme system rules for DB Studio - 11 themes defined in themes.ts
+description: Theme system rules for Tablio - 11 themes defined in themes.ts
 globs: 
 alwaysApply: false
 ---

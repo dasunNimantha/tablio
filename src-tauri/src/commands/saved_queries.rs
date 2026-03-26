@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 fn queries_file() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
-    Ok(home.join(".dbstudio").join("saved_queries.json"))
+    Ok(home.join(".tablio").join("saved_queries.json"))
 }
 
 fn ensure_dir() -> Result<(), String> {

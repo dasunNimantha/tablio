@@ -14,7 +14,7 @@ export interface TabInfo {
   objectType?: string;
 }
 
-const STORAGE_KEY = "dbstudio-open-tabs";
+const STORAGE_KEY = "tablio-open-tabs";
 
 try { localStorage.removeItem(STORAGE_KEY); } catch {}
 

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::db::postgres::PostgresDriver;
 use crate::db::mysql::MysqlDriver;
+use crate::db::postgres::PostgresDriver;
 use crate::db::sqlite::SqliteDriver;
 use crate::db::DatabaseDriver;
 use crate::models::*;
@@ -68,13 +68,20 @@ impl PoolManager {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
 
-        let mut child = cmd.spawn()
-            .map_err(|e| anyhow!("Failed to start SSH tunnel: {}. Make sure 'ssh' is available.", e))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            anyhow!(
+                "Failed to start SSH tunnel: {}. Make sure 'ssh' is available.",
+                e
+            )
+        })?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
         for _ in 0..10 {
-            if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", local_port)).await.is_ok() {
+            if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", local_port))
+                .await
+                .is_ok()
+            {
                 return Ok(SshTunnel { child, local_port });
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -101,9 +108,15 @@ impl PoolManager {
         };
 
         let driver_result = match effective_config.db_type {
-            DbType::Postgres => PostgresDriver::connect(&effective_config).await.map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
-            DbType::Mysql => MysqlDriver::connect(&effective_config).await.map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
-            DbType::Sqlite => SqliteDriver::connect(&effective_config).await.map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
+            DbType::Postgres => PostgresDriver::connect(&effective_config)
+                .await
+                .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
+            DbType::Mysql => MysqlDriver::connect(&effective_config)
+                .await
+                .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
+            DbType::Sqlite => SqliteDriver::connect(&effective_config)
+                .await
+                .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
         };
 
         let driver = match driver_result {
@@ -170,7 +183,8 @@ impl PoolManager {
                 DbType::Sqlite => Box::new(SqliteDriver::connect(&effective_config).await?),
             };
             driver.test_connection().await
-        }.await;
+        }
+        .await;
 
         if let Some(mut t) = tunnel_handle {
             let _ = t.child.kill().await;

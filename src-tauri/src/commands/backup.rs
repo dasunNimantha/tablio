@@ -23,10 +23,18 @@ pub async fn dump_and_restore(
     pool: State<'_, Arc<PoolManager>>,
     request: DumpRestoreRequest,
 ) -> Result<String, String> {
-    let src_config = pool.get_config(&request.source_connection_id).await.map_err(|e| e.to_string())?;
-    let tgt_config = pool.get_config(&request.target_connection_id).await.map_err(|e| e.to_string())?;
+    let src_config = pool
+        .get_config(&request.source_connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let tgt_config = pool
+        .get_config(&request.target_connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    if !matches!(src_config.db_type, DbType::Postgres) || !matches!(tgt_config.db_type, DbType::Postgres) {
+    if !matches!(src_config.db_type, DbType::Postgres)
+        || !matches!(tgt_config.db_type, DbType::Postgres)
+    {
         return Err("Dump & Restore currently only supports PostgreSQL connections".to_string());
     }
 
@@ -36,32 +44,53 @@ pub async fn dump_and_restore(
         return Err("Source and target database cannot be the same".to_string());
     }
 
-    let unique_id = uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0").to_string();
+    let unique_id = uuid::Uuid::new_v4()
+        .to_string()
+        .split('-')
+        .next()
+        .unwrap_or("0")
+        .to_string();
     let tmp_path = std::env::temp_dir().join(format!(
-        "dbstudio-dump-{}-{}-{}.backup",
+        "tablio-dump-{}-{}-{}.backup",
         request.source_database,
         chrono::Utc::now().format("%Y%m%d-%H%M%S"),
         unique_id
     ));
     let tmp_str = tmp_path.to_string_lossy().to_string();
 
-    emit_log(&app, &format!("Starting pg_dump from {} / {}…", src_config.host, request.source_database));
+    emit_log(
+        &app,
+        &format!(
+            "Starting pg_dump from {} / {}…",
+            src_config.host, request.source_database
+        ),
+    );
 
     // pg_dump with --verbose to get progress output on stderr
     let dump_status = {
         let mut cmd = tokio::process::Command::new("pg_dump");
-        cmd.arg("-h").arg(&src_config.host)
-            .arg("-p").arg(src_config.port.to_string())
-            .arg("-U").arg(&src_config.user)
-            .arg("-d").arg(&request.source_database)
+        cmd.arg("-h")
+            .arg(&src_config.host)
+            .arg("-p")
+            .arg(src_config.port.to_string())
+            .arg("-U")
+            .arg(&src_config.user)
+            .arg("-d")
+            .arg(&request.source_database)
             .arg("-Fc")
             .arg("--verbose")
-            .arg("-f").arg(&tmp_str);
+            .arg("-f")
+            .arg(&tmp_str);
         cmd.env("PGPASSWORD", &src_config.password);
         cmd.stderr(std::process::Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("Failed to run pg_dump: {}. Is it installed?", e))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to run pg_dump: {}. Is it installed?", e))?;
         stream_stderr(&app, &mut child).await;
-        child.wait().await.map_err(|e| format!("pg_dump process error: {}", e))?
+        child
+            .wait()
+            .await
+            .map_err(|e| format!("pg_dump process error: {}", e))?
     };
 
     if !dump_status.success() {
@@ -77,10 +106,14 @@ pub async fn dump_and_restore(
     // a transaction cause cascading issues with dependent objects.
     let tx_status = {
         let mut cmd = tokio::process::Command::new("pg_restore");
-        cmd.arg("-h").arg(&tgt_config.host)
-            .arg("-p").arg(tgt_config.port.to_string())
-            .arg("-U").arg(&tgt_config.user)
-            .arg("-d").arg(&request.target_database)
+        cmd.arg("-h")
+            .arg(&tgt_config.host)
+            .arg("-p")
+            .arg(tgt_config.port.to_string())
+            .arg("-U")
+            .arg(&tgt_config.user)
+            .arg("-d")
+            .arg(&request.target_database)
             .arg("--clean")
             .arg("--if-exists")
             .arg("--single-transaction")
@@ -88,9 +121,14 @@ pub async fn dump_and_restore(
             .arg(&tmp_str);
         cmd.env("PGPASSWORD", &tgt_config.password);
         cmd.stderr(std::process::Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("Failed to run pg_restore: {}", e))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to run pg_restore: {}", e))?;
         stream_stderr(&app, &mut child).await;
-        child.wait().await.map_err(|e| format!("pg_restore process error: {}", e))?
+        child
+            .wait()
+            .await
+            .map_err(|e| format!("pg_restore process error: {}", e))?
     };
 
     if tx_status.success() {
@@ -105,23 +143,35 @@ pub async fn dump_and_restore(
     // --single-transaction aborts on ANY error (missing roles, "schema already
     // exists", etc.), so non-fatal warnings cause a full rollback. Fall back to
     // a non-transactional restore which tolerates those warnings.
-    emit_log(&app, "Transactional restore rolled back due to warnings. Retrying without --single-transaction…");
+    emit_log(
+        &app,
+        "Transactional restore rolled back due to warnings. Retrying without --single-transaction…",
+    );
 
     let restore_status = {
         let mut cmd = tokio::process::Command::new("pg_restore");
-        cmd.arg("-h").arg(&tgt_config.host)
-            .arg("-p").arg(tgt_config.port.to_string())
-            .arg("-U").arg(&tgt_config.user)
-            .arg("-d").arg(&request.target_database)
+        cmd.arg("-h")
+            .arg(&tgt_config.host)
+            .arg("-p")
+            .arg(tgt_config.port.to_string())
+            .arg("-U")
+            .arg(&tgt_config.user)
+            .arg("-d")
+            .arg(&request.target_database)
             .arg("--clean")
             .arg("--if-exists")
             .arg("--verbose")
             .arg(&tmp_str);
         cmd.env("PGPASSWORD", &tgt_config.password);
         cmd.stderr(std::process::Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("Failed to run pg_restore: {}", e))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to run pg_restore: {}", e))?;
         stream_stderr(&app, &mut child).await;
-        child.wait().await.map_err(|e| format!("pg_restore process error: {}", e))?
+        child
+            .wait()
+            .await
+            .map_err(|e| format!("pg_restore process error: {}", e))?
     };
 
     let _ = tokio::fs::remove_file(&tmp_path).await;
@@ -157,7 +207,10 @@ pub async fn backup_database(
     pool: State<'_, Arc<PoolManager>>,
     request: BackupRequest,
 ) -> Result<String, String> {
-    let config = pool.get_config(&request.connection_id).await.map_err(|e| e.to_string())?;
+    let config = pool
+        .get_config(&request.connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     match config.db_type {
         DbType::Postgres => backup_postgres(&config, &request).await,
@@ -171,7 +224,10 @@ pub async fn restore_database(
     pool: State<'_, Arc<PoolManager>>,
     request: RestoreRequest,
 ) -> Result<String, String> {
-    let config = pool.get_config(&request.connection_id).await.map_err(|e| e.to_string())?;
+    let config = pool
+        .get_config(&request.connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     match config.db_type {
         DbType::Postgres => restore_postgres(&config, &request).await,
@@ -186,20 +242,35 @@ async fn backup_postgres(config: &ConnectionConfig, req: &BackupRequest) -> Resu
     }
 
     let mut cmd = tokio::process::Command::new("pg_dump");
-    cmd.arg("-h").arg(&config.host)
-        .arg("-p").arg(config.port.to_string())
-        .arg("-U").arg(&config.user)
-        .arg("-d").arg(&req.database)
-        .arg("-f").arg(&req.output_path);
+    cmd.arg("-h")
+        .arg(&config.host)
+        .arg("-p")
+        .arg(config.port.to_string())
+        .arg("-U")
+        .arg(&config.user)
+        .arg("-d")
+        .arg(&req.database)
+        .arg("-f")
+        .arg(&req.output_path);
 
     cmd.env("PGPASSWORD", &config.password);
 
     match req.format.as_str() {
-        "custom" => { cmd.arg("-Fc"); }
-        "tar" => { cmd.arg("-Ft"); }
-        "plain" => { cmd.arg("-Fp"); }
-        "directory" => { cmd.arg("-Fd"); }
-        _ => { cmd.arg("-Fp"); }
+        "custom" => {
+            cmd.arg("-Fc");
+        }
+        "tar" => {
+            cmd.arg("-Ft");
+        }
+        "plain" => {
+            cmd.arg("-Fp");
+        }
+        "directory" => {
+            cmd.arg("-Fd");
+        }
+        _ => {
+            cmd.arg("-Fp");
+        }
     }
 
     if req.schema_only {
@@ -209,7 +280,10 @@ async fn backup_postgres(config: &ConnectionConfig, req: &BackupRequest) -> Resu
         cmd.arg("-a");
     }
 
-    let output = cmd.output().await.map_err(|e| format!("Failed to run pg_dump: {}. Is it installed?", e))?;
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run pg_dump: {}. Is it installed?", e))?;
 
     if output.status.success() {
         Ok(format!("Backup completed: {}", req.output_path))
@@ -219,19 +293,30 @@ async fn backup_postgres(config: &ConnectionConfig, req: &BackupRequest) -> Resu
     }
 }
 
-async fn restore_postgres(config: &ConnectionConfig, req: &RestoreRequest) -> Result<String, String> {
+async fn restore_postgres(
+    config: &ConnectionConfig,
+    req: &RestoreRequest,
+) -> Result<String, String> {
     let is_sql = req.format == "plain" || req.input_path.ends_with(".sql");
 
     if is_sql {
         let mut cmd = tokio::process::Command::new("psql");
-        cmd.arg("-h").arg(&config.host)
-            .arg("-p").arg(config.port.to_string())
-            .arg("-U").arg(&config.user)
-            .arg("-d").arg(&req.database)
-            .arg("-f").arg(&req.input_path);
+        cmd.arg("-h")
+            .arg(&config.host)
+            .arg("-p")
+            .arg(config.port.to_string())
+            .arg("-U")
+            .arg(&config.user)
+            .arg("-d")
+            .arg(&req.database)
+            .arg("-f")
+            .arg(&req.input_path);
         cmd.env("PGPASSWORD", &config.password);
 
-        let output = cmd.output().await.map_err(|e| format!("Failed to run psql: {}", e))?;
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run psql: {}", e))?;
         if output.status.success() {
             Ok("Restore completed".to_string())
         } else {
@@ -240,22 +325,35 @@ async fn restore_postgres(config: &ConnectionConfig, req: &RestoreRequest) -> Re
         }
     } else {
         let mut cmd = tokio::process::Command::new("pg_restore");
-        cmd.arg("-h").arg(&config.host)
-            .arg("-p").arg(config.port.to_string())
-            .arg("-U").arg(&config.user)
-            .arg("-d").arg(&req.database);
+        cmd.arg("-h")
+            .arg(&config.host)
+            .arg("-p")
+            .arg(config.port.to_string())
+            .arg("-U")
+            .arg(&config.user)
+            .arg("-d")
+            .arg(&req.database);
 
         match req.format.as_str() {
-            "custom" => { cmd.arg("-Fc"); }
-            "tar" => { cmd.arg("-Ft"); }
-            "directory" => { cmd.arg("-Fd"); }
+            "custom" => {
+                cmd.arg("-Fc");
+            }
+            "tar" => {
+                cmd.arg("-Ft");
+            }
+            "directory" => {
+                cmd.arg("-Fd");
+            }
             _ => {} // auto: let pg_restore detect format
         }
 
         cmd.arg(&req.input_path);
         cmd.env("PGPASSWORD", &config.password);
 
-        let output = cmd.output().await.map_err(|e| format!("Failed to run pg_restore: {}", e))?;
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pg_restore: {}", e))?;
         if output.status.success() {
             Ok("Restore completed".to_string())
         } else {
@@ -267,11 +365,15 @@ async fn restore_postgres(config: &ConnectionConfig, req: &RestoreRequest) -> Re
 
 async fn backup_mysql(config: &ConnectionConfig, req: &BackupRequest) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new("mysqldump");
-    cmd.arg("-h").arg(&config.host)
-        .arg("-P").arg(config.port.to_string())
-        .arg("-u").arg(&config.user)
+    cmd.arg("-h")
+        .arg(&config.host)
+        .arg("-P")
+        .arg(config.port.to_string())
+        .arg("-u")
+        .arg(&config.user)
         .arg(&req.database)
-        .arg("--result-file").arg(&req.output_path);
+        .arg("--result-file")
+        .arg(&req.output_path);
 
     if !config.password.is_empty() {
         cmd.env("MYSQL_PWD", &config.password);
@@ -283,7 +385,10 @@ async fn backup_mysql(config: &ConnectionConfig, req: &BackupRequest) -> Result<
         cmd.arg("--no-create-info");
     }
 
-    let output = cmd.output().await.map_err(|e| format!("Failed to run mysqldump: {}", e))?;
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run mysqldump: {}", e))?;
     if output.status.success() {
         Ok(format!("Backup completed: {}", req.output_path))
     } else {
@@ -294,26 +399,38 @@ async fn backup_mysql(config: &ConnectionConfig, req: &BackupRequest) -> Result<
 
 async fn restore_mysql(config: &ConnectionConfig, req: &RestoreRequest) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new("mysql");
-    cmd.arg("-h").arg(&config.host)
-        .arg("-P").arg(config.port.to_string())
-        .arg("-u").arg(&config.user)
+    cmd.arg("-h")
+        .arg(&config.host)
+        .arg("-P")
+        .arg(config.port.to_string())
+        .arg("-u")
+        .arg(&config.user)
         .arg(&req.database);
 
     if !config.password.is_empty() {
         cmd.env("MYSQL_PWD", &config.password);
     }
 
-    let input = tokio::fs::read(&req.input_path).await
+    let input = tokio::fs::read(&req.input_path)
+        .await
         .map_err(|e| format!("Failed to read file: {}", e))?;
     cmd.stdin(std::process::Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to run mysql: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to run mysql: {}", e))?;
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
-        stdin.write_all(&input).await.map_err(|e| format!("Failed to write to stdin: {}", e))?;
+        stdin
+            .write_all(&input)
+            .await
+            .map_err(|e| format!("Failed to write to stdin: {}", e))?;
     }
 
-    let output = child.wait_with_output().await.map_err(|e| format!("Failed: {}", e))?;
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("Failed: {}", e))?;
     if output.status.success() {
         Ok("Restore completed".to_string())
     } else {
@@ -323,13 +440,15 @@ async fn restore_mysql(config: &ConnectionConfig, req: &RestoreRequest) -> Resul
 }
 
 async fn backup_sqlite(config: &ConnectionConfig, req: &BackupRequest) -> Result<String, String> {
-    tokio::fs::copy(&config.database, &req.output_path).await
+    tokio::fs::copy(&config.database, &req.output_path)
+        .await
         .map_err(|e| format!("Failed to copy SQLite file: {}", e))?;
     Ok(format!("Backup completed: {}", req.output_path))
 }
 
 async fn restore_sqlite(config: &ConnectionConfig, req: &RestoreRequest) -> Result<String, String> {
-    tokio::fs::copy(&req.input_path, &config.database).await
+    tokio::fs::copy(&req.input_path, &config.database)
+        .await
         .map_err(|e| format!("Failed to restore SQLite file: {}", e))?;
     Ok("Restore completed".to_string())
 }

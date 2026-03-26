@@ -74,7 +74,7 @@ describe("applyColumnSettings", () => {
 });
 
 describe("loadColumnSettings / saveColumnSettings", () => {
-  const key = "dbstudio-cols:conn1:db:schema:table";
+  const key = "tablio-cols:conn1:db:schema:table";
 
   beforeEach(() => {
     localStorage.clear();
@@ -102,7 +102,7 @@ describe("loadColumnSettings / saveColumnSettings", () => {
 
   it("uses correct storage key", () => {
     saveColumnSettings("c1", "d1", "s1", "t1", { order: ["x"], hidden: new Set() });
-    expect(localStorage.getItem("dbstudio-cols:c1:d1:s1:t1")).not.toBeNull();
+    expect(localStorage.getItem("tablio-cols:c1:d1:s1:t1")).not.toBeNull();
     expect(loadColumnSettings("c2", "d2", "s2", "t2")).toBeNull();
   });
 });

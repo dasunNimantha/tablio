@@ -3,7 +3,13 @@ use serde_json::Value;
 pub fn to_csv(columns: &[String], rows: &[Vec<Value>]) -> String {
     let mut out = String::new();
 
-    out.push_str(&columns.iter().map(|c| escape_csv(c)).collect::<Vec<_>>().join(","));
+    out.push_str(
+        &columns
+            .iter()
+            .map(|c| escape_csv(c))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
     out.push('\n');
 
     for row in rows {
@@ -125,10 +131,7 @@ mod tests {
     #[test]
     fn csv_boolean_value() {
         let cols = ["flag".to_string()];
-        let rows = vec![
-            vec![Value::Bool(true)],
-            vec![Value::Bool(false)],
-        ];
+        let rows = vec![vec![Value::Bool(true)], vec![Value::Bool(false)]];
         let out = to_csv(&cols, &rows);
         assert!(out.contains("true"));
         assert!(out.contains("false"));
@@ -292,9 +295,10 @@ mod tests {
     #[test]
     fn csv_object_value() {
         let cols = ["data".to_string()];
-        let rows = vec![vec![Value::Object(serde_json::Map::from_iter(
-            vec![("key".to_string(), Value::String("val".into()))],
-        ))]];
+        let rows = vec![vec![Value::Object(serde_json::Map::from_iter(vec![(
+            "key".to_string(),
+            Value::String("val".into()),
+        )]))]];
         let out = to_csv(&cols, &rows);
         assert!(out.contains("key"));
         assert!(out.contains("val"));
@@ -303,10 +307,16 @@ mod tests {
     #[test]
     fn json_array_value() {
         let cols = ["arr".to_string()];
-        let rows = vec![vec![Value::Array(vec![Value::Number(1i64.into()), Value::Number(2i64.into())])]];
+        let rows = vec![vec![Value::Array(vec![
+            Value::Number(1i64.into()),
+            Value::Number(2i64.into()),
+        ])]];
         let out = to_json(&cols, &rows);
         let parsed: Vec<serde_json::Map<String, Value>> = serde_json::from_str(&out).unwrap();
-        assert_eq!(parsed[0]["arr"], Value::Array(vec![Value::Number(1i64.into()), Value::Number(2i64.into())]));
+        assert_eq!(
+            parsed[0]["arr"],
+            Value::Array(vec![Value::Number(1i64.into()), Value::Number(2i64.into())])
+        );
     }
 
     #[test]
@@ -335,9 +345,10 @@ mod tests {
     #[test]
     fn sql_inserts_object_value() {
         let cols = ["data".to_string()];
-        let rows = vec![vec![Value::Object(serde_json::Map::from_iter(
-            vec![("k".to_string(), Value::String("v".into()))],
-        ))]];
+        let rows = vec![vec![Value::Object(serde_json::Map::from_iter(vec![(
+            "k".to_string(),
+            Value::String("v".into()),
+        )]))]];
         let out = to_sql_inserts("t", &cols, &rows);
         assert!(out.contains("INSERT INTO"));
     }
