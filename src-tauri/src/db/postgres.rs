@@ -287,6 +287,7 @@ impl DatabaseDriver for PostgresDriver {
         let rows = sqlx::query(
             "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, c.ordinal_position, \
                     c.is_identity, c.identity_generation, c.is_generated, \
+                    c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
                     CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_pk \
              FROM information_schema.columns c \
              LEFT JOIN ( \
@@ -317,9 +318,24 @@ impl DatabaseDriver for PostgresDriver {
                     .as_deref()
                     .map(|d| d.starts_with("nextval("))
                     .unwrap_or(false);
+                let raw_type: String = r.get("data_type");
+                let char_max_len: Option<i32> = r.try_get("character_maximum_length").ok().flatten();
+                let num_precision: Option<i32> = r.try_get("numeric_precision").ok().flatten();
+                let num_scale: Option<i32> = r.try_get("numeric_scale").ok().flatten();
+                let data_type = if let Some(len) = char_max_len {
+                    format!("{}({})", raw_type, len)
+                } else if raw_type == "numeric" || raw_type == "decimal" {
+                    match (num_precision, num_scale) {
+                        (Some(p), Some(s)) if s > 0 => format!("{}({},{})", raw_type, p, s),
+                        (Some(p), _) => format!("{}({})", raw_type, p),
+                        _ => raw_type,
+                    }
+                } else {
+                    raw_type
+                };
                 ColumnInfo {
                     name: r.get("column_name"),
-                    data_type: r.get("data_type"),
+                    data_type,
                     is_nullable: nullable_str == "YES",
                     is_primary_key: r.get("is_pk"),
                     default_value: default_val,

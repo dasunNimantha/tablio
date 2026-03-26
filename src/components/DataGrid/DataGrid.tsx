@@ -129,6 +129,7 @@ interface PendingChanges {
 interface RowObj {
   __rowIdx: number;
   __isInserted: boolean;
+  __isDeleted: boolean;
   [key: string]: unknown;
 }
 
@@ -286,6 +287,10 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   }, [rowContextMenu]);
 
   useEffect(() => {
+    gridApiRef.current?.redrawRows();
+  }, [changes, detailRowIdx]);
+
+  useEffect(() => {
     if (refreshInterval <= 0 || hasChanges) return;
     const id = setInterval(() => {
       fetchData();
@@ -397,20 +402,29 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     });
   }, [data, getPkValues, getPkKey]);
 
-  // Convert array-of-arrays to array-of-objects for AG Grid
-  const agRowData = useMemo((): RowObj[] => {
-    if (!data) return [];
-    const inserted: RowObj[] = [];
+  const pkColumns = useMemo(() => {
+    return data?.columns.filter((c) => c.is_primary_key).map((c) => c.name) ?? [];
+  }, [data]);
+
+  const { agRowData, pinnedTopRows } = useMemo(() => {
+    if (!data) return { agRowData: [] as RowObj[], pinnedTopRows: [] as RowObj[] };
     const existing: RowObj[] = [];
+    const inserted: RowObj[] = [];
     for (let i = 0; i < editingRows.length; i++) {
       const row = editingRows[i];
-      const obj: RowObj = { __rowIdx: i, __isInserted: i >= originalRowCount };
+      const isInserted = i >= originalRowCount;
+      const obj: RowObj = { __rowIdx: i, __isInserted: isInserted, __isDeleted: false };
       data.columns.forEach((col, colIdx) => { obj[col.name] = row[colIdx]; });
-      if (i >= originalRowCount) inserted.push(obj);
-      else existing.push(obj);
+      if (isInserted) {
+        inserted.push(obj);
+      } else {
+        const pkValues = pkColumns.map((name) => obj[name]);
+        obj.__isDeleted = changes.deletedKeys.has(JSON.stringify(pkValues));
+        existing.push(obj);
+      }
     }
-    return [...inserted, ...existing];
-  }, [editingRows, data, originalRowCount]);
+    return { agRowData: existing, pinnedTopRows: inserted };
+  }, [editingRows, data, originalRowCount, pkColumns, changes.deletedKeys]);
 
   // Build AG Grid column definitions
   const columnDefs = useMemo((): ColDef[] => {
@@ -434,7 +448,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         return page * PAGE_SIZE + params.data.__rowIdx + 1;
       },
       onCellClicked: (params) => {
-        if (params.data) setDetailRowIdx(params.data.__rowIdx);
+        if (params.data) setDetailRowIdx((prev) => prev === params.data.__rowIdx ? null : params.data.__rowIdx);
       },
     };
 
@@ -461,7 +475,8 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           "cell-null": (params) => params.value === null || params.value === undefined,
           "cell-modified": (params) => {
             if (!params.data || params.data.__isInserted) return false;
-            const pkKey = getPkKey(params.data.__rowIdx);
+            const pkValues = pkColumns.map((name) => params.data[name]);
+            const pkKey = JSON.stringify(pkValues);
             return changes.updates.has(`${pkKey}:${col.name}`);
           },
           "cell-inserted": (params) => params.data?.__isInserted === true,
@@ -500,7 +515,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     });
 
     return [rowNumCol, ...dataCols];
-  }, [data, visibleIndices, page, changes, getPkKey, handleCellChange, fkMap]);
+  }, [data, visibleIndices, page, changes, pkColumns, handleCellChange, fkMap]);
 
   const handleAddRow = () => {
     if (!data) return;
@@ -511,6 +526,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       ...prev,
       inserts: [...prev.inserts, { values }],
     }));
+    setTimeout(() => gridApiRef.current?.ensureIndexVisible(0, "top"), 0);
   };
 
   const handleDeleteRow = (rowIndex: number) => {
@@ -529,6 +545,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   const handleSave = async () => {
     if (!data || !hasChanges) return;
     setSaving(true);
+    setFilterLoading(true);
     try {
       const allChanges: DataChanges = {
         connection_id: connectionId,
@@ -569,6 +586,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       await fetchData();
     } catch (e) {
       setError(String(e));
+      setFilterLoading(false);
     } finally {
       setSaving(false);
     }
@@ -664,13 +682,10 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     if (!params.data) return "";
     const classes: string[] = [];
     if (params.data.__isInserted) classes.push("row-inserted");
-    else {
-      const pkKey = getPkKey(params.data.__rowIdx);
-      if (changes.deletedKeys.has(pkKey)) classes.push("row-deleted");
-    }
+    if (params.data.__isDeleted) classes.push("row-deleted");
     if (detailRowIdx === params.data.__rowIdx) classes.push("row-selected");
     return classes.join(" ");
-  }, [changes.deletedKeys, detailRowIdx, getPkKey]);
+  }, [detailRowIdx]);
 
   const onSortChanged = useCallback(() => {
     if (!gridApiRef.current) return;
@@ -718,7 +733,9 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     const generateValue = (col: ColumnInfo): unknown => {
       const t = col.data_type.toLowerCase();
       if (col.is_auto_generated || col.is_primary_key) return null;
-      if (t.includes("int") || t === "serial" || t === "bigserial" || t === "smallserial")
+      if (t.includes("smallint") || t === "smallserial")
+        return Math.floor(Math.random() * 30000);
+      if (t.includes("int") || t === "serial" || t === "bigserial")
         return Math.floor(Math.random() * 10000);
       if (t.includes("float") || t.includes("double") || t.includes("numeric") || t.includes("decimal") || t === "real")
         return Math.round(Math.random() * 10000) / 100;
@@ -747,7 +764,27 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       if (t === "json" || t === "jsonb")
         return JSON.stringify({ key: `value_${Math.floor(Math.random() * 100)}` });
       if (t.includes("char") || t === "text" || t.includes("varchar")) {
-        const words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "theta", "iota", "kappa", "lambda"];
+        const lenMatch = t.match(/\((\d+)\)/);
+        const maxLen = lenMatch ? parseInt(lenMatch[1], 10) : 0;
+        const words = ["ab", "cd", "hi", "go", "up", "ok", "ax", "do", "be", "my",
+                        "alpha", "beta", "gamma", "delta", "test", "data", "item", "node", "key", "val"];
+        if (maxLen > 0) {
+          const candidates = words.filter((w) => w.length <= maxLen);
+          if (candidates.length > 0) {
+            const word = candidates[Math.floor(Math.random() * candidates.length)];
+            const remaining = maxLen - word.length;
+            if (remaining >= 2) {
+              const numDigits = Math.min(remaining - 1, 4);
+              const num = Math.floor(Math.random() * Math.pow(10, numDigits));
+              return (word + "_" + num).slice(0, maxLen);
+            }
+            return word;
+          }
+          const chars = "abcdefghijklmnopqrstuvwxyz";
+          let s = "";
+          for (let i = 0; i < maxLen; i++) s += chars[Math.floor(Math.random() * chars.length)];
+          return s;
+        }
         return words[Math.floor(Math.random() * words.length)] + "_" + Math.floor(Math.random() * 1000);
       }
       if (col.is_nullable) return null;
@@ -762,6 +799,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       inserts: [...prev.inserts, { values }],
     }));
     addToast("Generated test row with random data");
+    setTimeout(() => gridApiRef.current?.ensureIndexVisible(0, "top"), 0);
   }, [data, addToast]);
 
   const handleJumpToFk = useCallback((fk: ForeignKeyInfo, cellValue: unknown) => {
@@ -807,6 +845,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   const defaultColDef = useMemo((): ColDef => ({
     resizable: true,
     sortable: true,
+    comparator: () => 0,
     suppressHeaderMenuButton: true,
     suppressKeyboardEvent: (params) => {
       if (!params.editing) {
@@ -991,6 +1030,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           theme={gridTheme}
           modules={[AllCommunityModule]}
           rowData={agRowData}
+          pinnedTopRowData={pinnedTopRows}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}
           getRowId={(params) => String(params.data.__rowIdx)}
