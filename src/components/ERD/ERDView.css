@@ -2,19 +2,23 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--bg-secondary, #f8fafc);
+  background: var(--bg-primary);
+  min-height: 0;
 }
 
 .erd-loading,
 .erd-error {
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 0.75rem;
-  color: var(--text-secondary, #64748b);
+  color: var(--text-secondary);
 }
 
 .erd-loading .spin {
   animation: erd-spin 0.8s linear infinite;
+  color: var(--accent);
 }
 
 @keyframes erd-spin {
@@ -26,27 +30,68 @@
 .erd-error button {
   margin-top: 0.5rem;
   padding: 0.5rem 1rem;
-  background: var(--accent, #3b82f6);
-  color: white;
+  background: var(--accent);
+  color: var(--text-inverse);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
 }
 
 .erd-toolbar {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  background: var(--bg-primary, #fff);
-  border-bottom: 1px solid var(--border, #e2e8f0);
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+.erd-toolbar-spacer {
+  flex: 1;
+  min-width: 8px;
+}
+
+.erd-toolbar-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 220px;
+  flex: 0 1 220px;
+  padding: 0 10px;
+  height: 30px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.erd-search-icon {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.erd-filter-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.erd-filter-input::placeholder {
+  color: var(--text-muted);
 }
 
 .erd-zoom {
   display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: 4px;
 }
 
 .erd-zoom button,
@@ -54,31 +99,44 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  background: var(--bg-secondary, #f1f5f9);
-  border: 1px solid var(--border, #e2e8f0);
-  border-radius: var(--radius-xs);
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   cursor: pointer;
-  color: var(--text-primary, #334155);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 
 .erd-zoom button:hover,
 .erd-toolbar > button:hover {
-  background: var(--bg-hover, #e2e8f0);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.erd-toggle-active {
+  background: var(--accent-muted) !important;
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
 }
 
 .erd-zoom span {
-  min-width: 2.5rem;
-  font-size: 0.8125rem;
-  color: var(--text-secondary, #64748b);
+  min-width: 2.75rem;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
 }
 
 .erd-canvas {
   flex: 1;
   overflow: hidden;
   min-height: 0;
+  background: var(--bg-primary);
 }
 
 .erd-svg {
@@ -87,32 +145,60 @@
   height: 100%;
 }
 
+.erd-grid-bg {
+  cursor: grab;
+}
+
+.erd-grid-line {
+  stroke: var(--border-subtle);
+  stroke-width: 0.6;
+}
+
+.erd-edge {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  stroke-opacity: 0.45;
+  pointer-events: none;
+}
+
+.erd-edge-marker {
+  stroke: var(--text-muted);
+}
+
 .erd-table-rect {
-  fill: #fefce8;
-  stroke: #ca8a04;
+  fill: color-mix(in srgb, var(--bg-surface) 88%, var(--accent) 12%);
+  stroke: color-mix(in srgb, var(--border) 70%, var(--accent) 30%);
   stroke-width: 1;
 }
 
 .erd-table-name {
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
-  fill: var(--text-primary, #1e293b);
+  fill: var(--text-primary);
+  font-family: var(--font-sans, inherit);
 }
 
 .erd-col-name {
-  font-size: 14px;
-  fill: var(--text-primary, #334155);
+  font-size: 11px;
+  fill: var(--text-primary);
+  font-family: var(--font-mono, monospace);
 }
 
 .erd-col-type {
-  font-size: 13px;
-  fill: var(--text-secondary, #64748b);
+  font-size: 10px;
+  fill: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  max-width: 90px;
 }
 
 .erd-key-pk {
-  fill: #3b82f6;
+  fill: var(--accent);
 }
 
 .erd-key-fk {
-  fill: #eab308;
+  fill: var(--warning);
+}
+
+.erd-table-dimmed {
+  pointer-events: auto;
 }

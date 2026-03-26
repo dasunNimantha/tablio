@@ -1,166 +1,253 @@
-.backup-restore-dialog {
-  width: 520px;
-  max-width: 90vw;
+.br-dialog.dialog {
+  width: 500px;
+  max-width: 92vw;
+  overflow: visible;
 }
 
-.backup-restore-dialog > .dialog-header {
-  border-bottom: none;
-  padding-bottom: 12px;
+.br-dialog .dialog-body {
+  overflow: visible;
 }
 
-/* ── Segmented tab switcher ────────────────────────── */
+.br-footer {
+  gap: 10px;
+  justify-content: flex-end !important;
+}
 
-.backup-tabs {
+/* ── Compact operation tabs ───────────────────────────── */
+.br-tabs {
   display: flex;
-  background: var(--bg-tertiary);
-  border-radius: var(--radius-md);
-  padding: 3px;
-  margin: 0 28px 4px;
-  gap: 2px;
+  gap: 4px;
 }
 
-.backup-tab {
+.br-tab {
   flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 7px 16px;
-  background: none;
-  border: none;
-  border-radius: var(--radius-sm);
-  box-shadow: none;
-  color: var(--text-muted);
-  font-size: 13px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 10px;
+  gap: 5px;
+  font-size: 12px;
   font-weight: 500;
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s, box-shadow 0.15s;
-  outline: none;
-  height: auto;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  justify-content: center;
+  border-radius: var(--radius-md);
 }
 
-.backup-tab:hover {
+.br-tab:hover {
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
   color: var(--text-primary);
 }
 
-.backup-tab.active {
-  background: var(--accent);
-  color: var(--text-inverse);
-  box-shadow: var(--shadow-sm);
+.br-tab--active {
+  background: var(--accent-muted);
+  border-color: var(--accent);
+  color: var(--text-primary);
 }
 
-/* ── Form layout ───────────────────────────────────── */
+.br-tab--active svg {
+  color: var(--accent);
+}
 
-.backup-form {
+.br-dialog .br-tab:focus,
+.br-dialog .br-tab:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.br-dialog .br-tab:focus-visible {
+  border-color: var(--border);
+}
+
+/* ── Path row (input | browse) ───────────────────────── */
+.br-path-row {
   display: flex;
-  flex-direction: column;
-  gap: 20px;
+  align-items: stretch;
+  gap: 0;
 }
 
-.backup-section-label {
+.br-path-row input {
+  flex: 1;
+  min-height: 38px;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right: none;
+}
+
+/* Single-pixel divider between path and browse (no extra padded cell) */
+.br-path-sep {
+  flex: 0 0 1px;
+  width: 1px;
+  min-width: 1px;
+  align-self: stretch;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: var(--border);
+  box-sizing: border-box;
+}
+
+/* No accent ring on path field (overrides global + ConnectionDialog .form-group input:focus) */
+.br-dialog .form-group .br-path-row input:focus,
+.br-dialog .form-group .br-path-row input:focus-visible {
+  outline: none;
+  box-shadow: none;
+  border-color: var(--border);
+  background-color: var(--bg-tertiary);
+}
+
+.br-dialog .br-browse-btn:focus,
+.br-dialog .br-browse-btn:focus-visible {
+  outline: none;
+  box-shadow: none;
+  border-color: var(--border);
+}
+
+.br-browse-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  min-width: 36px;
+  min-height: 38px;
+  align-self: stretch;
+  border: 1px solid var(--border);
+  border-left: none;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.br-browse-btn:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+/* ── Format + Content side by side (backup tab) ──────── */
+.br-two-col-labels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.br-two-col-labels label {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin-bottom: -10px;
+  letter-spacing: 0.05em;
 }
 
-.backup-db-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  color: var(--text-secondary);
-  font-size: 14px;
-  font-family: var(--font-mono);
-}
-
-.backup-db-badge svg {
-  color: var(--accent);
-  flex-shrink: 0;
-}
-
-.backup-input-disabled {
-  background: var(--bg-tertiary);
-  color: var(--text-muted);
-}
-
-/* ── Options row ───────────────────────────────────── */
-
-.backup-options-row {
-  display: flex;
-  gap: 20px;
-  align-items: flex-end;
-}
-
-.backup-options-row .form-group {
-  flex: 1;
-}
-
-.backup-checkboxes {
-  display: flex;
-  gap: 20px;
-}
-
-.backup-checkboxes .checkbox-label {
-  padding-top: 0;
-  font-size: 14px;
-  color: var(--text-secondary);
-}
-
-/* ── Action button ─────────────────────────────────── */
-
-.backup-action-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  height: 40px;
-  font-size: 14px;
-}
-
-/* ── Result banners ────────────────────────────────── */
-
-.backup-result-area {
-  margin-top: 4px;
-}
-
-.backup-result {
-  display: flex;
-  align-items: center;
+.br-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 10px;
-  padding: 12px 14px;
-  border-radius: var(--radius-md);
-  font-size: 13px;
-  line-height: 1.45;
+  align-items: start;
 }
 
-.backup-result.loading {
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
+/* ── Custom format dropdown (styled list — native <option> cannot be themed in WebView) ─ */
+.br-custom-select {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.br-custom-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: 38px;
+  padding: 0 10px 0 12px;
+  gap: 8px;
+  box-sizing: border-box;
   border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-sans, inherit);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease;
 }
 
-.backup-result.success {
-  background: rgba(61, 214, 140, 0.08);
-  color: var(--success);
-  border: 1px solid rgba(61, 214, 140, 0.18);
+.br-custom-select-trigger:hover:not(:disabled) {
+  background: var(--bg-hover);
 }
 
-.backup-result.error {
-  background: rgba(240, 100, 100, 0.08);
-  color: var(--error);
-  border: 1px solid rgba(240, 100, 100, 0.18);
+.br-custom-select-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
-/* ── Footer ────────────────────────────────────────── */
-
-.backup-restore-dialog > .dialog-footer {
-  border-top: none;
-  padding-top: 0;
+.br-dialog .br-custom-select-trigger:focus,
+.br-dialog .br-custom-select-trigger:focus-visible {
+  outline: none;
+  box-shadow: none;
+  border-color: var(--border);
 }
+
+.br-custom-select-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.br-custom-select-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.br-custom-select-chevron--open {
+  transform: rotate(180deg);
+}
+
+.br-custom-select-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 1100;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-dropdown);
+}
+
+.br-custom-select-option {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-sans, inherit);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.br-custom-select-option:hover {
+  background: var(--bg-hover);
+}
+
+.br-custom-select-option--active {
+  background: var(--accent-muted);
+  color: var(--accent);
+  font-weight: 500;
+}
+

@@ -202,11 +202,11 @@ textarea {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 0 var(--gutter);
-  height: 38px;
+  height: 36px;
   color: var(--text-primary);
   outline: none;
   transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
-  font-size: 15px;
+  font-size: 13px;
 }
 
 input:hover,
@@ -236,15 +236,15 @@ button {
   cursor: pointer;
   border: none;
   border-radius: var(--radius-md);
-  padding: 0 var(--gutter-lg);
-  height: 36px;
-  font-size: 15px;
+  padding: 0 var(--gutter);
+  height: 34px;
+  font-size: 13px;
   font-weight: 500;
   transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -292,9 +292,9 @@ button {
   background: transparent;
   color: var(--text-secondary);
   padding: 0 10px;
-  height: 32px;
+  height: 30px;
   border-radius: var(--radius-md);
-  font-size: 15px;
+  font-size: 13px;
 }
 
 .btn-ghost:hover {
@@ -311,8 +311,8 @@ button {
   background: transparent;
   color: var(--text-muted);
   padding: 0;
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   display: flex;
   align-items: center;
   justify-content: center;

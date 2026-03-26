@@ -1098,4 +1098,43 @@ mod tests {
     fn format_bytes_tb() {
         assert_eq!(format_bytes(Some(1099511627776)), "1.0 TB");
     }
+
+    #[test]
+    fn sql_fragment_safe_types() {
+        assert!(!sql_fragment_is_unsafe("integer"));
+        assert!(!sql_fragment_is_unsafe("varchar(255)"));
+        assert!(!sql_fragment_is_unsafe("decimal(10,2)"));
+        assert!(!sql_fragment_is_unsafe("boolean"));
+        assert!(!sql_fragment_is_unsafe("TEXT"));
+    }
+
+    #[test]
+    fn sql_fragment_safe_empty() {
+        assert!(!sql_fragment_is_unsafe(""));
+    }
+
+    #[test]
+    fn sql_fragment_unsafe_semicolon() {
+        assert!(sql_fragment_is_unsafe("int); DROP TABLE t; --"));
+    }
+
+    #[test]
+    fn sql_fragment_unsafe_single_quote() {
+        assert!(sql_fragment_is_unsafe("default 'x'"));
+    }
+
+    #[test]
+    fn sql_fragment_unsafe_line_comment() {
+        assert!(sql_fragment_is_unsafe("int --evil"));
+    }
+
+    #[test]
+    fn sql_fragment_unsafe_block_comment() {
+        assert!(sql_fragment_is_unsafe("int /* evil */"));
+    }
+
+    #[test]
+    fn sql_fragment_unsafe_block_comment_close() {
+        assert!(sql_fragment_is_unsafe("int */"));
+    }
 }

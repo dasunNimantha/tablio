@@ -1,6 +1,6 @@
 .create-table-dialog {
-  width: 740px;
-  max-width: 90vw;
+  width: 700px;
+  max-width: 92vw;
 }
 
 .create-table-columns {
@@ -13,13 +13,13 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 8px 12px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   color: var(--text-muted);
 }
 
@@ -27,7 +27,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -37,14 +37,14 @@
 
 .create-table-column-row input,
 .create-table-column-row select {
-  height: 34px;
-  font-size: 15px;
+  height: 32px;
+  font-size: 12px;
   font-family: var(--font-mono);
 }
 
 .create-table-column-row input[type="checkbox"] {
   height: auto;
-  width: 18px;
+  width: 16px;
   accent-color: var(--accent);
 }
 
@@ -52,9 +52,9 @@
   width: 100%;
   border-top: 1px solid var(--border);
   border-radius: 0;
-  height: 38px;
+  height: 34px;
   justify-content: center;
-  font-size: 15px;
+  font-size: 13px;
   color: var(--text-secondary);
 }
 
@@ -67,14 +67,14 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-tertiary);
-  padding: 16px;
+  padding: 12px 14px;
   overflow-x: auto;
 }
 
 .ddl-preview pre {
   font-family: var(--font-mono);
-  font-size: 15px;
+  font-size: 12px;
   color: var(--text-secondary);
   white-space: pre-wrap;
-  line-height: 1.7;
+  line-height: 1.6;
 }

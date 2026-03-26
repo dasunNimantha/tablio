@@ -556,11 +556,7 @@
 
 /* ── Drag handle ─────────────────────────── */
 
-.tree-root[draggable="true"] {
-  cursor: grab;
-}
-
-.tree-root[draggable="true"]:active {
-  cursor: grabbing;
+.tree-root.tree-root--dragging {
   opacity: 0.5;
+  cursor: grabbing;
 }

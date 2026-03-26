@@ -699,4 +699,206 @@ mod tests {
         assert_eq!(back.name, "max_connections");
         assert!(!back.pending_restart);
     }
+
+    #[test]
+    fn column_info_with_auto_generated() {
+        let col = ColumnInfo {
+            name: "id".into(),
+            data_type: "integer".into(),
+            is_nullable: false,
+            is_primary_key: true,
+            default_value: Some("nextval('seq')".into()),
+            ordinal_position: 1,
+            is_auto_generated: true,
+        };
+        let json = serde_json::to_string(&col).unwrap();
+        let back: ColumnInfo = serde_json::from_str(&json).unwrap();
+        assert!(back.is_auto_generated);
+        assert!(back.is_primary_key);
+        assert_eq!(back.ordinal_position, 1);
+    }
+
+    #[test]
+    fn column_info_not_auto_generated() {
+        let json = r#"{"name":"email","data_type":"varchar","is_nullable":true,"is_primary_key":false,"default_value":null,"ordinal_position":3,"is_auto_generated":false}"#;
+        let col: ColumnInfo = serde_json::from_str(json).unwrap();
+        assert!(!col.is_auto_generated);
+        assert!(col.is_nullable);
+        assert!(col.default_value.is_none());
+    }
+
+    #[test]
+    fn query_stats_request_round_trip() {
+        let req = QueryStatsRequest {
+            connection_id: "conn-123".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: QueryStatsRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.connection_id, "conn-123");
+    }
+
+    #[test]
+    fn query_stat_entry_round_trip() {
+        let entry = QueryStatEntry {
+            query: "SELECT * FROM users".into(),
+            queryid: Some(12345),
+            user: "admin".into(),
+            calls: 100,
+            total_exec_time_ms: 5000.0,
+            mean_exec_time_ms: 50.0,
+            min_exec_time_ms: 1.0,
+            max_exec_time_ms: 500.0,
+            rows: 10000,
+            shared_blks_hit: 900,
+            shared_blks_read: 100,
+            cache_hit_ratio: 0.9,
+            total_plan_time_ms: Some(200.0),
+            mean_plan_time_ms: Some(2.0),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: QueryStatEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.query, "SELECT * FROM users");
+        assert_eq!(back.queryid, Some(12345));
+        assert_eq!(back.calls, 100);
+        assert_eq!(back.total_plan_time_ms, Some(200.0));
+        assert_eq!(back.mean_plan_time_ms, Some(2.0));
+        assert_eq!(back.cache_hit_ratio, 0.9);
+    }
+
+    #[test]
+    fn query_stat_entry_optional_plan_times() {
+        let json = r#"{
+            "query": "SELECT 1", "queryid": null, "user": "u",
+            "calls": 1, "total_exec_time_ms": 0.1, "mean_exec_time_ms": 0.1,
+            "min_exec_time_ms": 0.1, "max_exec_time_ms": 0.1, "rows": 1,
+            "shared_blks_hit": 0, "shared_blks_read": 0, "cache_hit_ratio": 0.0,
+            "total_plan_time_ms": null, "mean_plan_time_ms": null
+        }"#;
+        let entry: QueryStatEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.queryid.is_none());
+        assert!(entry.total_plan_time_ms.is_none());
+        assert!(entry.mean_plan_time_ms.is_none());
+    }
+
+    #[test]
+    fn query_stats_response_with_entries() {
+        let resp = QueryStatsResponse {
+            available: true,
+            message: None,
+            entries: vec![QueryStatEntry {
+                query: "SELECT 1".into(),
+                queryid: Some(1),
+                user: "u".into(),
+                calls: 10,
+                total_exec_time_ms: 100.0,
+                mean_exec_time_ms: 10.0,
+                min_exec_time_ms: 1.0,
+                max_exec_time_ms: 50.0,
+                rows: 10,
+                shared_blks_hit: 5,
+                shared_blks_read: 5,
+                cache_hit_ratio: 0.5,
+                total_plan_time_ms: None,
+                mean_plan_time_ms: None,
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: QueryStatsResponse = serde_json::from_str(&json).unwrap();
+        assert!(back.available);
+        assert!(back.message.is_none());
+        assert_eq!(back.entries.len(), 1);
+        assert_eq!(back.entries[0].calls, 10);
+    }
+
+    #[test]
+    fn dump_restore_request_round_trip() {
+        let req = DumpRestoreRequest {
+            source_connection_id: "src-conn".into(),
+            source_database: "src_db".into(),
+            target_connection_id: "tgt-conn".into(),
+            target_database: "tgt_db".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: DumpRestoreRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.source_connection_id, "src-conn");
+        assert_eq!(back.source_database, "src_db");
+        assert_eq!(back.target_connection_id, "tgt-conn");
+        assert_eq!(back.target_database, "tgt_db");
+    }
+
+    #[test]
+    fn backup_request_round_trip() {
+        let req = BackupRequest {
+            connection_id: "c1".into(),
+            database: "mydb".into(),
+            output_path: "/tmp/backup.sql".into(),
+            format: "plain".into(),
+            schema_only: true,
+            data_only: false,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: BackupRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.connection_id, "c1");
+        assert!(back.schema_only);
+        assert!(!back.data_only);
+        assert_eq!(back.format, "plain");
+    }
+
+    #[test]
+    fn restore_request_round_trip() {
+        let req = RestoreRequest {
+            connection_id: "c1".into(),
+            database: "mydb".into(),
+            input_path: "/tmp/backup.sql".into(),
+            format: "plain".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: RestoreRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.input_path, "/tmp/backup.sql");
+        assert_eq!(back.format, "plain");
+    }
+
+    #[test]
+    fn lock_info_optional_duration() {
+        let json = r#"{
+            "pid": 42, "locktype": "relation", "database": "db",
+            "relation": "t", "mode": "ShareLock", "granted": false,
+            "query": "SELECT 1", "user": "u", "state": "idle",
+            "duration_ms": null
+        }"#;
+        let lock: LockInfo = serde_json::from_str(json).unwrap();
+        assert!(!lock.granted);
+        assert!(lock.duration_ms.is_none());
+        assert_eq!(lock.pid, 42);
+    }
+
+    #[test]
+    fn server_config_entry_optional_unit() {
+        let json = r#"{
+            "name": "log_statement", "setting": "none", "unit": null,
+            "category": "Reporting", "description": "Sets logging",
+            "context": "superuser", "source": "default",
+            "pending_restart": false
+        }"#;
+        let entry: ServerConfigEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.unit.is_none());
+        assert_eq!(entry.setting, "none");
+    }
+
+    #[test]
+    fn server_config_entry_pending_restart() {
+        let entry = ServerConfigEntry {
+            name: "shared_buffers".into(),
+            setting: "128MB".into(),
+            unit: Some("8kB".into()),
+            category: "Resource Usage".into(),
+            description: "Sets shared memory buffers".into(),
+            context: "postmaster".into(),
+            source: "configuration file".into(),
+            pending_restart: true,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: ServerConfigEntry = serde_json::from_str(&json).unwrap();
+        assert!(back.pending_restart);
+    }
 }

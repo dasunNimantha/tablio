@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo, memo } from "react";
 import { createPortal } from "react-dom";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
@@ -57,7 +57,7 @@ interface ObjectTreeProps {
   onDumpRestore?: (connectionId: string, database: string) => void;
 }
 
-export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImportData, onBackupRestore, onDumpRestore }: ObjectTreeProps) {
+export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImportData, onBackupRestore, onDumpRestore }: ObjectTreeProps) {
   const { connections, activeConnections, connectTo, disconnectFrom, removeConnection, updateConnection } = useConnectionStore(useShallow((s) => ({
     connections: s.connections,
     activeConnections: s.activeConnections,
@@ -1085,7 +1085,7 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
     return (
       <div
         key={conn.id}
-        className="tree-root"
+        className={`tree-root${draggingConnId === conn.id ? " tree-root--dragging" : ""}`}
         draggable
         onDragStart={(e) => {
           e.dataTransfer.setData("text/connection-id", conn.id);
@@ -1452,4 +1452,4 @@ export function ObjectTree({ onAddConnection, onCreateTable, onAlterTable, onImp
       )}
     </>
   );
-}
+});

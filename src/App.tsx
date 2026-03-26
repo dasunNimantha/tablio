@@ -80,7 +80,7 @@ function ResourceMonitor() {
 
 export default function App() {
   const loadConnections = useConnectionStore((s) => s.loadConnections);
-  const tabs = useTabStore((s) => s.tabs);
+  const hasTabs = useTabStore((s) => s.tabs.length > 0);
   const [showConnDialog, setShowConnDialog] = useState(false);
   const [createTableTarget, setCreateTableTarget] = useState<CreateTableTarget | null>(null);
   const [alterTableTarget, setAlterTableTarget] = useState<AlterTableTarget | null>(null);
@@ -213,31 +213,48 @@ export default function App() {
     };
   }, [applyZoom]);
 
+  const onAddConnection = useCallback(() => setShowConnDialog(true), []);
+  const onCreateTable = useCallback(
+    (connectionId: string, connectionColor: string, database: string, schema: string) =>
+      setCreateTableTarget({ connectionId, connectionColor, database, schema }),
+    [],
+  );
+  const onAlterTable = useCallback(
+    (connectionId: string, connectionColor: string, database: string, schema: string, tableName: string) =>
+      setAlterTableTarget({ connectionId, connectionColor, database, schema, tableName }),
+    [],
+  );
+  const onImportData = useCallback(
+    (connectionId: string, connectionColor: string, database: string, schema: string, tableName: string) =>
+      setImportTarget({ connectionId, connectionColor, database, schema, tableName }),
+    [],
+  );
+  const onBackupRestore = useCallback(
+    (connectionId: string, _connectionColor: string, database: string) =>
+      setBackupTarget({ connectionId, database }),
+    [],
+  );
+  const onDumpRestore = useCallback(
+    (connectionId: string, database: string) =>
+      setDumpRestoreTarget({ connectionId, database }),
+    [],
+  );
+
   return (
     <div className="app-layout">
       <div ref={sidebarElRef} className="sidebar" style={{ width: sidebarWidth, minWidth: sidebarWidth }}>
         <ObjectTree
-          onAddConnection={() => setShowConnDialog(true)}
-          onCreateTable={(connectionId, connectionColor, database, schema) =>
-            setCreateTableTarget({ connectionId, connectionColor, database, schema })
-          }
-          onAlterTable={(connectionId, connectionColor, database, schema, tableName) =>
-            setAlterTableTarget({ connectionId, connectionColor, database, schema, tableName })
-          }
-          onImportData={(connectionId, connectionColor, database, schema, tableName) =>
-            setImportTarget({ connectionId, connectionColor, database, schema, tableName })
-          }
-          onBackupRestore={(connectionId, _connectionColor, database) =>
-            setBackupTarget({ connectionId, database })
-          }
-          onDumpRestore={(connectionId, database) =>
-            setDumpRestoreTarget({ connectionId, database })
-          }
+          onAddConnection={onAddConnection}
+          onCreateTable={onCreateTable}
+          onAlterTable={onAlterTable}
+          onImportData={onImportData}
+          onBackupRestore={onBackupRestore}
+          onDumpRestore={onDumpRestore}
         />
       </div>
       <div className="sidebar-resize-handle" onMouseDown={handleResizeStart} />
       <div className="main-content">
-        {tabs.length > 0 ? (
+        {hasTabs ? (
           <>
             <TabBar />
             <TabContent />

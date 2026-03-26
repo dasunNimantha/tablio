@@ -188,21 +188,13 @@
 }
 
 .role-form {
-  width: 460px;
-}
-
-.role-form .form-group label {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  width: 440px;
 }
 
 .role-form .form-checkboxes {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px 24px;
+  gap: 12px 20px;
 }
 
 .role-form .form-checkboxes .checkbox-label {
@@ -210,11 +202,12 @@
 }
 
 .role-form-error {
-  padding: 12px 16px;
-  background: rgba(240, 100, 100, 0.08);
+  padding: 10px 14px;
+  background: rgba(240, 100, 100, 0.06);
   border: 1px solid rgba(240, 100, 100, 0.18);
   border-radius: var(--radius-md);
   color: var(--error);
+  font-size: 13px;
   font-size: 15px;
   font-family: var(--font-mono);
 }
