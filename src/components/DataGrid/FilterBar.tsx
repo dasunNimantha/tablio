@@ -101,6 +101,7 @@ export function FilterBar({ columns, onApply, onClose }: Props) {
             />
             {!NO_VALUE_OPS.includes(cond.operator) && (
               <input
+                className="filter-value-input"
                 placeholder="Value..."
                 value={cond.value}
                 onChange={(e) =>

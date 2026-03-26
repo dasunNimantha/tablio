@@ -29,7 +29,7 @@
   min-width: 90px;
 }
 
-.filter-condition input {
+.filter-value-input {
   height: 28px;
   font-size: 15px;
   padding: 0 10px;

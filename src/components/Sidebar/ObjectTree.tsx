@@ -953,16 +953,13 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           ref={(el) => {
             if (!el) return;
             const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
-            const rect = el.getBoundingClientRect();
-            const vh = window.innerHeight / z;
-            const vw = window.innerWidth / z;
-            const menuH = rect.height / z;
-            const menuW = rect.width / z;
-            if (contextMenu.y + menuH > vh) {
-              el.style.top = `${Math.max(4, contextMenu.y - menuH)}px`;
+            const cssVh = window.innerHeight / z;
+            const cssVw = window.innerWidth / z;
+            if (contextMenu.y + el.offsetHeight > cssVh) {
+              el.style.top = `${Math.max(4, cssVh - el.offsetHeight)}px`;
             }
-            if (contextMenu.x + menuW > vw) {
-              el.style.left = `${Math.max(4, contextMenu.x - menuW)}px`;
+            if (contextMenu.x + el.offsetWidth > cssVw) {
+              el.style.left = `${Math.max(4, cssVw - el.offsetWidth)}px`;
             }
           }}
         >
@@ -1380,13 +1377,14 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                   ref={(el) => {
                     if (!el) return;
                     const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
-                    const rect = el.getBoundingClientRect();
-                    const vh = window.innerHeight / z;
-                    const vw = window.innerWidth / z;
-                    const menuH = rect.height / z;
-                    const menuW = rect.width / z;
-                    if (groupContextMenu.y + menuH > vh) el.style.top = `${Math.max(4, groupContextMenu.y - menuH)}px`;
-                    if (groupContextMenu.x + menuW > vw) el.style.left = `${Math.max(4, groupContextMenu.x - menuW)}px`;
+                    const cssVh = window.innerHeight / z;
+                    const cssVw = window.innerWidth / z;
+                    if (groupContextMenu.y + el.offsetHeight > cssVh) {
+                      el.style.top = `${Math.max(4, cssVh - el.offsetHeight)}px`;
+                    }
+                    if (groupContextMenu.x + el.offsetWidth > cssVw) {
+                      el.style.left = `${Math.max(4, cssVw - el.offsetWidth)}px`;
+                    }
                   }}
                 >
                   <button onClick={() => {

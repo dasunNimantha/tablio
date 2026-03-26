@@ -48,12 +48,23 @@
   z-index: 300;
   min-width: 100%;
   max-height: 240px;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-dropdown);
+  overflow: hidden;
+}
+
+.cs-options {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .cs-option {
@@ -83,11 +94,12 @@
 }
 
 .cs-search-wrapper {
-  padding: 4px 4px 2px;
-  position: sticky;
-  top: 0;
+  width: 100%;
+  padding: 6px 6px 4px;
+  flex-shrink: 0;
   background: var(--bg-surface);
-  z-index: 1;
+  border-bottom: 1px solid var(--border-subtle);
+  box-sizing: border-box;
 }
 
 .cs-search {

@@ -348,7 +348,7 @@ export function BackupRestoreDialog({
                     disabled={loading}
                     title="Browse..."
                   >
-                    <FolderOpen size={14} />
+                    <FolderOpen size={18} />
                   </button>
                 </div>
               </div>
@@ -412,7 +412,7 @@ export function BackupRestoreDialog({
                     disabled={loading}
                     title="Browse..."
                   >
-                    <FolderOpen size={14} />
+                    <FolderOpen size={18} />
                   </button>
                 </div>
               </div>

@@ -80,18 +80,20 @@ export function CustomSelect({ value, options, onChange, className, searchable, 
               />
             </div>
           )}
-          {filtered.map((opt) => (
-            <div
-              key={opt.value}
-              className={`cs-option ${opt.value === value ? "cs-option-selected" : ""}`}
-              onClick={() => { onChange(opt.value); setOpen(false); }}
-            >
-              {opt.label}
-            </div>
-          ))}
-          {searchable && filtered.length === 0 && (
-            <div className="cs-no-results">No matches</div>
-          )}
+          <div className="cs-options">
+            {filtered.map((opt) => (
+              <div
+                key={opt.value}
+                className={`cs-option ${opt.value === value ? "cs-option-selected" : ""}`}
+                onClick={() => { onChange(opt.value); setOpen(false); }}
+              >
+                {opt.label}
+              </div>
+            ))}
+            {searchable && filtered.length === 0 && (
+              <div className="cs-no-results">No matches</div>
+            )}
+          </div>
         </div>
       )}
     </div>

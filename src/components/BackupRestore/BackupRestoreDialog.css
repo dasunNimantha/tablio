@@ -16,16 +16,16 @@
 /* ── Compact operation tabs ───────────────────────────── */
 .br-tabs {
   display: flex;
-  gap: 4px;
+  gap: 6px;
 }
 
 .br-tab {
   flex: 1;
-  height: 32px;
-  min-height: 32px;
-  padding: 0 10px;
-  gap: 5px;
-  font-size: 12px;
+  height: 38px;
+  min-height: 38px;
+  padding: 0 14px;
+  gap: 7px;
+  font-size: 13px;
   font-weight: 500;
   border: 1px solid var(--border);
   background: var(--bg-tertiary);
@@ -108,8 +108,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  min-width: 36px;
+  width: 40px;
+  min-width: 40px;
   min-height: 38px;
   align-self: stretch;
   border: 1px solid var(--border);
@@ -220,6 +220,9 @@
   max-height: 240px;
   overflow-y: auto;
   padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);

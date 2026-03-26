@@ -231,6 +231,15 @@ export function ColumnOrganizer({ columns, settings, onChange }: Props) {
     onChange({ order: [], hidden: new Set() });
   };
 
+  const handleHideAll = () => {
+    const allNonPk = columns.filter((c) => !c.is_primary_key).map((c) => c.name);
+    onChange({ ...settings, hidden: new Set(allNonPk) });
+  };
+
+  const allNonPkHidden = columns
+    .filter((c) => !c.is_primary_key)
+    .every((c) => settings.hidden.has(c.name));
+
   const nonPkNames = new Set(columns.filter((c) => !c.is_primary_key).map((c) => c.name));
   const hiddenCount = Array.from(settings.hidden).filter((n) => nonPkNames.has(n)).length;
 
@@ -247,13 +256,22 @@ export function ColumnOrganizer({ columns, settings, onChange }: Props) {
         <div className="col-organizer-dropdown">
           <div className="col-organizer-header">
             <span>Columns</span>
-            <button
-              className="btn-icon col-organizer-reset"
-              onClick={handleReset}
-              title="Reset to default"
-            >
-              <RotateCcw size={12} />
-            </button>
+            <div className="col-organizer-header-actions">
+              <button
+                className="col-organizer-hide-all"
+                onClick={allNonPkHidden ? handleReset : handleHideAll}
+                title={allNonPkHidden ? "Show all columns" : "Hide all except primary key"}
+              >
+                {allNonPkHidden ? "Show All" : "Hide All"}
+              </button>
+              <button
+                className="btn-icon col-organizer-reset"
+                onClick={handleReset}
+                title="Reset to default"
+              >
+                <RotateCcw size={12} />
+              </button>
+            </div>
           </div>
           <div className="col-organizer-list" ref={listRef} onDragOver={handleListDragOver}>
             {pkColumns.map((col) => (

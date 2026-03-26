@@ -32,6 +32,30 @@
   letter-spacing: 0.04em;
 }
 
+.col-organizer-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.col-organizer-hide-all {
+  height: auto;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.col-organizer-hide-all:hover {
+  color: var(--accent);
+}
+
 .col-organizer-reset {
   width: 24px;
   height: 24px;

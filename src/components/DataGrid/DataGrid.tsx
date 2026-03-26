@@ -144,6 +144,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   const [saving, setSaving] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
+  const [filterLoading, setFilterLoading] = useState(false);
 
   const [changes, setChanges] = useState<PendingChanges>({
     updates: new Map(),
@@ -225,7 +226,10 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       if (gen !== fetchGenRef.current) return;
       setError(String(e));
     } finally {
-      if (gen === fetchGenRef.current) setLoading(false);
+      if (gen === fetchGenRef.current) {
+        setLoading(false);
+        setFilterLoading(false);
+      }
     }
   }, [connectionId, database, schema, table, page, sort, activeFilter]);
 
@@ -557,6 +561,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   };
 
   const handleFilterApply = (filter: string | null) => {
+    setFilterLoading(true);
     setActiveFilter(filter);
     setPage(0);
   };
@@ -810,6 +815,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           onGridReady={onGridReady}
           onCellContextMenu={onCellContextMenu}
           onSortChanged={onSortChanged}
+          loading={filterLoading}
           preventDefaultOnContextMenu={true}
           animateRows={false}
           suppressCellFocus={false}
@@ -872,16 +878,13 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           ref={(el) => {
             if (!el) return;
             const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
-            const rect = el.getBoundingClientRect();
-            const vh = window.innerHeight / z;
-            const vw = window.innerWidth / z;
-            const menuH = rect.height / z;
-            const menuW = rect.width / z;
-            if (rowContextMenu.y + menuH > vh) {
-              el.style.top = `${Math.max(4, rowContextMenu.y - menuH)}px`;
+            const cssVh = window.innerHeight / z;
+            const cssVw = window.innerWidth / z;
+            if (rowContextMenu.y + el.offsetHeight > cssVh) {
+              el.style.top = `${Math.max(4, cssVh - el.offsetHeight)}px`;
             }
-            if (rowContextMenu.x + menuW > vw) {
-              el.style.left = `${Math.max(4, rowContextMenu.x - menuW)}px`;
+            if (rowContextMenu.x + el.offsetWidth > cssVw) {
+              el.style.left = `${Math.max(4, cssVw - el.offsetWidth)}px`;
             }
           }}
         >
@@ -948,15 +951,15 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
 function parseCellValue(raw: string, dataType: string): unknown {
   const t = dataType.toLowerCase();
   if (t.includes("int") || t === "serial" || t === "bigserial" || t === "smallserial") {
-    const n = parseInt(raw, 10);
+    const n = parseInt(raw.trim(), 10);
     return isNaN(n) ? raw : n;
   }
   if (t.includes("float") || t.includes("double") || t.includes("decimal") || t.includes("numeric") || t === "real") {
-    const n = parseFloat(raw);
+    const n = parseFloat(raw.trim());
     return isNaN(n) ? raw : n;
   }
   if (t === "boolean" || t === "bool") {
-    return raw.toLowerCase() === "true" || raw === "1";
+    return raw.trim().toLowerCase() === "true" || raw.trim() === "1";
   }
   return raw;
 }
