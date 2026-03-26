@@ -1571,4 +1571,135 @@ mod tests {
     fn json_to_sql_zero() {
         assert_eq!(json_to_sql_literal(&serde_json::Value::Number(0i64.into())), "0");
     }
+
+    fn format_column_data_type(
+        raw_type: &str,
+        char_max_len: Option<i32>,
+        num_precision: Option<i32>,
+        num_scale: Option<i32>,
+    ) -> String {
+        if let Some(len) = char_max_len {
+            format!("{}({})", raw_type, len)
+        } else if raw_type == "numeric" || raw_type == "decimal" {
+            match (num_precision, num_scale) {
+                (Some(p), Some(s)) if s > 0 => format!("{}({},{})", raw_type, p, s),
+                (Some(p), _) => format!("{}({})", raw_type, p),
+                _ => raw_type.to_string(),
+            }
+        } else {
+            raw_type.to_string()
+        }
+    }
+
+    #[test]
+    fn column_type_varchar_with_length() {
+        assert_eq!(
+            format_column_data_type("character varying", Some(50), None, None),
+            "character varying(50)"
+        );
+    }
+
+    #[test]
+    fn column_type_varchar_short() {
+        assert_eq!(
+            format_column_data_type("character varying", Some(5), None, None),
+            "character varying(5)"
+        );
+    }
+
+    #[test]
+    fn column_type_char_with_length() {
+        assert_eq!(
+            format_column_data_type("character", Some(1), None, None),
+            "character(1)"
+        );
+    }
+
+    #[test]
+    fn column_type_no_length() {
+        assert_eq!(
+            format_column_data_type("text", None, None, None),
+            "text"
+        );
+    }
+
+    #[test]
+    fn column_type_integer_no_modifiers() {
+        assert_eq!(
+            format_column_data_type("integer", None, None, None),
+            "integer"
+        );
+    }
+
+    #[test]
+    fn column_type_numeric_precision_and_scale() {
+        assert_eq!(
+            format_column_data_type("numeric", None, Some(10), Some(2)),
+            "numeric(10,2)"
+        );
+    }
+
+    #[test]
+    fn column_type_numeric_precision_only() {
+        assert_eq!(
+            format_column_data_type("numeric", None, Some(10), Some(0)),
+            "numeric(10)"
+        );
+    }
+
+    #[test]
+    fn column_type_numeric_precision_no_scale() {
+        assert_eq!(
+            format_column_data_type("numeric", None, Some(18), None),
+            "numeric(18)"
+        );
+    }
+
+    #[test]
+    fn column_type_numeric_no_modifiers() {
+        assert_eq!(
+            format_column_data_type("numeric", None, None, None),
+            "numeric"
+        );
+    }
+
+    #[test]
+    fn column_type_decimal_with_precision_scale() {
+        assert_eq!(
+            format_column_data_type("decimal", None, Some(8), Some(4)),
+            "decimal(8,4)"
+        );
+    }
+
+    #[test]
+    fn column_type_char_max_len_takes_precedence() {
+        assert_eq!(
+            format_column_data_type("numeric", Some(255), Some(10), Some(2)),
+            "numeric(255)"
+        );
+    }
+
+    #[test]
+    fn column_type_boolean_unchanged() {
+        assert_eq!(
+            format_column_data_type("boolean", None, None, None),
+            "boolean"
+        );
+    }
+
+    #[test]
+    fn column_type_timestamp_unchanged() {
+        assert_eq!(
+            format_column_data_type("timestamp without time zone", None, None, None),
+            "timestamp without time zone"
+        );
+    }
+
+    #[test]
+    fn column_type_uuid_unchanged() {
+        assert_eq!(
+            format_column_data_type("uuid", None, None, None),
+            "uuid"
+        );
+    }
 }
