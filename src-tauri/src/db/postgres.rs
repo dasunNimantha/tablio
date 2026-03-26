@@ -58,11 +58,22 @@ fn pg_row_to_json_values(row: &sqlx::postgres::PgRow, col_count: usize) -> Vec<s
                 .and_then(|v| serde_json::Number::from_f64(v as f64))
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
-            "FLOAT8" | "NUMERIC" => row
+            "FLOAT8" => row
                 .try_get::<f64, _>(i)
                 .ok()
                 .and_then(serde_json::Number::from_f64)
                 .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            "NUMERIC" => row
+                .try_get::<rust_decimal::Decimal, _>(i)
+                .ok()
+                .map(|d| {
+                    use rust_decimal::prelude::ToPrimitive;
+                    d.to_f64()
+                        .and_then(serde_json::Number::from_f64)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::String(d.to_string()))
+                })
                 .unwrap_or(serde_json::Value::Null),
             "JSON" | "JSONB" => row
                 .try_get::<serde_json::Value, _>(i)
@@ -1075,7 +1086,7 @@ impl DatabaseDriver for PostgresDriver {
         .fetch_optional(&self.pool)
         .await?;
 
-        let ts_row = sqlx::query("SELECT EXTRACT(EPOCH FROM now()) * 1000 AS ts")
+        let ts_row = sqlx::query("SELECT CAST(EXTRACT(EPOCH FROM now()) * 1000 AS FLOAT8) AS ts")
             .fetch_one(&self.pool)
             .await?;
 

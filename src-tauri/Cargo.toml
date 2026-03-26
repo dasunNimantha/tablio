@@ -24,7 +24,9 @@ sqlx = { version = "0.8", features = [
     "json",
     "chrono",
     "uuid",
+    "rust_decimal",
 ] }
+rust_decimal = "1"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1"

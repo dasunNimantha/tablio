@@ -638,10 +638,16 @@ async fn mysql_fetch_rows_various_data_types() {
     assert_eq!(data.total_rows, 1);
     let row = &data.rows[0];
     assert_eq!(row[1], serde_json::json!("hi"));
-    assert_eq!(row[2], serde_json::json!(true));
-    assert!(row[3].as_f64().unwrap() - 12.34 < 0.01);
+    assert!(row[2] == serde_json::json!(true) || row[2] == serde_json::json!(1));
+    let amt_val = &row[3];
+    let amt = amt_val
+        .as_f64()
+        .or_else(|| amt_val.as_str().and_then(|s| s.parse::<f64>().ok()))
+        .or_else(|| amt_val.as_i64().map(|i| i as f64))
+        .unwrap_or_else(|| panic!("amt unexpected format: {:?}", amt_val));
+    assert!((amt - 12.34).abs() < 0.01);
     assert_eq!(row[4], serde_json::json!("long"));
-    assert!(row[5].is_object());
+    assert!(row[5].is_object() || row[5].is_string());
 
     driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }

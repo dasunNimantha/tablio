@@ -50,17 +50,22 @@ fn mysql_row_to_json_values(
                 .ok()
                 .map(|v| serde_json::Value::Number(v.into()))
                 .unwrap_or(serde_json::Value::Null),
-            "FLOAT" => row
-                .try_get::<f32, _>(i)
-                .ok()
-                .and_then(|v| serde_json::Number::from_f64(v as f64))
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
-            "DOUBLE" | "DECIMAL" => row
+            "FLOAT" | "DOUBLE" => row
                 .try_get::<f64, _>(i)
                 .ok()
                 .and_then(serde_json::Number::from_f64)
                 .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            "DECIMAL" | "NEWDECIMAL" => row
+                .try_get::<rust_decimal::Decimal, _>(i)
+                .ok()
+                .map(|d| {
+                    use rust_decimal::prelude::ToPrimitive;
+                    d.to_f64()
+                        .and_then(serde_json::Number::from_f64)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::String(d.to_string()))
+                })
                 .unwrap_or(serde_json::Value::Null),
             "JSON" => row
                 .try_get::<serde_json::Value, _>(i)
@@ -151,12 +156,17 @@ impl DatabaseDriver for MysqlDriver {
     }
 
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
-        let rows = sqlx::query("SHOW DATABASES").fetch_all(&self.pool).await?;
+        let rows = sqlx::query(
+            "SELECT CAST(SCHEMA_NAME AS CHAR) AS SCHEMA_NAME \
+             FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME",
+        )
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows
             .iter()
             .map(|r| DatabaseInfo {
-                name: r.get::<String, _>(0),
+                name: r.get::<String, _>("SCHEMA_NAME"),
             })
             .collect())
     }
@@ -201,7 +211,7 @@ impl DatabaseDriver for MysqlDriver {
                    CAST(IS_NULLABLE AS CHAR) AS IS_NULLABLE, \
                    CAST(COLUMN_KEY AS CHAR) AS COLUMN_KEY, \
                    CAST(COLUMN_DEFAULT AS CHAR) AS COLUMN_DEFAULT, \
-                   ORDINAL_POSITION, \
+                   CAST(ORDINAL_POSITION AS SIGNED) AS ORDINAL_POSITION, \
                    CAST(EXTRA AS CHAR) AS EXTRA \
                    FROM information_schema.COLUMNS \
                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
@@ -445,7 +455,7 @@ impl DatabaseDriver for MysqlDriver {
                 is_select: true,
             })
         } else {
-            let result = sqlx::query(sql).execute(&self.pool).await?;
+            let result = sqlx::raw_sql(sql).execute(&self.pool).await?;
             let elapsed = start.elapsed().as_millis() as u64;
 
             Ok(QueryResult {
