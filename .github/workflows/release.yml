@@ -108,7 +108,7 @@ jobs:
 
       - name: Run MySQL integration tests
         env:
-          TEST_MYSQL_URL: "mysql://test:test@localhost:3306/testdb"
+          TEST_MYSQL_URL: "mysql://root:test@localhost:3306/testdb"
         run: cargo test --manifest-path src-tauri/Cargo.toml --test mysql_integration
 
   test-sqlite:

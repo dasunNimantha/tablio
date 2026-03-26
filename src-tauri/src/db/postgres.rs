@@ -840,7 +840,7 @@ impl DatabaseDriver for PostgresDriver {
         table: &str,
     ) -> Result<TableStats> {
         let sql = "SELECT c.relname AS table_name,
-                   COALESCE(s.n_live_tup, 0)::bigint AS row_count,
+                   GREATEST(c.reltuples, 0)::bigint AS row_count,
                    pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size,
                    pg_size_pretty(pg_indexes_size(c.oid)) AS index_size,
                    pg_size_pretty(pg_relation_size(c.oid)) AS data_size,
