@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src-tauri/icons/icon.png" width="128" height="128" alt="Tablio — Open-Source Database Client" />
+  <img src="assets/logo.png" width="128" height="128" alt="Tablio — Open-Source Database Client" />
 </p>
 
 <h1 align="center">Tablio</h1>
