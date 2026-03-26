@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import Editor from "@monaco-editor/react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Editor, { type BeforeMount, type Monaco } from "@monaco-editor/react";
 import { api } from "../../lib/tauri";
 import { Loader2, Copy, Check } from "lucide-react";
 import "./DDLViewer.css";
@@ -10,6 +10,10 @@ interface Props {
   schema: string;
   objectName: string;
   objectType: string;
+}
+
+function getCssVar(name: string, fallback: string) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
 export function DDLViewer({
@@ -23,6 +27,13 @@ export function DDLViewer({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [monacoTheme, setMonacoTheme] = useState<string>(() =>
+    document.documentElement.getAttribute("data-theme") === "light"
+      ? "dbstudio-light-0"
+      : "dbstudio-dark-0"
+  );
+  const monacoRef = useRef<Monaco | null>(null);
+  const themeVersionRef = useRef(0);
 
   useEffect(() => {
     let alive = true;
@@ -55,6 +66,75 @@ export function DDLViewer({
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
     };
   }, []);
+
+  const syncTheme = useCallback(() => {
+    const monaco = monacoRef.current;
+    if (!monaco) return;
+
+    const ver = ++themeVersionRef.current;
+    const bg = getCssVar("--bg-primary", "#1e1e1e");
+    const bgSurface = getCssVar("--bg-surface", "#252526");
+    const textPrimary = getCssVar("--text-primary", "#d4d4d4");
+    const textMuted = getCssVar("--text-muted", "#6e6e7c");
+    const accent = getCssVar("--accent", "#6398ff");
+    const isLight = document.documentElement.getAttribute("data-theme") === "light";
+
+    const colors = {
+      "editor.background": bg,
+      "editor.foreground": textPrimary,
+      "editorLineNumber.foreground": textMuted,
+      "editor.selectionBackground": accent + "33",
+      "editorWidget.background": bgSurface,
+      "editorWidget.border": bgSurface,
+    };
+
+    const darkName = `dbstudio-dark-${ver}`;
+    const lightName = `dbstudio-light-${ver}`;
+
+    monaco.editor.defineTheme(darkName, {
+      base: "vs-dark",
+      inherit: true,
+      rules: [
+        { token: "string.sql", foreground: "98c379" },
+        { token: "string", foreground: "98c379" },
+        { token: "keyword", foreground: "6daaef" },
+        { token: "number", foreground: "d19a66" },
+        { token: "comment", foreground: "6a737d", fontStyle: "italic" },
+        { token: "operator", foreground: "c8ccd4" },
+      ],
+      colors,
+    });
+
+    monaco.editor.defineTheme(lightName, {
+      base: "vs",
+      inherit: true,
+      rules: [
+        { token: "string.sql", foreground: "50a14f" },
+        { token: "string", foreground: "50a14f" },
+        { token: "keyword", foreground: "4078f2" },
+        { token: "number", foreground: "986801" },
+        { token: "comment", foreground: "a0a1a7", fontStyle: "italic" },
+        { token: "operator", foreground: "383a42" },
+      ],
+      colors,
+    });
+
+    setMonacoTheme(isLight ? lightName : darkName);
+  }, []);
+
+  useEffect(() => {
+    const observer = new MutationObserver(() => syncTheme());
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme", "style"],
+    });
+    return () => observer.disconnect();
+  }, [syncTheme]);
+
+  const handleEditorBeforeMount: BeforeMount = (monaco) => {
+    monacoRef.current = monaco;
+    syncTheme();
+  };
 
   const handleCopy = async () => {
     if (ddl) {
@@ -99,11 +179,12 @@ export function DDLViewer({
           height="100%"
           defaultLanguage="sql"
           value={ddl || ""}
-          theme="vs-dark"
+          beforeMount={handleEditorBeforeMount}
+          theme={monacoTheme}
           options={{
             readOnly: true,
             minimap: { enabled: false },
-            fontSize: 13,
+            fontSize: 15,
             fontFamily: "var(--font-mono)",
             lineNumbers: "on",
             scrollBeyondLastLine: false,

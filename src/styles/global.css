@@ -73,12 +73,12 @@
 :root {
   --bg-primary: #1e1e22;
   --bg-secondary: #212126;
-  --bg-tertiary: #1a1a1e;
-  --bg-surface: #28282e;
-  --bg-elevated: #303036;
+  --bg-tertiary: #25252b;
+  --bg-surface: #2a2a31;
+  --bg-elevated: #2c2c33;
   --bg-hover: rgba(255, 255, 255, 0.07);
   --bg-active: rgba(255, 255, 255, 0.12);
-  --bg-header: #2a2a30;
+  --bg-header: #242429;
   --bg-selected: rgba(99, 152, 255, 0.14);
 
   --text-primary: #e4e4e9;
@@ -86,8 +86,8 @@
   --text-muted: #6e6e7c;
   --text-inverse: #111114;
 
-  --border: rgba(255, 255, 255, 0.12);
-  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-subtle: rgba(255, 255, 255, 0.05);
   --border-focus: #6398ff;
 
   --accent: #6398ff;
@@ -219,8 +219,7 @@ input:focus,
 select:focus,
 textarea:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-  background: var(--accent-soft);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 input::placeholder {
@@ -499,8 +498,9 @@ select {
 }
 
 select option {
-  background: var(--bg-surface);
-  color: var(--text-primary);
+  background: #2a2a31;
+  color: #e0e0e8;
+  padding: 6px 8px;
 }
 
 @keyframes spin {

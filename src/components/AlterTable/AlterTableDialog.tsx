@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api, AlterTableOperation, ColumnInfo } from "../../lib/tauri";
-import { X, Plus, Loader2, Eye } from "lucide-react";
+import { X, Plus, Loader2, Eye, EyeOff } from "lucide-react";
 import "./AlterTableDialog.css";
 
 const PG_TYPES = [
@@ -199,11 +199,28 @@ export function AlterTableDialog({
     []
   );
   const [showPreview, setShowPreview] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
   const [editingCell, setEditingCell] = useState<{
     type: "existing";
     colName: string;
     field: "name" | "type" | "default";
   } | null>(null);
+
+  useEffect(() => {
+    if (showPreview) {
+      const frame = window.requestAnimationFrame(() => {
+        const dialog = dialogRef.current;
+        const preview = previewRef.current;
+        if (!dialog || !preview) return;
+        dialog.scrollTo({
+          top: Math.max(0, preview.offsetTop - 16),
+          behavior: "smooth",
+        });
+      });
+      return () => window.cancelAnimationFrame(frame);
+    }
+  }, [showPreview]);
 
   useEffect(() => {
     setTableNameLocal(tableName);
@@ -411,11 +428,27 @@ export function AlterTableDialog({
     pendingNewColumns.some((c) => c.name.trim()) ||
     tableNameLocal.trim() !== tableName;
 
+  const pendingAddCount = pendingNewColumns.filter((c) => c.name.trim()).length;
+  const pendingChangeCount =
+    operations.length + pendingAddCount + (tableNameLocal.trim() !== tableName ? 1 : 0);
+  const modifiedExistingCount = columns.filter((col) => {
+    const eff = effectiveState.get(col.name);
+    if (!eff) return false;
+    return (
+      isColumnDropped(col.name) ||
+      eff.name !== col.name ||
+      eff.type !== col.data_type ||
+      eff.nullable !== col.is_nullable ||
+      (eff.default ?? null) !== (col.default_value ?? null)
+    );
+  }).length;
+
   if (loading) {
     return (
       <div className="dialog-overlay" onClick={onClose}>
         <div
           className="dialog alter-table-dialog"
+          ref={dialogRef}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="dialog-header">
@@ -437,6 +470,7 @@ export function AlterTableDialog({
     <div className="dialog-overlay" onClick={onClose}>
       <div
         className="dialog alter-table-dialog"
+        ref={dialogRef}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="dialog-header">
@@ -447,6 +481,31 @@ export function AlterTableDialog({
         </div>
 
         <div className="dialog-body">
+          <div className="alter-table-summary">
+            <div className="alter-table-summary-main">
+              <div className="alter-table-summary-title">Review changes before applying</div>
+              <div className="alter-table-summary-path">
+                {database}.{schema}.{tableName}
+              </div>
+              <div className="alter-table-summary-note">
+                Double-click an existing column name, type, or default to edit it inline.
+              </div>
+            </div>
+            <div className="alter-table-summary-badges">
+              <span className="alter-table-badge">{columns.length} existing columns</span>
+              <span className="alter-table-badge">
+                {modifiedExistingCount} modified
+              </span>
+              <span
+                className={`alter-table-badge ${
+                  pendingChangeCount > 0 ? "alter-table-badge--pending" : ""
+                }`}
+              >
+                {pendingChangeCount} pending {pendingChangeCount === 1 ? "change" : "changes"}
+              </span>
+            </div>
+          </div>
+
           <div className="form-row">
             <div className="form-group flex-1">
               <label>Schema</label>
@@ -463,7 +522,12 @@ export function AlterTableDialog({
           </div>
 
           <div className="form-group">
-            <label>Columns</label>
+            <div className="alter-table-section-header">
+              <label>Columns</label>
+              <button className="btn-ghost alter-table-add-btn" onClick={addColumn}>
+                <Plus size={14} /> Add Column
+              </button>
+            </div>
             <div className="alter-table-columns">
               <div className="alter-table-columns-header">
                 <span style={{ flex: 2 }}>Name</span>
@@ -474,169 +538,19 @@ export function AlterTableDialog({
                 <span style={{ width: 32 }}></span>
               </div>
 
-              {columns.map((col) => {
-                const dropped = isColumnDropped(col.name);
-                const eff = effectiveState.get(col.name);
-                if (!eff) return null;
-
-                const isEditingName =
-                  editingCell?.type === "existing" &&
-                  editingCell.colName === col.name &&
-                  editingCell.field === "name";
-                const isEditingType =
-                  editingCell?.type === "existing" &&
-                  editingCell.colName === col.name &&
-                  editingCell.field === "type";
-                const isEditingDefault =
-                  editingCell?.type === "existing" &&
-                  editingCell.colName === col.name &&
-                  editingCell.field === "default";
-
-                return (
-                  <div
-                    key={col.name}
-                    className={`alter-table-column-row ${dropped ? "dropped" : ""}`}
-                  >
-                    <div style={{ flex: 2 }} className="alter-table-cell">
-                      {isEditingName ? (
-                        <input
-                          autoFocus
-                          defaultValue={eff.name}
-                          onBlur={(e) => {
-                            handleRenameColumn(col.name, e.target.value);
-                            setEditingCell(null);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              (e.target as HTMLInputElement).blur();
-                            } else if (e.key === "Escape") {
-                              setEditingCell(null);
-                            }
-                          }}
-                        />
-                      ) : (
-                        <span
-                          className="editable-cell"
-                          onDoubleClick={() =>
-                            setEditingCell({
-                              type: "existing",
-                              colName: col.name,
-                              field: "name",
-                            })
-                          }
-                        >
-                          {eff.name}
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ flex: 2 }} className="alter-table-cell">
-                      {isEditingType ? (
-                        <select
-                          autoFocus
-                          defaultValue={eff.type}
-                          onBlur={(e) => {
-                            handleChangeType(col.name, e.target.value);
-                            setEditingCell(null);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Escape") setEditingCell(null);
-                          }}
-                        >
-                          {PG_TYPES.map((t) => (
-                            <option key={t} value={t}>
-                              {t}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span
-                          className="editable-cell"
-                          onDoubleClick={() =>
-                            setEditingCell({
-                              type: "existing",
-                              colName: col.name,
-                              field: "type",
-                            })
-                          }
-                        >
-                          {eff.type}
-                        </span>
-                      )}
-                    </div>
-                    <div
-                      style={{ width: 60, display: "flex", justifyContent: "center" }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={eff.nullable}
-                        onChange={(e) =>
-                          handleSetNullable(col.name, e.target.checked)
-                        }
-                        disabled={dropped}
-                      />
-                    </div>
-                    <div
-                      style={{
-                        width: 40,
-                        display: "flex",
-                        justifyContent: "center",
-                        color: "var(--text-muted)",
-                      }}
-                    >
-                      {col.is_primary_key ? "✓" : ""}
-                    </div>
-                    <div style={{ flex: 1 }} className="alter-table-cell">
-                      {isEditingDefault ? (
-                        <input
-                          autoFocus
-                          defaultValue={eff.default ?? ""}
-                          placeholder="null"
-                          onBlur={(e) => {
-                            const v = e.target.value.trim();
-                            handleSetDefault(col.name, v || null);
-                            setEditingCell(null);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                            else if (e.key === "Escape") setEditingCell(null);
-                          }}
-                        />
-                      ) : (
-                        <span
-                          className="editable-cell"
-                          onDoubleClick={() =>
-                            setEditingCell({
-                              type: "existing",
-                              colName: col.name,
-                              field: "default",
-                            })
-                          }
-                        >
-                          {eff.default ?? "—"}
-                        </span>
-                      )}
-                    </div>
-                    <button
-                      className="btn-icon drop-column-btn"
-                      onClick={() => markDropColumn(col.name)}
-                      title={dropped ? "Undo drop" : "Drop column"}
-                    >
-                      <X size={12} />
-                    </button>
-                  </div>
-                );
-              })}
-
               {pendingNewColumns.map((col, idx) => (
                 <div key={`new-${idx}`} className="alter-table-column-row new-column">
-                  <input
-                    style={{ flex: 2 }}
-                    value={col.name}
-                    onChange={(e) =>
-                      updatePendingColumn(idx, "name", e.target.value)
-                    }
-                    placeholder="column_name"
-                  />
+                  <div style={{ flex: 2 }} className="alter-table-cell alter-table-cell--name">
+                    <div className="alter-table-name-stack">
+                      <input
+                        value={col.name}
+                        onChange={(e) =>
+                          updatePendingColumn(idx, "name", e.target.value)
+                        }
+                        placeholder="column_name"
+                      />
+                    </div>
+                  </div>
                   <select
                     style={{ flex: 2 }}
                     value={col.data_type}
@@ -658,6 +572,7 @@ export function AlterTableDialog({
                     }}
                   >
                     <input
+                      className="alter-table-checkbox"
                       type="checkbox"
                       checked={col.is_nullable}
                       onChange={(e) =>
@@ -683,14 +598,189 @@ export function AlterTableDialog({
                 </div>
               ))}
 
-              <button className="btn-ghost add-column-btn" onClick={addColumn}>
-                <Plus size={14} /> Add Column
-              </button>
+              {columns.map((col) => {
+                const dropped = isColumnDropped(col.name);
+                const eff = effectiveState.get(col.name);
+                if (!eff) return null;
+                const rowChanged =
+                  dropped ||
+                  eff.name !== col.name ||
+                  eff.type !== col.data_type ||
+                  eff.nullable !== col.is_nullable ||
+                  (eff.default ?? null) !== (col.default_value ?? null);
+
+                const isEditingName =
+                  editingCell?.type === "existing" &&
+                  editingCell.colName === col.name &&
+                  editingCell.field === "name";
+                const isEditingType =
+                  editingCell?.type === "existing" &&
+                  editingCell.colName === col.name &&
+                  editingCell.field === "type";
+                const isEditingDefault =
+                  editingCell?.type === "existing" &&
+                  editingCell.colName === col.name &&
+                  editingCell.field === "default";
+
+                return (
+                  <div
+                    key={col.name}
+                    className={`alter-table-column-row ${dropped ? "dropped" : ""} ${
+                      rowChanged && !dropped ? "has-changes" : ""
+                    }`}
+                  >
+                    <div style={{ flex: 2 }} className="alter-table-cell alter-table-cell--name">
+                      {isEditingName ? (
+                        <input
+                          autoFocus
+                          defaultValue={eff.name}
+                          onBlur={(e) => {
+                            handleRenameColumn(col.name, e.target.value);
+                            setEditingCell(null);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              (e.target as HTMLInputElement).blur();
+                            } else if (e.key === "Escape") {
+                              setEditingCell(null);
+                            }
+                          }}
+                        />
+                      ) : (
+                        <div className="alter-table-name-stack">
+                          <span
+                            className="editable-cell"
+                            title="Double-click to rename column"
+                            onDoubleClick={() =>
+                              setEditingCell({
+                                type: "existing",
+                                colName: col.name,
+                                field: "name",
+                              })
+                            }
+                          >
+                            {eff.name}
+                          </span>
+                          {dropped ? (
+                            <span className="alter-table-row-badge alter-table-row-badge--dropped">
+                              Dropped
+                            </span>
+                          ) : rowChanged ? (
+                            <span className="alter-table-row-badge alter-table-row-badge--changed">
+                              Modified
+                            </span>
+                          ) : null}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ flex: 2 }} className="alter-table-cell">
+                      {isEditingType ? (
+                        <select
+                          autoFocus
+                          defaultValue={eff.type}
+                          onBlur={(e) => {
+                            handleChangeType(col.name, e.target.value);
+                            setEditingCell(null);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Escape") setEditingCell(null);
+                          }}
+                        >
+                          {PG_TYPES.map((t) => (
+                            <option key={t} value={t}>
+                              {t}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span
+                          className="editable-cell"
+                          title="Double-click to change type"
+                          onDoubleClick={() =>
+                            setEditingCell({
+                              type: "existing",
+                              colName: col.name,
+                              field: "type",
+                            })
+                          }
+                        >
+                          {eff.type}
+                        </span>
+                      )}
+                    </div>
+                    <div
+                      style={{ width: 60, display: "flex", justifyContent: "center" }}
+                    >
+                      <input
+                        className="alter-table-checkbox"
+                        type="checkbox"
+                        checked={eff.nullable}
+                        onChange={(e) =>
+                          handleSetNullable(col.name, e.target.checked)
+                        }
+                        disabled={dropped}
+                      />
+                    </div>
+                    <div
+                      style={{
+                        width: 40,
+                        display: "flex",
+                        justifyContent: "center",
+                      }}
+                    >
+                      {col.is_primary_key ? (
+                        <span className="alter-table-pk-badge">PK</span>
+                      ) : null}
+                    </div>
+                    <div style={{ flex: 1 }} className="alter-table-cell">
+                      {isEditingDefault ? (
+                        <input
+                          autoFocus
+                          defaultValue={eff.default ?? ""}
+                          placeholder="null"
+                          onBlur={(e) => {
+                            const v = e.target.value.trim();
+                            handleSetDefault(col.name, v || null);
+                            setEditingCell(null);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                            else if (e.key === "Escape") setEditingCell(null);
+                          }}
+                        />
+                      ) : (
+                        <span
+                          className="editable-cell"
+                          title="Double-click to edit default value"
+                          onDoubleClick={() =>
+                            setEditingCell({
+                              type: "existing",
+                              colName: col.name,
+                              field: "default",
+                            })
+                          }
+                        >
+                          {eff.default ?? "—"}
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      className="btn-icon drop-column-btn"
+                      onClick={() => markDropColumn(col.name)}
+                      title={dropped ? "Undo drop" : "Drop column"}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                );
+              })}
+
             </div>
           </div>
 
           {showPreview && (
-            <div className="ddl-preview">
+            <div className="ddl-preview" ref={previewRef}>
+              <div className="ddl-preview-label">Generated SQL</div>
               <pre>{previewSql}</pre>
             </div>
           )}
@@ -702,10 +792,10 @@ export function AlterTableDialog({
 
         <div className="dialog-footer">
           <button
-            className="btn-secondary"
+            className={`btn-ghost ${showPreview ? "active-filter" : ""}`}
             onClick={() => setShowPreview(!showPreview)}
           >
-            <Eye size={14} />
+            {showPreview ? <EyeOff size={14} /> : <Eye size={14} />}
             {showPreview ? "Hide SQL" : "Preview SQL"}
           </button>
           <div className="dialog-footer-right">
@@ -718,7 +808,7 @@ export function AlterTableDialog({
               disabled={applying || !hasChanges}
             >
               {applying && <Loader2 size={14} className="spin" />}
-              Apply
+              Apply Changes
             </button>
           </div>
         </div>

@@ -70,6 +70,23 @@
   position: relative;
 }
 
+.grid-filter-loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 10;
+  background: linear-gradient(90deg, transparent 0%, var(--accent) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: grid-loading-slide 1s linear infinite;
+}
+
+@keyframes grid-loading-slide {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
 .grid-loading-overlay {
   position: absolute;
   inset: 0;
@@ -463,4 +480,149 @@ th.grid-row-number {
 .refresh-menu-active {
   color: var(--accent);
   font-weight: 600;
+}
+
+
+
+/* ── Explain panel ─────────────────────────────────── */
+.grid-explain-panel {
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.grid-explain-resize {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: row-resize;
+  z-index: 5;
+}
+
+.grid-explain-resize:hover,
+.grid-explain-resize:active {
+  background: var(--accent);
+  opacity: 0.3;
+}
+
+.grid-explain-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.grid-explain-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.grid-explain-body {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 14px;
+}
+
+.grid-explain-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ── Compact ExplainView inside grid ───────────────── */
+.grid-explain-panel .explain-header {
+  height: 32px;
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.grid-explain-panel .explain-header .btn-ghost {
+  height: 24px;
+  font-size: 11px;
+  padding: 0 6px;
+}
+
+.grid-explain-panel .explain-tree,
+.grid-explain-panel .explain-raw {
+  padding: 8px 10px;
+}
+
+.grid-explain-panel .explain-raw pre {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.grid-explain-panel .explain-node {
+  margin-bottom: 4px;
+}
+
+.grid-explain-panel .explain-node-card {
+  padding: 8px 10px;
+}
+
+.grid-explain-panel .explain-node-header {
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.grid-explain-panel .explain-node-type {
+  font-size: 13px;
+}
+
+.grid-explain-panel .explain-node-relation {
+  font-size: 12px;
+}
+
+.grid-explain-panel .explain-node-stats {
+  gap: 12px;
+}
+
+.grid-explain-panel .explain-stat {
+  gap: 1px;
+}
+
+.grid-explain-panel .explain-stat-label {
+  font-size: 10px;
+}
+
+.grid-explain-panel .explain-stat-value {
+  font-size: 12px;
+}
+
+.grid-explain-panel .explain-node-filter {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.grid-explain-panel .explain-node-filter code {
+  font-size: 11px;
+}
+
+.grid-explain-panel .explain-cost-bar {
+  height: 2px;
+}
+
+/* ── Context menu FK item ──────────────────────────── */
+.context-menu-fk {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--accent);
+  border-top: 1px solid var(--border-subtle);
 }

@@ -141,10 +141,6 @@
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-.form-group--error label {
-  color: var(--error);
-}
-
 .form-group--error input,
 .form-group--error select {
   border-color: rgba(239, 68, 68, 0.5);
@@ -181,9 +177,9 @@
   flex: 1;
   padding: 0;
   height: 36px;
-  background: var(--bg-tertiary);
+  background: transparent;
   border: 1px solid var(--border);
-  color: var(--text-secondary);
+  color: var(--text-muted);
   font-size: 13px;
   font-weight: 500;
   border-radius: var(--radius-md);
@@ -192,14 +188,13 @@
 
 .db-type-btn:hover {
   background: var(--bg-hover);
-  border-color: var(--accent);
   color: var(--text-primary);
 }
 
 .db-type-btn.active {
-  background: var(--accent-muted);
-  border-color: var(--accent);
-  color: var(--accent);
+  background: var(--bg-elevated);
+  border-color: var(--text-muted);
+  color: var(--text-primary);
   font-weight: 600;
 }
 

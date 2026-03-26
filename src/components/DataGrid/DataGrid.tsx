@@ -9,12 +9,16 @@ import {
   NewRow,
   DeleteRow,
   ForeignKeyInfo,
+  ExplainResult,
 } from "../../lib/tauri";
 import { FilterBar } from "./FilterBar";
 import { RowDetailView } from "./RowDetailView";
+import { ExplainView } from "../QueryConsole/ExplainView";
 import { ExportMenu } from "../ExportMenu";
 import { ColumnOrganizer, ColumnSettings, loadColumnSettings, saveColumnSettings, applyColumnSettings } from "./ColumnOrganizer";
 import { useToastStore } from "../../stores/toastStore";
+import { useTabStore, TabInfo } from "../../stores/tabStore";
+import { useConnectionStore } from "../../stores/connectionStore";
 import {
   Save,
   Undo2,
@@ -29,6 +33,10 @@ import {
   Timer,
   Search,
   X,
+  RefreshCw,
+  Zap,
+  ExternalLink,
+  Shuffle,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { AllCommunityModule, themeQuartz, type ColDef, type CellContextMenuEvent, type GridApi, type GridReadyEvent, type IHeaderParams } from "ag-grid-community";
@@ -136,6 +144,8 @@ const REFRESH_OPTIONS = [
 
 export function DataGrid({ connectionId, database, schema, table }: Props) {
   const addToast = useToastStore((s) => s.addToast);
+  const openTab = useTabStore((s) => s.openTab);
+  const connections = useConnectionStore((s) => s.connections);
   const [data, setData] = useState<TableData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -164,6 +174,13 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   const searchQueryRef = useRef("");
   const gridApiRef = useRef<GridApi | null>(null);
   const [fkMap, setFkMap] = useState<Map<string, ForeignKeyInfo>>(new Map());
+  const [queryRunning, setQueryRunning] = useState(false);
+  const fetchStartRef = useRef<number | null>(null);
+  const [showExplain, setShowExplain] = useState(false);
+  const [explainResult, setExplainResult] = useState<ExplainResult | null>(null);
+  const [explainLoading, setExplainLoading] = useState(false);
+  const [explainHeight, setExplainHeight] = useState(220);
+  const explainDragging = useRef(false);
 
   const [colSettings, setColSettings] = useState<ColumnSettings>(() => {
     return loadColumnSettings(connectionId, database, schema, table) || { order: [], hidden: new Set() };
@@ -229,6 +246,8 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       if (gen === fetchGenRef.current) {
         setLoading(false);
         setFilterLoading(false);
+        setQueryRunning(false);
+        fetchStartRef.current = null;
       }
     }
   }, [connectionId, database, schema, table, page, sort, activeFilter]);
@@ -236,6 +255,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
 
   useEffect(() => {
     let cancelled = false;
@@ -279,6 +299,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     document.addEventListener("click", close);
     return () => document.removeEventListener("click", close);
   }, [showRefreshMenu]);
+
 
   useEffect(() => {
     let focusTimer: ReturnType<typeof setTimeout>;
@@ -560,10 +581,26 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     }
   };
 
-  const handleFilterApply = (filter: string | null) => {
+  const startManualTimer = useCallback(() => {
+    fetchStartRef.current = performance.now();
+    setQueryRunning(true);
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    startManualTimer();
     setFilterLoading(true);
-    setActiveFilter(filter);
-    setPage(0);
+    fetchData();
+  }, [startManualTimer, fetchData]);
+
+  const handleFilterApply = (filter: string | null) => {
+    startManualTimer();
+    setFilterLoading(true);
+    if (filter === activeFilter) {
+      fetchData();
+    } else {
+      setActiveFilter(filter);
+      setPage(0);
+    }
   };
 
   const handleExport = async (format: "csv" | "json" | "sql") => {
@@ -649,6 +686,124 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     setPage(0);
   }, []);
 
+  const handleExplain = useCallback(async () => {
+    if (showExplain) {
+      setShowExplain(false);
+      setExplainResult(null);
+      return;
+    }
+    setExplainLoading(true);
+    setShowExplain(true);
+    try {
+      let sql = `SELECT * FROM "${schema}"."${table}"`;
+      if (activeFilter) sql += ` WHERE ${activeFilter}`;
+      if (sort) sql += ` ORDER BY "${sort.column}" ${sort.direction}`;
+      sql += ` LIMIT ${PAGE_SIZE} OFFSET ${page * PAGE_SIZE}`;
+      const result = await api.explainQuery({
+        connection_id: connectionId,
+        database,
+        sql,
+      });
+      setExplainResult(result);
+    } catch (e) {
+      addToast(String(e), "error");
+      setShowExplain(false);
+    } finally {
+      setExplainLoading(false);
+    }
+  }, [connectionId, database, schema, table, activeFilter, sort, page, addToast, showExplain]);
+
+  const handleGenerateTestData = useCallback(() => {
+    if (!data) return;
+    const generateValue = (col: ColumnInfo): unknown => {
+      const t = col.data_type.toLowerCase();
+      if (col.is_auto_generated || col.is_primary_key) return null;
+      if (t.includes("int") || t === "serial" || t === "bigserial" || t === "smallserial")
+        return Math.floor(Math.random() * 10000);
+      if (t.includes("float") || t.includes("double") || t.includes("numeric") || t.includes("decimal") || t === "real")
+        return Math.round(Math.random() * 10000) / 100;
+      if (t === "boolean" || t === "bool")
+        return Math.random() > 0.5;
+      if (t.includes("timestamp") || t === "timestamptz") {
+        const d = new Date(Date.now() - Math.floor(Math.random() * 365 * 24 * 60 * 60 * 1000));
+        return d.toISOString();
+      }
+      if (t === "date") {
+        const d = new Date(Date.now() - Math.floor(Math.random() * 365 * 24 * 60 * 60 * 1000));
+        return d.toISOString().split("T")[0];
+      }
+      if (t === "time") {
+        const h = String(Math.floor(Math.random() * 24)).padStart(2, "0");
+        const m = String(Math.floor(Math.random() * 60)).padStart(2, "0");
+        const s = String(Math.floor(Math.random() * 60)).padStart(2, "0");
+        return `${h}:${m}:${s}`;
+      }
+      if (t === "uuid") {
+        return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+          const r = (Math.random() * 16) | 0;
+          return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+        });
+      }
+      if (t === "json" || t === "jsonb")
+        return JSON.stringify({ key: `value_${Math.floor(Math.random() * 100)}` });
+      if (t.includes("char") || t === "text" || t.includes("varchar")) {
+        const words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "theta", "iota", "kappa", "lambda"];
+        return words[Math.floor(Math.random() * words.length)] + "_" + Math.floor(Math.random() * 1000);
+      }
+      if (col.is_nullable) return null;
+      return `test_${Math.floor(Math.random() * 1000)}`;
+    };
+
+    const newRow: unknown[] = data.columns.map(generateValue);
+    setEditingRows((prev) => [...prev, newRow]);
+    const values: [string, unknown][] = data.columns.map((c, i) => [c.name, newRow[i]]);
+    setChanges((prev) => ({
+      ...prev,
+      inserts: [...prev.inserts, { values }],
+    }));
+    addToast("Generated test row with random data");
+  }, [data, addToast]);
+
+  const handleJumpToFk = useCallback((fk: ForeignKeyInfo, cellValue: unknown) => {
+    if (cellValue === null || cellValue === undefined) return;
+    const conn = connections.find((c) => c.id === connectionId);
+    const tabId = `${connectionId}:${database}:${schema}:${fk.referenced_table}`;
+    const tab: TabInfo = {
+      id: tabId,
+      type: "table",
+      title: `${schema}.${fk.referenced_table}`,
+      connectionId,
+      connectionColor: conn?.color || "#6398ff",
+      database,
+      schema,
+      table: fk.referenced_table,
+    };
+    openTab(tab);
+    addToast(`Opened ${fk.referenced_table} — filter by ${fk.referenced_column} = ${JSON.stringify(cellValue)}`);
+  }, [connectionId, database, schema, connections, openTab, addToast]);
+
+  const handleExplainResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    explainDragging.current = true;
+    const startY = e.clientY;
+    const startH = explainHeight;
+    const onMove = (ev: MouseEvent) => {
+      const delta = startY - ev.clientY;
+      setExplainHeight(Math.max(100, Math.min(600, startH + delta)));
+    };
+    const onUp = () => {
+      explainDragging.current = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [explainHeight]);
+
   const defaultColDef = useMemo((): ColDef => ({
     resizable: true,
     sortable: true,
@@ -691,6 +846,12 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     <div className="data-grid-container">
       <div className="grid-toolbar">
         <div className="grid-toolbar-left">
+          <span
+            className="grid-table-name"
+            title={`${database}.${schema}.${table}`}
+          >
+            {schema}.{table}
+          </span>
         </div>
         <div className="grid-toolbar-right">
           <button
@@ -699,6 +860,13 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
             title="Toggle Filter"
           >
             <Filter size={14} /> Filter{activeFilter ? " (active)" : ""}
+          </button>
+          <button
+            className="btn-ghost"
+            onClick={handleRefresh}
+            title="Refresh now"
+          >
+            <RefreshCw size={14} />
           </button>
           <div className="refresh-interval-wrapper">
             <button
@@ -730,6 +898,13 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
               onChange={handleColSettingsChange}
             />
           )}
+          <button
+            className={`btn-ghost ${showExplain ? "active-filter" : ""}`}
+            onClick={handleExplain}
+            title="Explain current query"
+          >
+            <Zap size={14} /> Explain
+          </button>
           <ExportMenu onExport={handleExport} />
           <button
             className="btn-ghost"
@@ -744,6 +919,13 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
             title="Add Row"
           >
             <Plus size={14} /> Add Row
+          </button>
+          <button
+            className="btn-ghost"
+            onClick={handleGenerateTestData}
+            title="Generate a row with random test data"
+          >
+            <Shuffle size={14} /> Test Data
           </button>
           {hasChanges && (
             <>
@@ -804,6 +986,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       )}
 
       <div className="grid-table-wrapper ag-grid-wrapper">
+        {filterLoading && <div className="grid-filter-loading-bar" />}
         <AgGridReact
           theme={gridTheme}
           modules={[AllCommunityModule]}
@@ -815,7 +998,6 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           onGridReady={onGridReady}
           onCellContextMenu={onCellContextMenu}
           onSortChanged={onSortChanged}
-          loading={filterLoading}
           preventDefaultOnContextMenu={true}
           animateRows={false}
           suppressCellFocus={false}
@@ -870,6 +1052,29 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           </button>
         </div>
       </div>
+
+      {showExplain && (
+        <div className="grid-explain-panel" style={{ height: explainHeight }}>
+          <div className="grid-explain-resize" onMouseDown={handleExplainResizeStart} />
+          <div className="grid-explain-header">
+            <span className="grid-explain-title">
+              <Zap size={14} /> Execution Plan
+            </span>
+            <button className="btn-icon" onClick={() => { setShowExplain(false); setExplainResult(null); }}>
+              <X size={14} />
+            </button>
+          </div>
+          <div className="grid-explain-body">
+            {explainLoading ? (
+              <div className="grid-explain-loading">
+                <Loader2 size={16} className="spin" /> Analyzing...
+              </div>
+            ) : explainResult ? (
+              <ExplainView result={explainResult} />
+            ) : null}
+          </div>
+        </div>
+      )}
 
       {rowContextMenu && data && editingRows[rowContextMenu.rowIdx] && (
         <div
@@ -930,6 +1135,25 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           >
             {changes.deletedKeys.has(getPkKey(rowContextMenu.rowIdx)) ? "Undo delete" : "Delete row"}
           </button>
+          {data.columns.map((col, colIdx) => {
+            const fk = fkMap.get(col.name);
+            if (!fk) return null;
+            const cellVal = editingRows[rowContextMenu.rowIdx][colIdx];
+            if (cellVal === null || cellVal === undefined) return null;
+            return (
+              <button
+                key={col.name}
+                className="context-menu-item context-menu-fk"
+                onClick={() => {
+                  handleJumpToFk(fk, cellVal);
+                  setRowContextMenu(null);
+                }}
+              >
+                <ExternalLink size={12} />
+                Jump to {fk.referenced_table}.{fk.referenced_column} = {JSON.stringify(cellVal)}
+              </button>
+            );
+          })}
         </div>
       )}
 

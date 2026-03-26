@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { api, ColumnDefinition } from "../../lib/tauri";
-import { X, Plus, Trash2, Loader2, Eye } from "lucide-react";
+import { X, Plus, Trash2, Loader2, Eye, EyeOff } from "lucide-react";
 import "./CreateTableDialog.css";
 
 interface Props {
@@ -52,6 +52,23 @@ export function CreateTableDialog({
   const [showPreview, setShowPreview] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (showPreview) {
+      const frame = window.requestAnimationFrame(() => {
+        const dialog = dialogRef.current;
+        const preview = previewRef.current;
+        if (!dialog || !preview) return;
+        dialog.scrollTo({
+          top: Math.max(0, preview.offsetTop - 16),
+          behavior: "smooth",
+        });
+      });
+      return () => window.cancelAnimationFrame(frame);
+    }
+  }, [showPreview]);
 
   const updateColumn = (idx: number, field: keyof ColumnRow, value: unknown) => {
     setColumns((prev) => {
@@ -128,6 +145,7 @@ export function CreateTableDialog({
     <div className="dialog-overlay" onClick={onClose}>
       <div
         className="dialog create-table-dialog"
+        ref={dialogRef}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="dialog-header">
@@ -225,7 +243,7 @@ export function CreateTableDialog({
           </div>
 
           {showPreview && (
-            <div className="ddl-preview">
+            <div className="ddl-preview" ref={previewRef}>
               <pre>{generateDDL()}</pre>
             </div>
           )}
@@ -239,10 +257,10 @@ export function CreateTableDialog({
 
         <div className="dialog-footer">
           <button
-            className="btn-secondary"
+            className={`btn-ghost ${showPreview ? "active-filter" : ""}`}
             onClick={() => setShowPreview(!showPreview)}
           >
-            <Eye size={14} />
+            {showPreview ? <EyeOff size={14} /> : <Eye size={14} />}
             {showPreview ? "Hide SQL" : "Preview SQL"}
           </button>
           <div className="dialog-footer-right">
