@@ -32,6 +32,8 @@ import {
   Copy,
   Timer,
   Search,
+  ChevronUp,
+  ChevronDown as ChevronDownIcon,
   X,
   RefreshCw,
   Zap,
@@ -173,6 +175,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   const refreshBtnRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchQueryRef = useRef("");
+  const searchCurrentRef = useRef<{ rowIndex: number; colId: string } | null>(null);
   const gridApiRef = useRef<GridApi | null>(null);
   const [fkMap, setFkMap] = useState<Map<string, ForeignKeyInfo>>(new Map());
   const [queryRunning, setQueryRunning] = useState(false);
@@ -307,37 +310,74 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
 
 
   useEffect(() => {
-    let focusTimer: ReturnType<typeof setTimeout>;
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setShowSearch(true);
-        focusTimer = setTimeout(() => searchInputRef.current?.focus(), 0);
+        requestAnimationFrame(() => searchInputRef.current?.focus());
       }
       if (e.key === "Escape" && showSearch) {
         setShowSearch(false);
         setSearchQuery("");
+        searchCurrentRef.current = null;
       }
     };
     document.addEventListener("keydown", handler);
-    return () => {
-      document.removeEventListener("keydown", handler);
-      clearTimeout(focusTimer);
-    };
+    return () => document.removeEventListener("keydown", handler);
   }, [showSearch]);
 
-  const searchMatchCount = useMemo(() => {
-    if (!searchQuery || !data) return 0;
+  const [searchMatchIdx, setSearchMatchIdx] = useState(-1);
+
+  const searchMatches = useMemo(() => {
+    if (!searchQuery || !data) return [];
     const q = searchQuery.toLowerCase();
-    let count = 0;
-    for (const row of editingRows) {
-      for (const val of row) {
+    const matches: { rowIndex: number; colId: string }[] = [];
+    for (let r = 0; r < editingRows.length; r++) {
+      for (let c = 0; c < editingRows[r].length; c++) {
+        const val = editingRows[r][c];
         const str = (val === null || val === undefined) ? "null" : typeof val === "object" ? JSON.stringify(val) : String(val);
-        if (str.toLowerCase().includes(q)) count++;
+        if (str.toLowerCase().includes(q) && data.columns[c]) {
+          matches.push({ rowIndex: r, colId: data.columns[c].name });
+        }
       }
     }
-    return count;
+    return matches;
   }, [searchQuery, editingRows, data]);
+
+  const searchMatchCount = searchMatches.length;
+
+  const navigateToMatch = useCallback((idx: number) => {
+    if (idx < 0 || idx >= searchMatches.length) return;
+    setSearchMatchIdx(idx);
+    const match = searchMatches[idx];
+    searchCurrentRef.current = match;
+    const api = gridApiRef.current;
+    if (!api) return;
+    api.ensureIndexVisible(match.rowIndex, "middle");
+    api.ensureColumnVisible(match.colId);
+    api.refreshCells({ force: true });
+  }, [searchMatches]);
+
+  useEffect(() => {
+    if (searchMatches.length > 0) {
+      navigateToMatch(0);
+    } else {
+      setSearchMatchIdx(-1);
+      searchCurrentRef.current = null;
+    }
+  }, [searchMatches, navigateToMatch]);
+
+  const searchNext = useCallback(() => {
+    if (searchMatches.length === 0) return;
+    const next = searchMatchIdx + 1 >= searchMatches.length ? 0 : searchMatchIdx + 1;
+    navigateToMatch(next);
+  }, [searchMatchIdx, searchMatches, navigateToMatch]);
+
+  const searchPrev = useCallback(() => {
+    if (searchMatches.length === 0) return;
+    const prev = searchMatchIdx - 1 < 0 ? searchMatches.length - 1 : searchMatchIdx - 1;
+    navigateToMatch(prev);
+  }, [searchMatchIdx, searchMatches, navigateToMatch]);
 
   useEffect(() => {
     searchQueryRef.current = searchQuery;
@@ -489,6 +529,11 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
             const v = params.value;
             const str = (v === null || v === undefined) ? "null" : typeof v === "object" ? JSON.stringify(v) : String(v);
             return str.toLowerCase().includes(q.toLowerCase());
+          },
+          "cell-search-current": (params) => {
+            const cur = searchCurrentRef.current;
+            if (!cur) return false;
+            return params.rowIndex === cur.rowIndex && params.colDef.field === cur.colId;
           },
         },
         valueFormatter: (params) => {
@@ -1007,17 +1052,37 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); }
+              if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); searchCurrentRef.current = null; }
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); searchNext(); }
+              if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); searchPrev(); }
             }}
           />
           {searchQuery && (
-            <span className="grid-search-count">
-              {searchMatchCount} match{searchMatchCount !== 1 ? "es" : ""}
-            </span>
+            <div className="grid-search-nav">
+              <span className="grid-search-count">
+                {searchMatchCount > 0 ? `${searchMatchIdx + 1} / ${searchMatchCount}` : "No results"}
+              </span>
+              <button
+                className="btn-icon grid-search-nav-btn"
+                onClick={searchPrev}
+                disabled={searchMatchCount === 0}
+                title="Previous match (Shift+Enter)"
+              >
+                <ChevronUp size={14} />
+              </button>
+              <button
+                className="btn-icon grid-search-nav-btn"
+                onClick={searchNext}
+                disabled={searchMatchCount === 0}
+                title="Next match (Enter)"
+              >
+                <ChevronDownIcon size={14} />
+              </button>
+            </div>
           )}
           <button
             className="btn-icon grid-search-close"
-            onClick={() => { setShowSearch(false); setSearchQuery(""); }}
+            onClick={() => { setShowSearch(false); setSearchQuery(""); searchCurrentRef.current = null; }}
           >
             <X size={14} />
           </button>

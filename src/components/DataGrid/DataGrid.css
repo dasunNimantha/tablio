@@ -432,10 +432,31 @@ th.grid-row-number {
   border-color: var(--accent);
 }
 
+.grid-search-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
 .grid-search-count {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-muted);
   white-space: nowrap;
+  min-width: 60px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.grid-search-nav-btn {
+  width: 26px;
+  height: 26px;
+  color: var(--text-secondary);
+}
+
+.grid-search-nav-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 
 .grid-search-close {
@@ -443,7 +464,14 @@ th.grid-row-number {
 }
 
 .cell-search-match {
-  background: rgba(234, 179, 8, 0.08) !important;
+  background: rgba(234, 179, 8, 0.1) !important;
+}
+
+.cell-search-current {
+  background: rgba(234, 179, 8, 0.18) !important;
+  outline: 2px solid rgba(234, 179, 8, 0.8);
+  outline-offset: -2px;
+  z-index: 1;
 }
 
 .cell-search-highlight {

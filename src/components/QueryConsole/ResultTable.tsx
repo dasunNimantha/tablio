@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import { QueryResult, ColumnInfo } from "../../lib/tauri";
 import { AllCommunityModule, themeQuartz, type ColDef, type GridApi, type GridReadyEvent, type CellContextMenuEvent } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
-import { Search, X, Copy, Save, Undo2 } from "lucide-react";
+import { Search, X, Copy, Save, Undo2, ChevronUp, ChevronDown as ChevronDownIcon } from "lucide-react";
 import { RowDetailView } from "../DataGrid/RowDetailView";
 import "../DataGrid/ag-grid-theme.css";
 import "./QueryConsole.css";
@@ -45,6 +45,7 @@ export function ResultTable({ result }: Props) {
   const [showSearch, setShowSearch] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchQueryRef = useRef("");
+  const searchCurrentRef = useRef<{ rowIndex: number; colId: string } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; rowIdx: number } | null>(null);
   const [detailRowIdx, setDetailRowIdx] = useState<number | null>(null);
   const [editingRows, setEditingRows] = useState<unknown[][]>(() =>
@@ -137,6 +138,11 @@ export function ResultTable({ result }: Props) {
           const str = (v === null || v === undefined) ? "null" : typeof v === "object" ? JSON.stringify(v) : String(v);
           return str.toLowerCase().includes(q.toLowerCase());
         },
+        "cell-search-current": (params) => {
+          const cur = searchCurrentRef.current;
+          if (!cur) return false;
+          return params.rowIndex === cur.rowIndex && params.colDef.field === cur.colId;
+        },
       },
       valueFormatter: (params) => {
         if (params.value === null || params.value === undefined) return "NULL";
@@ -175,48 +181,65 @@ export function ResultTable({ result }: Props) {
     },
   }), []);
 
-  const findFirstMatch = useCallback((q: string): { rowIdx: number; colIdx: number } | null => {
-    if (!q) return null;
-    const ql = q.toLowerCase();
+  const [searchMatchIdx, setSearchMatchIdx] = useState(-1);
+
+  const searchMatches = useMemo(() => {
+    if (!searchQuery) return [];
+    const q = searchQuery.toLowerCase();
+    const matches: { rowIndex: number; colId: string }[] = [];
     for (let r = 0; r < editingRows.length; r++) {
       for (let c = 0; c < editingRows[r].length; c++) {
         const val = editingRows[r][c];
         const str = (val === null || val === undefined) ? "null" : typeof val === "object" ? JSON.stringify(val) : String(val);
-        if (str.toLowerCase().includes(ql)) return { rowIdx: r, colIdx: c };
+        if (str.toLowerCase().includes(q) && result.columns[c]) {
+          matches.push({ rowIndex: r, colId: result.columns[c] });
+        }
       }
     }
-    return null;
-  }, [editingRows]);
+    return matches;
+  }, [searchQuery, editingRows, result.columns]);
 
-  const searchMatchCount = useMemo(() => {
-    if (!searchQuery) return 0;
-    const q = searchQuery.toLowerCase();
-    let count = 0;
-    for (const row of editingRows) {
-      for (const val of row) {
-        const str = (val === null || val === undefined) ? "null" : typeof val === "object" ? JSON.stringify(val) : String(val);
-        if (str.toLowerCase().includes(q)) count++;
-      }
+  const searchMatchCount = searchMatches.length;
+
+  const navigateToMatch = useCallback((idx: number) => {
+    if (idx < 0 || idx >= searchMatches.length) return;
+    setSearchMatchIdx(idx);
+    const match = searchMatches[idx];
+    searchCurrentRef.current = match;
+    const api = gridApiRef.current;
+    if (!api) return;
+    api.ensureIndexVisible(match.rowIndex, "middle");
+    api.ensureColumnVisible(match.colId);
+    api.refreshCells({ force: true });
+  }, [searchMatches]);
+
+  useEffect(() => {
+    if (searchMatches.length > 0) {
+      navigateToMatch(0);
+    } else {
+      setSearchMatchIdx(-1);
+      searchCurrentRef.current = null;
     }
-    return count;
-  }, [searchQuery, editingRows]);
+  }, [searchMatches, navigateToMatch]);
+
+  const searchNext = useCallback(() => {
+    if (searchMatches.length === 0) return;
+    const next = searchMatchIdx + 1 >= searchMatches.length ? 0 : searchMatchIdx + 1;
+    navigateToMatch(next);
+  }, [searchMatchIdx, searchMatches, navigateToMatch]);
+
+  const searchPrev = useCallback(() => {
+    if (searchMatches.length === 0) return;
+    const prev = searchMatchIdx - 1 < 0 ? searchMatches.length - 1 : searchMatchIdx - 1;
+    navigateToMatch(prev);
+  }, [searchMatchIdx, searchMatches, navigateToMatch]);
 
   useEffect(() => {
     searchQueryRef.current = searchQuery;
     const api = gridApiRef.current;
     if (!api) return;
     api.refreshCells({ force: true });
-
-    if (searchQuery) {
-      const match = findFirstMatch(searchQuery);
-      if (match) {
-        const colId = result.columns[match.colIdx];
-        api.ensureIndexVisible(match.rowIdx, "middle");
-        api.ensureColumnVisible(colId);
-        api.setFocusedCell(match.rowIdx, colId);
-      }
-    }
-  }, [searchQuery, findFirstMatch, result.columns]);
+  }, [searchQuery]);
 
   useEffect(() => {
     let focusTimer: ReturnType<typeof setTimeout>;
@@ -229,6 +252,7 @@ export function ResultTable({ result }: Props) {
       if (e.key === "Escape" && showSearch) {
         setShowSearch(false);
         setSearchQuery("");
+        searchCurrentRef.current = null;
       }
     };
     document.addEventListener("keydown", handler);
@@ -336,17 +360,37 @@ export function ResultTable({ result }: Props) {
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); }
+              if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); searchCurrentRef.current = null; }
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); searchNext(); }
+              if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); searchPrev(); }
             }}
           />
           {searchQuery && (
-            <span className="grid-search-count">
-              {searchMatchCount} match{searchMatchCount !== 1 ? "es" : ""}
-            </span>
+            <div className="grid-search-nav">
+              <span className="grid-search-count">
+                {searchMatchCount > 0 ? `${searchMatchIdx + 1} / ${searchMatchCount}` : "No results"}
+              </span>
+              <button
+                className="btn-icon grid-search-nav-btn"
+                onClick={searchPrev}
+                disabled={searchMatchCount === 0}
+                title="Previous match (Shift+Enter)"
+              >
+                <ChevronUp size={14} />
+              </button>
+              <button
+                className="btn-icon grid-search-nav-btn"
+                onClick={searchNext}
+                disabled={searchMatchCount === 0}
+                title="Next match (Enter)"
+              >
+                <ChevronDownIcon size={14} />
+              </button>
+            </div>
           )}
           <button
             className="btn-icon grid-search-close"
-            onClick={() => { setShowSearch(false); setSearchQuery(""); }}
+            onClick={() => { setShowSearch(false); setSearchQuery(""); searchCurrentRef.current = null; }}
           >
             <X size={14} />
           </button>
