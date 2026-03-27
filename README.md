@@ -6,12 +6,12 @@
 
 <p align="center">
   <strong>Open-source, cross-platform desktop database client</strong><br/>
-  Browse, query, and manage PostgreSQL, MySQL, and SQLite databases — all from one app.
+  Browse, query, and manage PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, and SQLite databases — all from one app.
 </p>
 
 <p align="center">
   <a href="https://github.com/dasunNimantha/tablio/releases"><img src="https://img.shields.io/github/v/release/dasunNimantha/tablio?style=flat-square" alt="Latest Release" /></a>
-  <a href="https://github.com/dasunNimantha/tablio/actions"><img src="https://img.shields.io/github/actions/workflow/status/dasunNimantha/tablio/ci.yml?branch=main&style=flat-square&label=CI" alt="CI Status" /></a>
+  <a href="https://github.com/dasunNimantha/tablio/actions"><img src="https://img.shields.io/github/actions/workflow/status/dasunNimantha/tablio/ci.yml?branch=master&style=flat-square&label=CI" alt="CI Status" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/dasunNimantha/tablio?style=flat-square" alt="License" /></a>
   <a href="https://github.com/dasunNimantha/tablio/stargazers"><img src="https://img.shields.io/github/stars/dasunNimantha/tablio?style=flat-square" alt="Stars" /></a>
 </p>
@@ -28,18 +28,19 @@
 
 ## Why Tablio?
 
-Most database GUIs are either bloated, expensive, or locked to a single engine. Tablio is a **free, lightweight, native desktop app** that connects to PostgreSQL, MySQL, and SQLite with a single unified interface. Built with Rust and React for speed and reliability.
+Most database GUIs are either bloated, expensive, or locked to a single engine. Tablio is a **free, lightweight, native desktop app** that connects to PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, and SQLite with a single unified interface. Built with Rust and React for speed and reliability.
 
 ---
 
 ## ✨ Features
 
 ### Multi-Database Support
-Connect to **PostgreSQL**, **MySQL**, and **SQLite** databases from one app. Save, organize, and color-code your connections. Supports **SSL** and **SSH tunnels**.
+Connect to **PostgreSQL**, **MySQL**, **MariaDB**, **CockroachDB**, **TiDB**, and **SQLite** databases from one app. Each database has a **dedicated driver** with engine-specific optimizations — no generic fallbacks. Save, organize, and color-code your connections. Supports **SSL** and **SSH tunnels**.
 
 ### Data Browsing & Inline Editing
 - Paginated, sortable, and filterable data grid powered by AG Grid
 - Edit cells inline — changes are highlighted and saved as a single transaction
+- **Search with navigation** — `Ctrl+F` to search, `Enter` / `Shift+Enter` or arrow buttons to jump between matches with the current match highlighted
 - Show, hide, and reorder columns with persisted preferences
 - Row detail view for tables with many columns
 - Primary key / foreign key badges on column headers
@@ -127,12 +128,15 @@ Starts both the Vite dev server and the Tauri Rust backend with hot-reload.
 # Frontend
 npm test
 
-# Backend (SQLite tests run locally; Postgres/MySQL need running instances)
+# Backend (SQLite tests run locally; others need running instances)
 cd src-tauri && cargo test
 
 # With real databases
 TEST_POSTGRES_URL="postgres://user:pass@localhost/testdb" \
 TEST_MYSQL_URL="mysql://user:pass@localhost/testdb" \
+TEST_MARIADB_URL="mysql://user:pass@localhost:3307/testdb" \
+TEST_COCKROACHDB_URL="postgres://root@localhost:26257/testdb?sslmode=disable" \
+TEST_TIDB_URL="mysql://root@localhost:4000/testdb" \
 cargo test
 ```
 
@@ -140,7 +144,14 @@ cargo test
 
 GitHub Actions runs on every push and PR:
 - TypeScript type checking + Vitest frontend tests
-- `cargo fmt --check` + `cargo clippy` + integration tests with **Postgres 16** and **MySQL 8** service containers
+- `cargo fmt --check` + `cargo clippy`
+- Multi-version integration tests:
+  - **PostgreSQL** 14, 15, 16, 17, 18
+  - **MySQL** 8.0, 8.4
+  - **MariaDB** 10.11, 11.4
+  - **CockroachDB** (latest)
+  - **TiDB** (latest)
+  - **SQLite** (embedded)
 - Cross-platform release builds (Linux, macOS, Windows)
 
 ---
@@ -150,12 +161,15 @@ GitHub Actions runs on every push and PR:
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+Enter` | Execute query |
+| `Ctrl+F` | Search in data grid |
+| `Enter` (in search) | Jump to next match |
+| `Shift+Enter` (in search) | Jump to previous match |
 | `Ctrl+?` | Show shortcuts overlay |
 | `Ctrl+` `+` / `Ctrl+` `-` | Zoom in / out |
 | `Ctrl+0` | Reset zoom |
 | Double-click cell | Edit cell value |
 | `Enter` | Commit cell edit |
-| `Escape` | Cancel cell edit |
+| `Escape` | Cancel cell edit / close search |
 | `Tab` | Commit and move to next cell |
 
 ---
@@ -170,7 +184,10 @@ tablio/
 │   └── lib/                # Themes, Tauri IPC bridge, utilities
 ├── src-tauri/
 │   ├── src/
-│   │   ├── db/             # DatabaseDriver trait + Postgres/MySQL/SQLite
+│   │   ├── db/             # DatabaseDriver trait + dedicated drivers per engine
+│   │   │   ├── postgres.rs, cockroachdb.rs, pg_common.rs
+│   │   │   ├── mysql.rs, mariadb.rs, tidb.rs, mysql_common.rs
+│   │   │   └── sqlite.rs
 │   │   ├── commands/       # Tauri IPC command handlers
 │   │   └── lib.rs          # Command registration
 │   └── tests/              # Integration tests per database engine
