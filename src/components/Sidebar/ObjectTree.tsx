@@ -894,7 +894,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
             });
           }
         }
-        if (currentGroup) {
+        if (currentGroupLower) {
           if (moveChildren.length > 0) {
             moveChildren.push({ label: "---", action: () => {} });
           }
