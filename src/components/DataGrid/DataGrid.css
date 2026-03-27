@@ -21,10 +21,24 @@
 }
 
 .grid-toolbar .btn-ghost,
-.grid-toolbar .btn-primary {
+.grid-toolbar .btn-primary,
+.grid-toolbar .btn-discard {
   font-weight: 400;
   height: 30px;
   font-size: 13px;
+}
+
+.btn-discard {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--error);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+}
+
+.btn-discard:hover {
+  background: rgba(239, 68, 68, 0.18);
+  border-color: rgba(239, 68, 68, 0.4);
 }
 
 .grid-toolbar-left {

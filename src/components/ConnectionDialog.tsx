@@ -1,7 +1,7 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useConnectionStore } from "../stores/connectionStore";
 import { api, ConnectionConfig } from "../lib/tauri";
-import { X, Loader2, CheckCircle, XCircle } from "lucide-react";
+import { X, Loader2, CheckCircle, XCircle, ChevronDown } from "lucide-react";
 import "./ConnectionDialog.css";
 
 const COLORS = [
@@ -10,12 +10,12 @@ const COLORS = [
 ];
 
 const DB_TYPES = [
-  { value: "postgres" as const, label: "PostgreSQL", defaultPort: 5432 },
-  { value: "mysql" as const, label: "MySQL", defaultPort: 3306 },
-  { value: "sqlite" as const, label: "SQLite", defaultPort: 0 },
-  { value: "mariadb" as const, label: "MariaDB", defaultPort: 3306 },
-  { value: "cockroachdb" as const, label: "CockroachDB", defaultPort: 26257 },
-  { value: "tidb" as const, label: "TiDB", defaultPort: 4000 },
+  { value: "postgres" as const, label: "PostgreSQL", short: "PG", defaultPort: 5432, accent: "#89b4fa" },
+  { value: "mysql" as const, label: "MySQL", short: "MY", defaultPort: 3306, accent: "#f9e2af" },
+  { value: "sqlite" as const, label: "SQLite", short: "SQ", defaultPort: 0, accent: "#94e2d5" },
+  { value: "mariadb" as const, label: "MariaDB", short: "MA", defaultPort: 3306, accent: "#fab387" },
+  { value: "cockroachdb" as const, label: "CockroachDB", short: "CR", defaultPort: 26257, accent: "#cba6f7" },
+  { value: "tidb" as const, label: "TiDB", short: "TI", defaultPort: 4000, accent: "#f38ba8" },
 ];
 
 type ValidationField = "name" | "host" | "port" | "user" | "database";
@@ -76,6 +76,64 @@ function validateConnectionForm(
   }
 
   return errors;
+}
+
+function DbTypeDropdown({
+  value,
+  onChange,
+  className,
+}: {
+  value: ConnectionConfig["db_type"];
+  onChange: (v: ConnectionConfig["db_type"]) => void;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const selected = DB_TYPES.find((d) => d.value === value)!;
+
+  useEffect(() => {
+    if (!open) return;
+    const handleClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  return (
+    <div className={`form-group${className ? ` ${className}` : ""}`}>
+      <label>Database Type</label>
+      <div className="db-dropdown" ref={ref}>
+        <button
+          type="button"
+          className="db-dropdown-trigger"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+        >
+          <span className="db-dropdown-value">{selected.label}</span>
+          <ChevronDown size={14} className={`db-dropdown-chevron ${open ? "open" : ""}`} />
+        </button>
+        {open && (
+          <ul className="db-dropdown-menu">
+            {DB_TYPES.map((dt) => (
+              <li key={dt.value}>
+                <button
+                  type="button"
+                  className={`db-dropdown-item ${dt.value === value ? "active" : ""}`}
+                  onClick={() => {
+                    onChange(dt.value);
+                    setOpen(false);
+                  }}
+                >
+                  <span className="db-dropdown-item-label">{dt.label}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
 }
 
 interface Props {
@@ -215,22 +273,12 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
         </div>
 
         <div className="dialog-body">
-          <div className="form-group">
-            <label>Database Type</label>
-            <div className="db-type-selector">
-              {DB_TYPES.map((dt) => (
-                <button
-                  key={dt.value}
-                  className={`db-type-btn ${form.db_type === dt.value ? "active" : ""}`}
-                  onClick={() => handleDbTypeChange(dt.value)}
-                >
-                  {dt.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
           <div className="form-row">
+            <DbTypeDropdown
+              value={form.db_type}
+              onChange={handleDbTypeChange}
+              className="form-group--db-type"
+            />
             <div className={`form-group flex-1${getFieldError("name") ? " form-group--error" : ""}`}>
               <label>Connection Name</label>
               <input
@@ -242,34 +290,36 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
               />
               {getFieldError("name") && <div className="field-error">{getFieldError("name")}</div>}
             </div>
-            <div className="form-group">
-              <label>Color</label>
-              <div className="color-picker">
-                {COLORS.map((c) => (
-                  <button
-                    key={c}
-                    className={`color-dot ${form.color === c ? "active" : ""}`}
-                    style={{ background: c }}
-                    onClick={() => setForm((f) => ({ ...f, color: c }))}
-                  />
-                ))}
-              </div>
-            </div>
           </div>
 
           {isSqlite ? (
-            <div className={`form-group${getFieldError("database") ? " form-group--error" : ""}`}>
-              <label>Database File Path</label>
-              <input
-                value={form.database}
-                onChange={(e) => updateField("database", e.target.value)}
-                onBlur={() => touchField("database")}
-                placeholder="/path/to/database.db"
-                aria-invalid={!!getFieldError("database")}
-              />
-              {getFieldError("database") && (
-                <div className="field-error">{getFieldError("database")}</div>
-              )}
+            <div className="form-row">
+              <div className={`form-group flex-1${getFieldError("database") ? " form-group--error" : ""}`}>
+                <label>Database File Path</label>
+                <input
+                  value={form.database}
+                  onChange={(e) => updateField("database", e.target.value)}
+                  onBlur={() => touchField("database")}
+                  placeholder="/path/to/database.db"
+                  aria-invalid={!!getFieldError("database")}
+                />
+                {getFieldError("database") && (
+                  <div className="field-error">{getFieldError("database")}</div>
+                )}
+              </div>
+              <div className="form-group form-group--color">
+                <label>Color</label>
+                <div className="color-picker">
+                  {COLORS.map((c) => (
+                    <button
+                      key={c}
+                      className={`color-dot ${form.color === c ? "active" : ""}`}
+                      style={{ background: c }}
+                      onClick={() => setForm((f) => ({ ...f, color: c }))}
+                    />
+                  ))}
+                </div>
+              </div>
             </div>
           ) : (
             <>
@@ -322,18 +372,33 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                 </div>
               </div>
 
-              <div className={`form-group${getFieldError("database") ? " form-group--error" : ""}`}>
-                <label>Database</label>
-                <input
-                  value={form.database}
-                  onChange={(e) => updateField("database", e.target.value)}
-                  onBlur={() => touchField("database")}
-                  placeholder="mydb"
-                  aria-invalid={!!getFieldError("database")}
-                />
-                {getFieldError("database") && (
-                  <div className="field-error">{getFieldError("database")}</div>
-                )}
+              <div className="form-row">
+                <div className={`form-group flex-1${getFieldError("database") ? " form-group--error" : ""}`}>
+                  <label>Database</label>
+                  <input
+                    value={form.database}
+                    onChange={(e) => updateField("database", e.target.value)}
+                    onBlur={() => touchField("database")}
+                    placeholder="mydb"
+                    aria-invalid={!!getFieldError("database")}
+                  />
+                  {getFieldError("database") && (
+                    <div className="field-error">{getFieldError("database")}</div>
+                  )}
+                </div>
+                <div className="form-group form-group--color">
+                  <label>Color</label>
+                  <div className="color-picker">
+                    {COLORS.map((c) => (
+                      <button
+                        key={c}
+                        className={`color-dot ${form.color === c ? "active" : ""}`}
+                        style={{ background: c }}
+                        onClick={() => setForm((f) => ({ ...f, color: c }))}
+                      />
+                    ))}
+                  </div>
+                </div>
               </div>
             </>
           )}

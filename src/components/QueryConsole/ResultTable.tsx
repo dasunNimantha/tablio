@@ -312,7 +312,7 @@ export function ResultTable({ result }: Props) {
     <div className="result-table-ag-wrapper">
       <div className="result-table-toolbar">
         {editCount > 0 && (
-          <button className="btn-ghost result-discard-btn" onClick={handleDiscard} title="Discard all changes">
+          <button className="btn-discard result-discard-btn" onClick={handleDiscard} title="Discard all changes">
             <Undo2 size={14} /> Discard
           </button>
         )}

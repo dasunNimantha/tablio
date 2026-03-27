@@ -150,40 +150,39 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       setRenamingGroup(null);
       return;
     }
-    const toUpdate = connections.filter((c) => c.group?.trim() === oldName);
+    const oldLower = oldName.toLowerCase();
+    const toUpdate = connections.filter((c) => c.group?.trim().toLowerCase() === oldLower);
     for (const conn of toUpdate) {
       await updateConnection({ ...conn, group: newName });
     }
     setEmptyGroups((prev) => {
-      const next = new Set(prev);
-      next.delete(oldName);
+      const next = new Set([...prev].filter((g) => g.toLowerCase() !== oldLower));
       if (toUpdate.length === 0) next.add(newName);
       return next;
     });
     setCollapsedGroups((prev) => {
-      const next = new Set(prev);
-      next.delete(oldName);
+      const next = new Set([...prev].filter((g) => g.toLowerCase() !== oldLower));
       return next;
     });
     setRenamingGroup(null);
   };
 
   const handleDeleteGroup = async (groupName: string) => {
-    const toUpdate = connections.filter((c) => c.group?.trim() === groupName);
+    const lower = groupName.toLowerCase();
+    const toUpdate = connections.filter((c) => c.group?.trim().toLowerCase() === lower);
     for (const conn of toUpdate) {
       await updateConnection({ ...conn, group: null });
     }
     setEmptyGroups((prev) => {
-      const next = new Set(prev);
-      next.delete(groupName);
-      return next;
+      return new Set([...prev].filter((g) => g.toLowerCase() !== lower));
     });
   };
 
   const preserveSourceGroup = (conn: import("../../lib/tauri").ConnectionConfig) => {
     const sourceGroup = conn.group?.trim();
     if (sourceGroup) {
-      const othersInGroup = connections.filter((c) => c.id !== conn.id && c.group?.trim() === sourceGroup);
+      const sourceLower = sourceGroup.toLowerCase();
+      const othersInGroup = connections.filter((c) => c.id !== conn.id && c.group?.trim().toLowerCase() === sourceLower);
       if (othersInGroup.length === 0) {
         setEmptyGroups((prev) => new Set(prev).add(sourceGroup));
       }
@@ -203,7 +202,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     const connId = e.dataTransfer.getData("text/connection-id");
     if (!connId) return;
     const conn = connections.find((c) => c.id === connId);
-    if (conn && (conn.group?.trim() || null) !== targetGroup) {
+    if (conn && (conn.group?.trim()?.toLowerCase() || null) !== (targetGroup?.toLowerCase() || null)) {
       preserveSourceGroup(conn);
       await updateConnection({ ...conn, group: targetGroup });
     }
@@ -885,10 +884,10 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         });
 
         const existingGroups = Object.keys(grouped.groups).sort();
-        const currentGroup = conn.group?.trim() || null;
+        const currentGroupLower = conn.group?.trim()?.toLowerCase() || null;
         const moveChildren: { label: string; action: () => void }[] = [];
         for (const g of existingGroups) {
-          if (g !== currentGroup) {
+          if (g.toLowerCase() !== currentGroupLower) {
             moveChildren.push({
               label: g,
               action: () => handleMoveToGroup(conn, g),
@@ -1044,15 +1043,22 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
 
   const grouped = useMemo(() => {
     const groups: Record<string, typeof connections> = {};
+    const canonicalKey: Record<string, string> = {};
     const ungrouped: typeof connections = [];
     for (const g of emptyGroups) {
-      if (!groups[g]) groups[g] = [];
+      const lower = g.toLowerCase();
+      if (!canonicalKey[lower]) canonicalKey[lower] = g;
+      const key = canonicalKey[lower];
+      if (!groups[key]) groups[key] = [];
     }
     for (const conn of connections) {
       const g = conn.group?.trim();
       if (g) {
-        if (!groups[g]) groups[g] = [];
-        groups[g].push(conn);
+        const lower = g.toLowerCase();
+        if (!canonicalKey[lower]) canonicalKey[lower] = g;
+        const key = canonicalKey[lower];
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(conn);
       } else {
         ungrouped.push(conn);
       }
@@ -1311,7 +1317,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                       dragCounterRef.current[key] = (dragCounterRef.current[key] || 0) + 1;
                       if (draggingConnId) {
                         const dragged = connections.find((c) => c.id === draggingConnId);
-                        if ((dragged?.group?.trim() || null) !== groupName) {
+                        if ((dragged?.group?.trim()?.toLowerCase() || null) !== groupName.toLowerCase()) {
                           setDragOverGroup(groupName);
                         }
                       }

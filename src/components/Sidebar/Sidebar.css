@@ -72,11 +72,13 @@
   display: flex;
   gap: 2px;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.15s;
 }
 
 .connection-item:hover .connection-actions {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .connection-actions .btn-icon {
@@ -180,11 +182,13 @@
 
 .tree-action {
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.15s;
 }
 
 .tree-node:hover .tree-action {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .tree-conn-row {
@@ -200,6 +204,7 @@
   top: 0;
   height: 34px;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.15s;
   z-index: 1;
 }
@@ -207,6 +212,7 @@
 .tree-conn-row:hover .tree-conn-actions,
 .tree-root-header:hover .tree-conn-actions {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .tree-conn-actions .btn-icon {

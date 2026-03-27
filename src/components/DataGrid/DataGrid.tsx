@@ -968,7 +968,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           </button>
           {hasChanges && (
             <>
-              <button className="btn-ghost" onClick={handleDiscard}>
+              <button className="btn-discard" onClick={handleDiscard}>
                 <Undo2 size={14} /> Discard
               </button>
               <button

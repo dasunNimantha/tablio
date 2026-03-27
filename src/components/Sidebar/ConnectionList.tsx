@@ -81,12 +81,16 @@ export function ConnectionList({ onAddConnection }: Props) {
 
   const grouped = useMemo(() => {
     const groups: Record<string, ConnectionConfig[]> = {};
+    const canonicalKey: Record<string, string> = {};
     const ungrouped: ConnectionConfig[] = [];
     for (const conn of connections) {
       const g = conn.group?.trim();
       if (g) {
-        if (!groups[g]) groups[g] = [];
-        groups[g].push(conn);
+        const lower = g.toLowerCase();
+        if (!canonicalKey[lower]) canonicalKey[lower] = g;
+        const key = canonicalKey[lower];
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(conn);
       } else {
         ungrouped.push(conn);
       }
