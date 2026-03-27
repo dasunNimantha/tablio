@@ -373,6 +373,7 @@ pub async fn my_list_foreign_keys(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn my_fetch_rows_impl(
     pool: &MySqlPool,
     columns: Vec<ColumnInfo>,

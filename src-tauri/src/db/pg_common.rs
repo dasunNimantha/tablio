@@ -511,6 +511,7 @@ pub async fn pg_list_triggers(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn pg_fetch_rows_impl(
     pool: &PgPool,
     columns: Vec<ColumnInfo>,
