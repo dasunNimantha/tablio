@@ -4,3 +4,4 @@ target/
 src-tauri/target/
 *.log
 .DS_Store
+.cursor/
