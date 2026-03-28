@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::db::cassandra::CassandraDriver;
 use crate::db::cockroachdb::CockroachdbDriver;
 use crate::db::mariadb::MariadbDriver;
 use crate::db::mysql::MysqlDriver;
@@ -129,6 +130,9 @@ impl PoolManager {
             DbType::Sqlite => SqliteDriver::connect(&effective_config)
                 .await
                 .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
+            DbType::Cassandra => CassandraDriver::connect(&effective_config)
+                .await
+                .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
         };
 
         let driver = match driver_result {
@@ -198,6 +202,9 @@ impl PoolManager {
                 DbType::Mariadb => Box::new(MariadbDriver::connect(&effective_config).await?),
                 DbType::Tidb => Box::new(TidbDriver::connect(&effective_config).await?),
                 DbType::Sqlite => Box::new(SqliteDriver::connect(&effective_config).await?),
+                DbType::Cassandra => {
+                    Box::new(CassandraDriver::connect(&effective_config).await?)
+                }
             };
             driver.test_connection().await
         }

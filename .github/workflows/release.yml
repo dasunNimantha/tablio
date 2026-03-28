@@ -239,9 +239,43 @@ jobs:
       - name: Run SQLite integration tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --test sqlite_integration
 
+  test-cassandra:
+    name: Cassandra
+    runs-on: ubuntu-latest
+    services:
+      cassandra:
+        image: cassandra:4.1
+        ports:
+          - 9042:9042
+        options: >-
+          --health-cmd "cqlsh -e 'describe cluster'"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 60s
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run Cassandra integration tests
+        env:
+          TEST_CASSANDRA_HOST: "127.0.0.1"
+          TEST_CASSANDRA_PORT: "9042"
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test cassandra_integration
+
   release:
     name: Build & Release (${{ matrix.platform }})
-    needs: [test-frontend, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite]
+    needs: [test-frontend, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite, test-cassandra]
     strategy:
       fail-fast: false
       matrix:
@@ -352,12 +386,16 @@ jobs:
       - name: Import GPG key
         run: |
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent
 
       - name: Export public key
         run: |
           gpg --armor --export > gh-pages/apt/key.gpg
 
       - name: Generate APT metadata
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           cd gh-pages/apt
           dpkg-scanpackages --multiversion pool > dists/stable/main/binary-amd64/Packages
@@ -376,10 +414,12 @@ jobs:
 
           apt-ftparchive release dists/stable >> dists/stable/Release
 
-          gpg --batch --yes --default-key "$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)" \
-            -abs -o dists/stable/Release.gpg dists/stable/Release
-          gpg --batch --yes --default-key "$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)" \
-            --clearsign -o dists/stable/InRelease dists/stable/Release
+          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)
+
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+            --default-key "$GPG_KEY_ID" -abs -o dists/stable/Release.gpg dists/stable/Release
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+            --default-key "$GPG_KEY_ID" --clearsign -o dists/stable/InRelease dists/stable/Release
 
       - name: Create install instructions
         run: |

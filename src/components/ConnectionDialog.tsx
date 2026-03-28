@@ -16,6 +16,7 @@ const DB_TYPES = [
   { value: "mariadb" as const, label: "MariaDB", short: "MA", defaultPort: 3306, accent: "#fab387" },
   { value: "cockroachdb" as const, label: "CockroachDB", short: "CR", defaultPort: 26257, accent: "#cba6f7" },
   { value: "tidb" as const, label: "TiDB", short: "TI", defaultPort: 4000, accent: "#f38ba8" },
+  { value: "cassandra" as const, label: "Cassandra / ScyllaDB", short: "CS", defaultPort: 9042, accent: "#a6e3a1" },
 ];
 
 type ValidationField = "name" | "host" | "port" | "user" | "database";
@@ -55,6 +56,16 @@ function validateConnectionForm(
   if (normalized.db_type === "sqlite") {
     if (!normalized.database) {
       errors.database = "Database file path is required.";
+    }
+    return errors;
+  }
+
+  if (normalized.db_type === "cassandra") {
+    if (!normalized.host) {
+      errors.host = "Host is required.";
+    }
+    if (!Number.isInteger(normalized.port) || normalized.port < 1 || normalized.port > 65535) {
+      errors.port = "Port must be between 1 and 65535.";
     }
     return errors;
   }
@@ -374,12 +385,12 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
 
               <div className="form-row">
                 <div className={`form-group flex-1${getFieldError("database") ? " form-group--error" : ""}`}>
-                  <label>Database</label>
+                  <label>{form.db_type === "cassandra" ? "Keyspace (optional)" : "Database"}</label>
                   <input
                     value={form.database}
                     onChange={(e) => updateField("database", e.target.value)}
                     onBlur={() => touchField("database")}
-                    placeholder="mydb"
+                    placeholder={form.db_type === "cassandra" ? "my_keyspace" : "mydb"}
                     aria-invalid={!!getFieldError("database")}
                   />
                   {getFieldError("database") && (

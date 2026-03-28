@@ -216,6 +216,7 @@ pub async fn backup_database(
         DbType::Postgres | DbType::Cockroachdb => backup_postgres(&config, &request).await,
         DbType::Mysql | DbType::Mariadb | DbType::Tidb => backup_mysql(&config, &request).await,
         DbType::Sqlite => backup_sqlite(&config, &request).await,
+        DbType::Cassandra => Err("Backup is not supported for Cassandra/ScyllaDB".to_string()),
     }
 }
 
@@ -233,6 +234,7 @@ pub async fn restore_database(
         DbType::Postgres | DbType::Cockroachdb => restore_postgres(&config, &request).await,
         DbType::Mysql | DbType::Mariadb | DbType::Tidb => restore_mysql(&config, &request).await,
         DbType::Sqlite => restore_sqlite(&config, &request).await,
+        DbType::Cassandra => Err("Restore is not supported for Cassandra/ScyllaDB".to_string()),
     }
 }
 

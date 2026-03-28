@@ -36,3 +36,4 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 tauri-plugin-dialog = "2.6.0"
 sysinfo = "0.38.4"
+scylla = "1.5"

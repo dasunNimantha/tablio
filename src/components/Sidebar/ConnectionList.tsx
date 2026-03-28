@@ -115,7 +115,11 @@ export function ConnectionList({ onAddConnection }: Props) {
           <span className="connection-detail">
             {conn.db_type === "sqlite"
               ? conn.database
-              : `${conn.host}:${conn.port}/${conn.database}`}
+              : conn.db_type === "cassandra"
+                ? conn.database
+                  ? `${conn.host}:${conn.port}/${conn.database}`
+                  : `${conn.host}:${conn.port}`
+                : `${conn.host}:${conn.port}/${conn.database}`}
           </span>
         </div>
         <div className="connection-actions">

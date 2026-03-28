@@ -259,9 +259,43 @@ jobs:
       - name: Run SQLite integration tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --test sqlite_integration
 
+  test-cassandra:
+    name: Cassandra
+    runs-on: ubuntu-latest
+    services:
+      cassandra:
+        image: cassandra:4.1
+        ports:
+          - 9042:9042
+        options: >-
+          --health-cmd "cqlsh -e 'describe cluster'"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 60s
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run Cassandra integration tests
+        env:
+          TEST_CASSANDRA_HOST: "127.0.0.1"
+          TEST_CASSANDRA_PORT: "9042"
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test cassandra_integration
+
   build:
     name: Build (${{ matrix.platform }})
-    needs: [test-frontend, fmt-and-clippy, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite]
+    needs: [test-frontend, fmt-and-clippy, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite, test-cassandra]
     strategy:
       fail-fast: false
       matrix:

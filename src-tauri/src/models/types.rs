@@ -10,6 +10,7 @@ pub enum DbType {
     Mariadb,
     Cockroachdb,
     Tidb,
+    Cassandra,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -535,6 +536,10 @@ mod tests {
             r#""cockroachdb""#
         );
         assert_eq!(serde_json::to_string(&DbType::Tidb).unwrap(), r#""tidb""#);
+        assert_eq!(
+            serde_json::to_string(&DbType::Cassandra).unwrap(),
+            r#""cassandra""#
+        );
     }
 
     #[test]
@@ -549,6 +554,8 @@ mod tests {
         matches!(cr, DbType::Cockroachdb);
         let ti: DbType = serde_json::from_str(r#""tidb""#).unwrap();
         matches!(ti, DbType::Tidb);
+        let ca: DbType = serde_json::from_str(r#""cassandra""#).unwrap();
+        matches!(ca, DbType::Cassandra);
     }
 
     #[test]
