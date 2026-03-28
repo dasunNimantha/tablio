@@ -1,0 +1,34 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: Tablio
+Label: Tablio
+Suite: stable
+Codename: stable
+Architectures: amd64
+Components: main
+Description: Tablio APT repository
+Date: Sat, 28 Mar 2026 19:08:25 +0000
+MD5Sum:
+ 0ef3db5bece8880a82f0f29d9362514a              171 Release
+ 9239bce0c9118c0af2c00117f5b86b2e              397 main/binary-amd64/Packages
+ b54b8612ead4760903f4aa241bfc51a8              315 main/binary-amd64/Packages.gz
+SHA1:
+ 71f9ba78b960feb5d174828c5c717d0bb64bb9cb              171 Release
+ 9863009790d1bf6f0c09a268adbfaa8d350cf519              397 main/binary-amd64/Packages
+ 33359b8f0bf6adb64df1fdf18e9d5fad79bd989d              315 main/binary-amd64/Packages.gz
+SHA256:
+ e6fe093cb2fc65b7dbada4270ec3a27f21115c8bc47cb89e7e6aae46920653f8              171 Release
+ e868dd27af2a06f87cb8ac00e102b4b1b927f103a98e9cf2be18c0807a087705              397 main/binary-amd64/Packages
+ a83ef1ec5a2cbc0b52feda685dedb3faf51fc507038fe93fa26cb90137655fd7              315 main/binary-amd64/Packages.gz
+SHA512:
+ 83dafa763298277a964ebf90445af87dfb7391fafc2dd70f7ed08f56dc83e299aa7ab25adbe6a2ae2f148ac4841a1bc8025d3f83657f87e1203b747647c7e604              171 Release
+ cac0bfd5a301affe18598c9de98877dbb2392d9bcb89a4d531d7129de4b47041fb086c0919b132ce13c102ebb2cf6e3316ea56200e964caeb97f3704fa1f845f              397 main/binary-amd64/Packages
+ 588919a9a79a2fcfbc22cb2d1b3e440278e0cb8285c7f3afe4cb5ef8422930be51672229745b521a9c0799e5490f78bdeb8bd71fa0b988b8ed0e1e0ba244a9b1              315 main/binary-amd64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQT5yxjUytMSkSNF5aszsmWK21FtiQUCacgnKgAKCRAzsmWK21Ft
+ifDtAQDSfMqPZHMYMTMfIM9OR/XKig6TBydK3Rh7opF83rs5nwD8D0n3skoCFFVL
+06rsLGnDNU+XG6kPXnDookgu3l/lCAI=
+=GDK3
+-----END PGP SIGNATURE-----
