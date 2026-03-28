@@ -1,6 +1,6 @@
 {
   "productName": "Tablio",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "identifier": "com.tablio.app",
   "build": {
     "frontendDist": "../dist",
