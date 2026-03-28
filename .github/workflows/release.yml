@@ -372,8 +372,10 @@ jobs:
         with:
           name: ppa-orig-tarball
 
-      - name: Move orig tarball to parent directory
-        run: mv tablio_*.orig.tar.gz ../
+      - name: Sync working directory with orig tarball
+        run: |
+          mv tablio_*.orig.tar.gz ../
+          tar -xzf ../tablio_*.orig.tar.gz --strip-components=1
 
       - name: Extract version
         id: version
