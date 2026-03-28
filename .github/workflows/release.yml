@@ -366,14 +366,16 @@ jobs:
       - name: Build source package
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-          DEBUILD_LINTIAN: "no"
         run: |
+          dpkg-buildpackage -us -uc -S -sa -d
+          VERSION="${{ steps.version.outputs.version }}"
+          SUFFIX="${{ matrix.suffix }}"
           if [ -n "$GPG_PASSPHRASE" ]; then
-            export GPG_TTY=$(tty) 2>/dev/null || true
-            debuild -S -sa -d -k"${GPG_KEY_ID}" \
-              -p"gpg --batch --pinentry-mode loopback --passphrase '${GPG_PASSPHRASE}'"
+            debsign -k"${GPG_KEY_ID}" \
+              -p"gpg --batch --pinentry-mode loopback --passphrase '${GPG_PASSPHRASE}'" \
+              "../tablio_${VERSION}-0ppa1${SUFFIX}_source.changes"
           else
-            debuild -S -sa -d -k"${GPG_KEY_ID}"
+            debsign -k"${GPG_KEY_ID}" "../tablio_${VERSION}-0ppa1${SUFFIX}_source.changes"
           fi
 
       - name: Upload to PPA
