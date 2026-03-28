@@ -413,15 +413,15 @@ jobs:
           dpkg-scanpackages --multiversion pool > dists/stable/main/binary-amd64/Packages
           gzip -k -f dists/stable/main/binary-amd64/Packages
 
-          cat > dists/stable/Release <<'RELEASE_EOF'
-Origin: Tablio
-Label: Tablio
-Suite: stable
-Codename: stable
-Architectures: amd64
-Components: main
-Description: Tablio APT repository
-RELEASE_EOF
+          printf '%s\n' \
+            "Origin: Tablio" \
+            "Label: Tablio" \
+            "Suite: stable" \
+            "Codename: stable" \
+            "Architectures: amd64" \
+            "Components: main" \
+            "Description: Tablio APT repository" \
+            > dists/stable/Release
 
           apt-ftparchive release dists/stable >> dists/stable/Release
 
@@ -441,19 +441,19 @@ RELEASE_EOF
 
       - name: Create install instructions
         run: |
-          cat > gh-pages/apt/index.html <<'HTML_EOF'
-<!DOCTYPE html>
-<html><head><title>Tablio APT Repository</title></head>
-<body>
-<h1>Tablio APT Repository</h1>
-<pre>
-curl -fsSL https://dasunnimantha.github.io/tablio/apt/key.gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/tablio.gpg
-echo "deb https://dasunnimantha.github.io/tablio/apt stable main" | sudo tee /etc/apt/sources.list.d/tablio.list
-sudo apt update
-sudo apt install tablio
-</pre>
-</body></html>
-HTML_EOF
+          printf '%s\n' \
+            '<!DOCTYPE html>' \
+            '<html><head><title>Tablio APT Repository</title></head>' \
+            '<body>' \
+            '<h1>Tablio APT Repository</h1>' \
+            '<pre>' \
+            'curl -fsSL https://dasunnimantha.github.io/tablio/apt/key.gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/tablio.gpg' \
+            'echo "deb https://dasunnimantha.github.io/tablio/apt stable main" | sudo tee /etc/apt/sources.list.d/tablio.list' \
+            'sudo apt update' \
+            'sudo apt install tablio' \
+            '</pre>' \
+            '</body></html>' \
+            > gh-pages/apt/index.html
 
       - name: Deploy to GitHub Pages
         run: |
