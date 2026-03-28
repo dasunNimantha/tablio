@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pages: write
 
 jobs:
   test-frontend:
@@ -300,122 +301,110 @@ jobs:
           prerelease: ${{ contains(github.ref, '-') }}
           args: ${{ matrix.args }}
 
-  ppa-prepare:
-    name: Prepare PPA source
-    needs: [test-frontend, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite]
-    runs-on: ubuntu-22.04
-    outputs:
-      version: ${{ steps.version.outputs.version }}
+  publish-apt:
+    name: Publish APT repository
+    needs: [release]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
         with:
-          node-version: "lts/*"
-          cache: "npm"
+          path: source
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+        continue-on-error: true
 
-      - name: Build frontend
+      - name: Create repo structure
+        run: mkdir -p gh-pages/apt/pool gh-pages/apt/dists/stable/main/binary-amd64
+
+      - name: Initialize gh-pages branch if needed
         run: |
-          npm ci
-          npm run build
-
-      - name: Vendor Cargo dependencies
-        run: |
-          cd src-tauri
-          mkdir -p .cargo
-          cargo vendor vendor > .cargo/config.toml
+          if [ ! -d "gh-pages/.git" ]; then
+            mkdir -p gh-pages
+            cd gh-pages
+            git init
+            git checkout -b gh-pages
+            git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          fi
 
       - name: Extract version
         id: version
-        run: echo "version=$(grep '^version' src-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(grep '^version' source/src-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
 
-      - name: Downgrade Cargo.lock to v3 for Ubuntu repo cargo
-        run: sed -i 's/^version = 4/version = 3/' src-tauri/Cargo.lock
-
-      - name: Clean up build artifacts
-        run: rm -rf node_modules src-tauri/target
-
-      - name: Create orig tarball
+      - name: Download .deb from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          tar --exclude='.git' \
-              -czf "/tmp/tablio_${VERSION}.orig.tar.gz" \
-              -C .. tablio
-          cp "/tmp/tablio_${VERSION}.orig.tar.gz" .
-
-      - name: Upload orig tarball
-        uses: actions/upload-artifact@v4
-        with:
-          name: ppa-orig-tarball
-          path: tablio_${{ steps.version.outputs.version }}.orig.tar.gz
-
-  ppa-upload:
-    name: Upload to PPA (${{ matrix.distro }})
-    needs: [ppa-prepare]
-    runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        include:
-          - distro: noble
-            suffix: ""
-          - distro: jammy
-            suffix: "~jammy1"
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y devscripts debhelper dput
-
-      - name: Download orig tarball
-        uses: actions/download-artifact@v4
-        with:
-          name: ppa-orig-tarball
-
-      - name: Sync working directory with orig tarball
-        run: |
-          mv tablio_*.orig.tar.gz ../
-          tar -xzf ../tablio_*.orig.tar.gz --strip-components=1
-
-      - name: Extract version
-        id: version
-        run: echo "version=${{ needs.ppa-prepare.outputs.version }}" >> "$GITHUB_OUTPUT"
-
-      - name: Update changelog for target distro
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          SUFFIX="${{ matrix.suffix }}"
-          sed -i "1s/.*/tablio (${VERSION}-0ppa1${SUFFIX}) ${{ matrix.distro }}; urgency=medium/" debian/changelog
+          TAG="v${VERSION}"
+          for i in $(seq 1 30); do
+            if gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' 2>/dev/null | grep -q '\.deb$'; then
+              break
+            fi
+            echo "Waiting for .deb asset... (attempt $i)"
+            sleep 30
+          done
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.deb" --dir gh-pages/apt/pool
 
       - name: Import GPG key
         run: |
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
-          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)
-          echo "GPG_KEY_ID=${GPG_KEY_ID}" >> "$GITHUB_ENV"
 
-      - name: Build source package
+      - name: Export public key
+        run: |
+          gpg --armor --export > gh-pages/apt/key.gpg
+
+      - name: Generate APT metadata
+        run: |
+          cd gh-pages/apt
+          dpkg-scanpackages --multiversion pool > dists/stable/main/binary-amd64/Packages
+          gzip -k dists/stable/main/binary-amd64/Packages
+
+          cat > dists/stable/Release << EOF
+          Origin: Tablio
+          Label: Tablio
+          Suite: stable
+          Codename: stable
+          Architectures: amd64
+          Components: main
+          Description: Tablio APT repository
+          EOF
+          sed -i 's/^          //' dists/stable/Release
+
+          apt-ftparchive release dists/stable >> dists/stable/Release
+
+          gpg --batch --yes --default-key "$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)" \
+            -abs -o dists/stable/Release.gpg dists/stable/Release
+          gpg --batch --yes --default-key "$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)" \
+            --clearsign -o dists/stable/InRelease dists/stable/Release
+
+      - name: Create install instructions
+        run: |
+          cat > gh-pages/apt/index.html << 'HEREDOC'
+          <!DOCTYPE html>
+          <html><head><title>Tablio APT Repository</title></head>
+          <body>
+          <h1>Tablio APT Repository</h1>
+          <pre>
+          curl -fsSL https://dasunnimantha.github.io/tablio/apt/key.gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/tablio.gpg
+          echo "deb https://dasunnimantha.github.io/tablio/apt stable main" | sudo tee /etc/apt/sources.list.d/tablio.list
+          sudo apt update
+          sudo apt install tablio
+          </pre>
+          </body></html>
+          HEREDOC
+          sed -i 's/^          //' gh-pages/apt/index.html
+
+      - name: Deploy to GitHub Pages
+        run: |
+          cd gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "Update APT repo for v${{ steps.version.outputs.version }}"
+          git push origin gh-pages
         env:
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-        run: |
-          dpkg-buildpackage -us -uc -S -sa -d
-          VERSION="${{ steps.version.outputs.version }}"
-          SUFFIX="${{ matrix.suffix }}"
-          CHANGES="../tablio_${VERSION}-0ppa1${SUFFIX}_source.changes"
-          if [ -n "$GPG_PASSPHRASE" ]; then
-            echo "${GPG_PASSPHRASE}" > /tmp/gpg-pass
-            debsign -k"${GPG_KEY_ID}" \
-              -p"gpg --batch --pinentry-mode loopback --passphrase-file /tmp/gpg-pass" \
-              "${CHANGES}"
-            rm -f /tmp/gpg-pass
-          else
-            debsign -k"${GPG_KEY_ID}" "${CHANGES}"
-          fi
-
-      - name: Upload to PPA
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          SUFFIX="${{ matrix.suffix }}"
-          dput ppa:dasun777/tablio "../tablio_${VERSION}-0ppa1${SUFFIX}_source.changes"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
