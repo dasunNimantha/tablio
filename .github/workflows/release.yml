@@ -351,7 +351,7 @@ jobs:
             git clone --depth 1 --branch gh-pages "$REPO_URL" gh-pages
           else
             mkdir -p gh-pages
-            cd gh-pages
+            pushd gh-pages
             git init -b gh-pages
             git remote add origin "$REPO_URL"
             git config user.name "github-actions[bot]"
@@ -360,6 +360,7 @@ jobs:
             git add README.md
             git commit -m "Initialize gh-pages branch"
             git push origin gh-pages
+            popd
           fi
           mkdir -p gh-pages/apt/pool gh-pages/apt/dists/stable/main/binary-amd64
           touch gh-pages/.nojekyll
