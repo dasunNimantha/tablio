@@ -1,0 +1,26 @@
+#!/usr/bin/make -f
+
+export CARGO_HOME := $(CURDIR)/debian/cargo-home
+export PATH := $(CARGO_HOME)/bin:$(PATH)
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	mkdir -p $(CARGO_HOME)
+
+override_dh_auto_build:
+	cd src-tauri && cargo build --release --offline
+
+override_dh_auto_install:
+	install -Dm755 src-tauri/target/release/tablio debian/tablio/usr/bin/tablio
+	install -Dm644 assets/logo.png debian/tablio/usr/share/icons/hicolor/256x256/apps/tablio.png
+	install -Dm644 debian/tablio.desktop debian/tablio/usr/share/applications/tablio.desktop
+
+override_dh_auto_test:
+
+override_dh_auto_clean:
+	rm -rf src-tauri/target debian/cargo-home
+
+override_dh_shlibdeps:
+	dh_shlibdeps --dpkg-shlibdeps-params=--ignore-missing-info

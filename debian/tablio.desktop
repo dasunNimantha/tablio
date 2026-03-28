@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Tablio
+Comment=Open-source desktop database client
+Exec=tablio
+Icon=tablio
+Type=Application
+Categories=Development;Database;
+Keywords=database;sql;postgresql;mysql;mariadb;sqlite;
+StartupWMClass=tablio

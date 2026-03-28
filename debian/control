@@ -1,0 +1,36 @@
+Source: tablio
+Section: database
+Priority: optional
+Maintainer: Dasun Nimantha Perera <dasun4@pm.me>
+Build-Depends: debhelper-compat (= 13),
+               cargo,
+               rustc,
+               libwebkit2gtk-4.1-dev,
+               libsoup-3.0-dev,
+               libjavascriptcoregtk-4.1-dev,
+               librsvg2-dev,
+               libssl-dev,
+               libayatana-appindicator3-dev,
+               libxdo-dev,
+               pkgconf
+Standards-Version: 4.6.2
+Homepage: https://tablio.dev
+Vcs-Git: https://github.com/dasunNimantha/tablio.git
+Vcs-Browser: https://github.com/dasunNimantha/tablio
+Rules-Requires-Root: no
+
+Package: tablio
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends},
+         libwebkit2gtk-4.1-0,
+         libayatana-appindicator3-1
+Description: Open-source desktop database client and management tool
+ Tablio is a free, open-source desktop database client built with Rust
+ and React. It provides a modern native interface for connecting to
+ PostgreSQL, MySQL, MariaDB, SQLite, CockroachDB, and TiDB databases
+ from one application.
+ .
+ Features include a high-performance data grid with inline editing,
+ SQL query console with syntax highlighting, visual query execution
+ plan viewer, JSON column editor, pg_stat performance insights,
+ schema management, and data import/export.

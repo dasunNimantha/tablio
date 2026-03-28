@@ -299,3 +299,83 @@ jobs:
           releaseDraft: true
           prerelease: ${{ contains(github.ref, '-') }}
           args: ${{ matrix.args }}
+
+  ppa-upload:
+    name: Upload to PPA (${{ matrix.distro }})
+    needs: [test-frontend, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite]
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - distro: noble
+            suffix: ""
+          - distro: jammy
+            suffix: "~jammy1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          cache: "npm"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y devscripts debhelper dput
+
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Vendor Cargo dependencies
+        run: |
+          cd src-tauri
+          mkdir -p .cargo
+          cargo vendor vendor > .cargo/config.toml
+
+      - name: Extract version
+        id: version
+        run: echo "version=$(grep '^version' src-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
+
+      - name: Update changelog for target distro
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SUFFIX="${{ matrix.suffix }}"
+          sed -i "1s/.*/tablio (${VERSION}-0ppa1${SUFFIX}) ${{ matrix.distro }}; urgency=medium/" debian/changelog
+
+      - name: Create orig tarball
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          tar --exclude='.git' \
+              --exclude='node_modules' \
+              --exclude='src-tauri/target' \
+              -czf "../tablio_${VERSION}.orig.tar.gz" \
+              -C .. tablio
+
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)
+          echo "GPG_KEY_ID=${GPG_KEY_ID}" >> "$GITHUB_ENV"
+
+      - name: Build source package
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [ -n "$GPG_PASSPHRASE" ]; then
+            export GPG_TTY=$(tty) 2>/dev/null || true
+            debuild -S -sa -d -k"${GPG_KEY_ID}" \
+              -p"gpg --batch --pinentry-mode loopback --passphrase '${GPG_PASSPHRASE}'"
+          else
+            debuild -S -sa -d -k"${GPG_KEY_ID}"
+          fi
+
+      - name: Upload to PPA
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SUFFIX="${{ matrix.suffix }}"
+          dput ppa:dasun777/tablio "../tablio_${VERSION}-0ppa1${SUFFIX}_source.changes"

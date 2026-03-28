@@ -1,0 +1,12 @@
+tablio (0.1.0-0ppa1) noble; urgency=medium
+
+  * Initial PPA release.
+  * Desktop database client for PostgreSQL, MySQL, MariaDB, SQLite,
+    CockroachDB, and TiDB.
+  * Data grid with inline editing.
+  * SQL query console with syntax highlighting.
+  * Visual query execution plan viewer.
+  * JSON column viewer and editor.
+  * pg_stat performance insights.
+
+ -- Dasun Nimantha Perera <dasun4@pm.me>  Sat, 28 Mar 2026 12:00:00 +0530

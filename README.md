@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Open-source, cross-platform desktop database client</strong><br/>
-  Browse, query, and manage PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, and SQLite databases — all from one app.
+  Browse, query, and manage your databases from one native application.
 </p>
 
 <p align="center">
@@ -17,84 +17,83 @@
 </p>
 
 <p align="center">
-  <a href="#-features">Features</a> •
-  <a href="#-installation">Installation</a> •
-  <a href="#-development">Development</a> •
-  <a href="#-keyboard-shortcuts">Shortcuts</a> •
-  <a href="#-architecture">Architecture</a>
+  <a href="#features">Features</a> •
+  <a href="#installation">Installation</a> •
+  <a href="#development">Development</a> •
+  <a href="#architecture">Architecture</a>
 </p>
 
 ---
 
 ## Why Tablio?
 
-Most database GUIs are either bloated, expensive, or locked to a single engine. Tablio is a **free, lightweight, native desktop app** that connects to PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, and SQLite with a single unified interface. Built with Rust and React for speed and reliability.
+Most database GUIs are either bloated, expensive, or locked to a single engine. Tablio is a free, lightweight, native desktop application that connects to PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, and SQLite through a single unified interface. Built with Rust and React for speed and reliability.
 
 ---
 
-## ✨ Features
+## Features
 
 ### Multi-Database Support
-Connect to **PostgreSQL**, **MySQL**, **MariaDB**, **CockroachDB**, **TiDB**, and **SQLite** databases from one app. Each database has a **dedicated driver** with engine-specific optimizations — no generic fallbacks. Save, organize, and color-code your connections. Supports **SSL** and **SSH tunnels**.
+Connect to PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, and SQLite from one application. Each database has a dedicated driver with engine-specific optimizations. Save, organize, and color-code your connections. Supports SSL and SSH tunnels.
 
-### Data Browsing & Inline Editing
+### Data Browsing and Inline Editing
 - Paginated, sortable, and filterable data grid powered by AG Grid
-- Edit cells inline — changes are highlighted and saved as a single transaction
-- **Search with navigation** — `Ctrl+F` to search, `Enter` / `Shift+Enter` or arrow buttons to jump between matches with the current match highlighted
+- Edit cells inline with change tracking and single-transaction commits
+- In-grid search with match navigation between results
 - Show, hide, and reorder columns with persisted preferences
 - Row detail view for tables with many columns
-- Primary key / foreign key badges on column headers
+- Primary key and foreign key badges on column headers
 
 ### SQL Query Console
 - Monaco-powered editor with syntax highlighting and table/column autocompletion
-- Execute with `Ctrl+Enter`, view results in a resizable split pane
+- Execute queries and view results in a resizable split pane
 - Built-in SQL formatter, query history with pinning, and saved queries
-- EXPLAIN plan visualization
-- **Chart mode** — visualize query results as bar, line, pie, or scatter charts
+- Visual query execution plan viewer
+- Chart mode for visualizing query results as bar, line, pie, or scatter charts
 
 ### Schema Management
-- Lazy-loaded object tree: databases → schemas → tables, views, functions
+- Lazy-loaded object tree: databases, schemas, tables, views, and functions
 - Create and alter tables through dialogs
 - View DDL for any database object
 - Drop and truncate with confirmation
 - Table structure and storage statistics
 
 ### Server Administration
-- Live activity dashboard: active sessions, locks, server configuration
-- Query performance statistics (e.g. `pg_stat_statements`)
+- Live activity dashboard with active sessions, locks, and server configuration
+- Query performance statistics from pg_stat_statements
 - Role management: create, alter, and drop database roles
-- App resource usage in the status bar
+- Application resource usage in the status bar
 
-### Data Import & Export
-- Export to **CSV**, **JSON**, or **SQL INSERT** statements
+### Data Import and Export
+- Export to CSV, JSON, or SQL INSERT statements
 - Import data from files
-- Backup and restore databases
-- Cross-connection dump and restore
-- Uses native tools (`pg_dump`, `mysqldump`) when available
+- Backup and restore databases with cross-connection support
+- Uses native tools (pg_dump, mysqldump) when available
 
 ### Visual Tools
-- **ERD viewer** — entity-relationship diagrams with pan, zoom, and search
-- **Chart view** — turn any SELECT result into a chart
-- **Multiple themes** — light and dark variants with zoom control (50–200%)
-- **Tabbed interface** — work with multiple tables and queries side by side
+- Entity-relationship diagram viewer with pan, zoom, and search
+- Chart view for turning SELECT results into visualizations
+- JSON column viewer and editor with structured tree navigation
+- Light and dark themes with zoom control
+- Tabbed interface for working with multiple tables and queries side by side
 
 ---
 
-## 📦 Installation
+## Installation
 
 ### Download
 
-Grab the latest build from [**Releases**](../../releases):
+Grab the latest build from [Releases](../../releases):
 
 | Platform | Formats |
 |----------|---------|
-| **Linux** | `.deb`, `.AppImage` |
-| **macOS** | `.dmg` (Intel + Apple Silicon) |
-| **Windows** | `.msi`, `.exe` (NSIS) |
+| Linux | `.deb`, `.AppImage` |
+| macOS | `.dmg` (Intel and Apple Silicon) |
+| Windows | `.msi`, `.exe` |
 
 ### Build from Source
 
-**Prerequisites:**
+Prerequisites:
 - [Rust](https://rustup.rs/) 1.70+
 - [Node.js](https://nodejs.org/) 18+
 - Linux system dependencies:
@@ -113,7 +112,7 @@ npm run tauri build
 
 ---
 
-## 🛠 Development
+## Development
 
 ```bash
 npm install
@@ -140,46 +139,14 @@ TEST_TIDB_URL="mysql://root@localhost:4000/testdb" \
 cargo test
 ```
 
-### CI Pipeline
-
-GitHub Actions runs on every push and PR:
-- TypeScript type checking + Vitest frontend tests
-- `cargo fmt --check` + `cargo clippy`
-- Multi-version integration tests:
-  - **PostgreSQL** 14, 15, 16, 17, 18
-  - **MySQL** 8.0, 8.4
-  - **MariaDB** 10.11, 11.4
-  - **CockroachDB** (latest)
-  - **TiDB** (latest)
-  - **SQLite** (embedded)
-- Cross-platform release builds (Linux, macOS, Windows)
-
 ---
 
-## ⌨ Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+Enter` | Execute query |
-| `Ctrl+F` | Search in data grid |
-| `Enter` (in search) | Jump to next match |
-| `Shift+Enter` (in search) | Jump to previous match |
-| `Ctrl+?` | Show shortcuts overlay |
-| `Ctrl+` `+` / `Ctrl+` `-` | Zoom in / out |
-| `Ctrl+0` | Reset zoom |
-| Double-click cell | Edit cell value |
-| `Enter` | Commit cell edit |
-| `Escape` | Cancel cell edit / close search |
-| `Tab` | Commit and move to next cell |
-
----
-
-## 🏗 Architecture
+## Architecture
 
 ```
 tablio/
-├── src/                    # React 18 + TypeScript frontend
-│   ├── components/         # DataGrid, QueryConsole, ERD, Sidebar, etc.
+├── src/                    # React + TypeScript frontend
+│   ├── components/         # DataGrid, QueryConsole, ERD, Sidebar
 │   ├── stores/             # Zustand state (tabs, connections)
 │   └── lib/                # Themes, Tauri IPC bridge, utilities
 ├── src-tauri/
@@ -191,32 +158,20 @@ tablio/
 │   │   ├── commands/       # Tauri IPC command handlers
 │   │   └── lib.rs          # Command registration
 │   └── tests/              # Integration tests per database engine
-└── .github/workflows/      # CI + automated release pipeline
+└── .github/workflows/      # CI and release pipeline
 ```
 
 | Layer | Stack |
 |-------|-------|
-| **Backend** | Rust, sqlx, Tokio, Tauri 2 |
-| **Frontend** | React 18, TypeScript, AG Grid, Monaco Editor, Chart.js |
-| **State** | Zustand + localStorage persistence |
-| **IPC** | Tauri invoke commands |
-| **Build** | Vite 6, cargo, GitHub Actions |
+| Backend | Rust, sqlx, Tokio, Tauri 2 |
+| Frontend | React, TypeScript, AG Grid, Monaco Editor, Chart.js |
+| State | Zustand with localStorage persistence |
+| IPC | Tauri invoke commands |
+| Build | Vite, cargo, GitHub Actions |
 
 ---
 
-## 🤝 Contributing
-
-Contributions are welcome! Feel free to open issues and pull requests.
-
-1. Fork the repository
-2. Create your branch (`git checkout -b feature/my-feature`)
-3. Commit your changes (`git commit -m 'Add my feature'`)
-4. Push to the branch (`git push origin feature/my-feature`)
-5. Open a Pull Request
-
----
-
-## 📄 License
+## License
 
 [MIT](LICENSE)
 
