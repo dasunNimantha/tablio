@@ -1,4 +1,4 @@
-tablio (0.1.6-0ppa1) noble; urgency=medium
+tablio (0.1.7-0ppa1) noble; urgency=medium
 
   * Initial PPA release.
   * Desktop database client for PostgreSQL, MySQL, MariaDB, SQLite,
