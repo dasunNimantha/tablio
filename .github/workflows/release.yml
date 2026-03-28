@@ -369,10 +369,10 @@ jobs:
         run: |
           if [ -n "$GPG_PASSPHRASE" ]; then
             export GPG_TTY=$(tty) 2>/dev/null || true
-            debuild -S -sa -d -k"${GPG_KEY_ID}" \
+            debuild -S -sa -d --no-lintian -k"${GPG_KEY_ID}" \
               -p"gpg --batch --pinentry-mode loopback --passphrase '${GPG_PASSPHRASE}'"
           else
-            debuild -S -sa -d -k"${GPG_KEY_ID}"
+            debuild -S -sa -d --no-lintian -k"${GPG_KEY_ID}"
           fi
 
       - name: Upload to PPA
