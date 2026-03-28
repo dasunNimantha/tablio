@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html><head><title>Tablio APT Repository</title></head>
+<body>
+<h1>Tablio APT Repository</h1>
+<pre>
+curl -fsSL https://dasunnimantha.github.io/tablio/apt/key.gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/tablio.gpg
+echo "deb https://dasunnimantha.github.io/tablio/apt stable main" | sudo tee /etc/apt/sources.list.d/tablio.list
+sudo apt update
+sudo apt install tablio
+</pre>
+</body></html>
