@@ -338,14 +338,14 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           tar --exclude='.git' \
-              -czf "../tablio_${VERSION}.orig.tar.gz" \
+              -czf "tablio_${VERSION}.orig.tar.gz" \
               -C .. tablio
 
       - name: Upload orig tarball
         uses: actions/upload-artifact@v4
         with:
           name: ppa-orig-tarball
-          path: ../tablio_${{ steps.version.outputs.version }}.orig.tar.gz
+          path: tablio_${{ steps.version.outputs.version }}.orig.tar.gz
 
   ppa-upload:
     name: Upload to PPA (${{ matrix.distro }})
@@ -370,7 +370,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ppa-orig-tarball
-          path: ..
+
+      - name: Move orig tarball to parent directory
+        run: mv tablio_*.orig.tar.gz ../
 
       - name: Extract version
         id: version
