@@ -347,12 +347,13 @@ jobs:
           SUFFIX="${{ matrix.suffix }}"
           sed -i "1s/.*/tablio (${VERSION}-0ppa1${SUFFIX}) ${{ matrix.distro }}; urgency=medium/" debian/changelog
 
+      - name: Clean up build artifacts
+        run: rm -rf node_modules src-tauri/target
+
       - name: Create orig tarball
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           tar --exclude='.git' \
-              --exclude='node_modules' \
-              --exclude='src-tauri/target' \
               -czf "../tablio_${VERSION}.orig.tar.gz" \
               -C .. tablio
 
