@@ -338,8 +338,9 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           tar --exclude='.git' \
-              -czf "tablio_${VERSION}.orig.tar.gz" \
+              -czf "/tmp/tablio_${VERSION}.orig.tar.gz" \
               -C .. tablio
+          cp "/tmp/tablio_${VERSION}.orig.tar.gz" .
 
       - name: Upload orig tarball
         uses: actions/upload-artifact@v4
