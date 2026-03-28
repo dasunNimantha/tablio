@@ -300,17 +300,12 @@ jobs:
           prerelease: ${{ contains(github.ref, '-') }}
           args: ${{ matrix.args }}
 
-  ppa-upload:
-    name: Upload to PPA (${{ matrix.distro }})
+  ppa-prepare:
+    name: Prepare PPA source
     needs: [test-frontend, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite]
     runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        include:
-          - distro: noble
-            suffix: ""
-          - distro: jammy
-            suffix: "~jammy1"
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -320,11 +315,6 @@ jobs:
           cache: "npm"
 
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y devscripts debhelper dput
 
       - name: Build frontend
         run: |
@@ -341,12 +331,6 @@ jobs:
         id: version
         run: echo "version=$(grep '^version' src-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
 
-      - name: Update changelog for target distro
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          SUFFIX="${{ matrix.suffix }}"
-          sed -i "1s/.*/tablio (${VERSION}-0ppa1${SUFFIX}) ${{ matrix.distro }}; urgency=medium/" debian/changelog
-
       - name: Clean up build artifacts
         run: rm -rf node_modules src-tauri/target
 
@@ -356,6 +340,47 @@ jobs:
           tar --exclude='.git' \
               -czf "../tablio_${VERSION}.orig.tar.gz" \
               -C .. tablio
+
+      - name: Upload orig tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppa-orig-tarball
+          path: ../tablio_${{ steps.version.outputs.version }}.orig.tar.gz
+
+  ppa-upload:
+    name: Upload to PPA (${{ matrix.distro }})
+    needs: [ppa-prepare]
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - distro: noble
+            suffix: ""
+          - distro: jammy
+            suffix: "~jammy1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y devscripts debhelper dput
+
+      - name: Download orig tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: ppa-orig-tarball
+          path: ..
+
+      - name: Extract version
+        id: version
+        run: echo "version=${{ needs.ppa-prepare.outputs.version }}" >> "$GITHUB_OUTPUT"
+
+      - name: Update changelog for target distro
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SUFFIX="${{ matrix.suffix }}"
+          sed -i "1s/.*/tablio (${VERSION}-0ppa1${SUFFIX}) ${{ matrix.distro }}; urgency=medium/" debian/changelog
 
       - name: Import GPG key
         run: |
