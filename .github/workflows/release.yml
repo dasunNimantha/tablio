@@ -344,25 +344,25 @@ jobs:
         with:
           path: source
 
-      - name: Checkout gh-pages
-        uses: actions/checkout@v4
-        with:
-          ref: gh-pages
-          path: gh-pages
-        continue-on-error: true
-
-      - name: Create repo structure
-        run: mkdir -p gh-pages/apt/pool gh-pages/apt/dists/stable/main/binary-amd64
-
-      - name: Initialize gh-pages branch if needed
+      - name: Setup gh-pages working directory
         run: |
-          if [ ! -d "gh-pages/.git" ]; then
+          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          if git ls-remote --exit-code --heads "$REPO_URL" gh-pages >/dev/null 2>&1; then
+            git clone --depth 1 --branch gh-pages "$REPO_URL" gh-pages
+          else
             mkdir -p gh-pages
             cd gh-pages
-            git init
-            git checkout -b gh-pages
-            git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            git init -b gh-pages
+            git remote add origin "$REPO_URL"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            echo "# Tablio APT Repository" > README.md
+            git add README.md
+            git commit -m "Initialize gh-pages branch"
+            git push origin gh-pages
           fi
+          mkdir -p gh-pages/apt/pool gh-pages/apt/dists/stable/main/binary-amd64
+          touch gh-pages/.nojekyll
 
       - name: Extract version
         id: version
@@ -374,69 +374,86 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TAG="v${VERSION}"
+          echo "Looking for .deb in release $TAG..."
           for i in $(seq 1 30); do
-            if gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' 2>/dev/null | grep -q '\.deb$'; then
+            ASSETS=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' 2>/dev/null || true)
+            if echo "$ASSETS" | grep -q '\.deb$'; then
+              echo "Found .deb asset(s):"
+              echo "$ASSETS" | grep '\.deb$'
               break
             fi
-            echo "Waiting for .deb asset... (attempt $i)"
+            echo "Waiting for .deb asset... (attempt $i/30)"
             sleep 30
           done
           gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.deb" --dir gh-pages/apt/pool
+          echo "Downloaded:"
+          ls -la gh-pages/apt/pool/
 
       - name: Import GPG key
         run: |
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback" > ~/.gnupg/gpg.conf
+          gpgconf --kill gpg-agent || true
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
-          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
-          gpgconf --kill gpg-agent
+          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG 2>/dev/null | grep '^sec' | head -1 | awk '{print $2}' | cut -d'/' -f2)
+          echo "GPG_KEY_ID=$GPG_KEY_ID" >> "$GITHUB_ENV"
+          echo "Using GPG key: $GPG_KEY_ID"
 
       - name: Export public key
-        run: |
-          gpg --armor --export > gh-pages/apt/key.gpg
+        run: gpg --armor --export "$GPG_KEY_ID" > gh-pages/apt/key.gpg
 
-      - name: Generate APT metadata
+      - name: Generate APT metadata and sign
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           cd gh-pages/apt
-          dpkg-scanpackages --multiversion pool > dists/stable/main/binary-amd64/Packages
-          gzip -k dists/stable/main/binary-amd64/Packages
 
-          cat > dists/stable/Release << EOF
-          Origin: Tablio
-          Label: Tablio
-          Suite: stable
-          Codename: stable
-          Architectures: amd64
-          Components: main
-          Description: Tablio APT repository
-          EOF
-          sed -i 's/^          //' dists/stable/Release
+          dpkg-scanpackages --multiversion pool > dists/stable/main/binary-amd64/Packages
+          gzip -k -f dists/stable/main/binary-amd64/Packages
+
+          cat > dists/stable/Release <<'RELEASE_EOF'
+Origin: Tablio
+Label: Tablio
+Suite: stable
+Codename: stable
+Architectures: amd64
+Components: main
+Description: Tablio APT repository
+RELEASE_EOF
 
           apt-ftparchive release dists/stable >> dists/stable/Release
 
-          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)
+          echo "$GPG_PASSPHRASE" > /tmp/gpg-pass
 
-          gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+          gpg --batch --yes --pinentry-mode loopback --passphrase-file /tmp/gpg-pass \
             --default-key "$GPG_KEY_ID" -abs -o dists/stable/Release.gpg dists/stable/Release
-          gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+
+          gpg --batch --yes --pinentry-mode loopback --passphrase-file /tmp/gpg-pass \
             --default-key "$GPG_KEY_ID" --clearsign -o dists/stable/InRelease dists/stable/Release
+
+          rm -f /tmp/gpg-pass
+
+          echo "APT metadata generated successfully:"
+          ls -la dists/stable/
+          ls -la dists/stable/main/binary-amd64/
 
       - name: Create install instructions
         run: |
-          cat > gh-pages/apt/index.html << 'HEREDOC'
-          <!DOCTYPE html>
-          <html><head><title>Tablio APT Repository</title></head>
-          <body>
-          <h1>Tablio APT Repository</h1>
-          <pre>
-          curl -fsSL https://dasunnimantha.github.io/tablio/apt/key.gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/tablio.gpg
-          echo "deb https://dasunnimantha.github.io/tablio/apt stable main" | sudo tee /etc/apt/sources.list.d/tablio.list
-          sudo apt update
-          sudo apt install tablio
-          </pre>
-          </body></html>
-          HEREDOC
-          sed -i 's/^          //' gh-pages/apt/index.html
+          cat > gh-pages/apt/index.html <<'HTML_EOF'
+<!DOCTYPE html>
+<html><head><title>Tablio APT Repository</title></head>
+<body>
+<h1>Tablio APT Repository</h1>
+<pre>
+curl -fsSL https://dasunnimantha.github.io/tablio/apt/key.gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/tablio.gpg
+echo "deb https://dasunnimantha.github.io/tablio/apt stable main" | sudo tee /etc/apt/sources.list.d/tablio.list
+sudo apt update
+sudo apt install tablio
+</pre>
+</body></html>
+HTML_EOF
 
       - name: Deploy to GitHub Pages
         run: |
@@ -444,7 +461,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || git commit -m "Update APT repo for v${{ steps.version.outputs.version }}"
-          git push origin gh-pages
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          if git diff --cached --quiet; then
+            echo "No changes to deploy"
+          else
+            git commit -m "Update APT repo for v${{ steps.version.outputs.version }}"
+            git push origin gh-pages
+            echo "Deployed successfully"
+          fi
