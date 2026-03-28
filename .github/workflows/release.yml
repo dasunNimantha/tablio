@@ -331,6 +331,9 @@ jobs:
         id: version
         run: echo "version=$(grep '^version' src-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
 
+      - name: Downgrade Cargo.lock to v3 for Ubuntu repo cargo
+        run: sed -i 's/^version = 4/version = 3/' src-tauri/Cargo.lock
+
       - name: Clean up build artifacts
         run: rm -rf node_modules src-tauri/target
 
