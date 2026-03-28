@@ -370,12 +370,15 @@ jobs:
           dpkg-buildpackage -us -uc -S -sa -d
           VERSION="${{ steps.version.outputs.version }}"
           SUFFIX="${{ matrix.suffix }}"
+          CHANGES="../tablio_${VERSION}-0ppa1${SUFFIX}_source.changes"
           if [ -n "$GPG_PASSPHRASE" ]; then
+            echo "${GPG_PASSPHRASE}" > /tmp/gpg-pass
             debsign -k"${GPG_KEY_ID}" \
-              -p"gpg --batch --pinentry-mode loopback --passphrase '${GPG_PASSPHRASE}'" \
-              "../tablio_${VERSION}-0ppa1${SUFFIX}_source.changes"
+              -p"gpg --batch --pinentry-mode loopback --passphrase-file /tmp/gpg-pass" \
+              "${CHANGES}"
+            rm -f /tmp/gpg-pass
           else
-            debsign -k"${GPG_KEY_ID}" "../tablio_${VERSION}-0ppa1${SUFFIX}_source.changes"
+            debsign -k"${GPG_KEY_ID}" "${CHANGES}"
           fi
 
       - name: Upload to PPA
