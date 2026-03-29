@@ -365,14 +365,14 @@ jobs:
           tagName: v__VERSION__
           releaseName: "v__VERSION__"
           releaseBody: |
-            ## Tablio v__VERSION__
+            ## First release
 
-            Database management tool for PostgreSQL, MySQL, MariaDB, SQLite, CockroachDB, TiDB, and Cassandra/ScyllaDB.
+            Initial public release of Tablio — an open-source desktop database client for PostgreSQL, MySQL, MariaDB, SQLite, CockroachDB, TiDB, and Cassandra/ScyllaDB.
 
-            See the assets below for installers and binaries.
-            - **Windows**: `.msi` installer or `.exe` NSIS
+            ### Downloads
+            - **Windows**: `.msi` or `.exe` (NSIS)
             - **macOS**: `.dmg` (Intel and Apple Silicon)
-            - **Linux**: `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL/SUSE), `.AppImage` (portable)
+            - **Linux**: `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL/SUSE), `.AppImage` (portable), AUR `tablio-bin`
           releaseDraft: false
           prerelease: ${{ contains(github.ref, '-') }}
           args: ${{ matrix.args }}
