@@ -17,6 +17,7 @@ const DB_TYPES = [
   { value: "cockroachdb" as const, label: "CockroachDB", short: "CR", defaultPort: 26257, accent: "#cba6f7" },
   { value: "tidb" as const, label: "TiDB", short: "TI", defaultPort: 4000, accent: "#f38ba8" },
   { value: "cassandra" as const, label: "Cassandra / ScyllaDB", short: "CS", defaultPort: 9042, accent: "#a6e3a1" },
+  { value: "mssql" as const, label: "Microsoft SQL Server", short: "MS", defaultPort: 1433, accent: "#7aa2f7" },
 ];
 
 type ValidationField = "name" | "host" | "port" | "user" | "database";

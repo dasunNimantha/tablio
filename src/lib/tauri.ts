@@ -131,7 +131,7 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
 export interface ConnectionConfig {
   id: string;
   name: string;
-  db_type: "postgres" | "mysql" | "sqlite" | "mariadb" | "cockroachdb" | "tidb" | "cassandra";
+  db_type: "postgres" | "mysql" | "sqlite" | "mariadb" | "cockroachdb" | "tidb" | "cassandra" | "mssql";
   host: string;
   port: number;
   user: string;

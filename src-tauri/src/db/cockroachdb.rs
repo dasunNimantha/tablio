@@ -17,7 +17,12 @@ impl CockroachdbDriver {
         let ssl_mode = if config.ssl { "require" } else { "disable" };
         let url = format!(
             "postgres://{}:{}@{}:{}/{}?sslmode={}",
-            config.user, config.password, config.host, config.port, config.database, ssl_mode
+            urlencoding::encode(&config.user),
+            urlencoding::encode(&config.password),
+            &config.host,
+            config.port,
+            urlencoding::encode(&config.database),
+            ssl_mode
         );
         let pool = PgPoolOptions::new()
             .max_connections(5)

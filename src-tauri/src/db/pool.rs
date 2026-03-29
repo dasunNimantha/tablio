@@ -6,6 +6,7 @@ use tokio::sync::RwLock;
 use crate::db::cassandra::CassandraDriver;
 use crate::db::cockroachdb::CockroachdbDriver;
 use crate::db::mariadb::MariadbDriver;
+use crate::db::mssql::MssqlDriver;
 use crate::db::mysql::MysqlDriver;
 use crate::db::postgres::PostgresDriver;
 use crate::db::sqlite::SqliteDriver;
@@ -60,7 +61,7 @@ impl PoolManager {
             .arg("-p")
             .arg(config.ssh_port.to_string())
             .arg("-o")
-            .arg("StrictHostKeyChecking=no")
+            .arg("StrictHostKeyChecking=accept-new")
             .arg("-o")
             .arg("ExitOnForwardFailure=yes");
 
@@ -91,12 +92,30 @@ impl PoolManager {
             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         }
 
+        let stderr_output = if let Some(mut stderr) = child.stderr.take() {
+            use tokio::io::AsyncReadExt;
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf).await;
+            buf
+        } else {
+            String::new()
+        };
         let _ = child.kill().await;
-        Err(anyhow!("SSH tunnel failed to become ready within timeout"))
+        if stderr_output.is_empty() {
+            Err(anyhow!("SSH tunnel failed to become ready within timeout"))
+        } else {
+            Err(anyhow!("SSH tunnel failed: {}", stderr_output.trim()))
+        }
     }
 
     pub async fn connect(&self, config: ConnectionConfig) -> Result<String> {
         let id = config.id.clone();
+
+        // Clean up any existing connection and tunnel for this id
+        if let Some(mut old_tunnel) = self.ssh_tunnels.write().await.remove(&id) {
+            let _ = old_tunnel.child.kill().await;
+        }
+        self.connections.write().await.remove(&id);
 
         let effective_config = if config.ssh_enabled && !config.ssh_host.is_empty() {
             let tunnel = Self::setup_ssh_tunnel(&config).await?;
@@ -131,6 +150,9 @@ impl PoolManager {
                 .await
                 .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
             DbType::Cassandra => CassandraDriver::connect(&effective_config)
+                .await
+                .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
+            DbType::Mssql => MssqlDriver::connect(&effective_config)
                 .await
                 .map(|d| Arc::new(d) as Arc<dyn DatabaseDriver>),
         };
@@ -203,6 +225,7 @@ impl PoolManager {
                 DbType::Tidb => Box::new(TidbDriver::connect(&effective_config).await?),
                 DbType::Sqlite => Box::new(SqliteDriver::connect(&effective_config).await?),
                 DbType::Cassandra => Box::new(CassandraDriver::connect(&effective_config).await?),
+                DbType::Mssql => Box::new(MssqlDriver::connect(&effective_config).await?),
             };
             driver.test_connection().await
         }
@@ -216,5 +239,60 @@ impl PoolManager {
 
     pub async fn is_connected(&self, id: &str) -> bool {
         self.connections.read().await.contains_key(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pool_manager_new_is_empty() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let pm = PoolManager::new();
+            assert!(!pm.is_connected("nonexistent").await);
+        });
+    }
+
+    #[test]
+    fn pool_manager_get_driver_missing_returns_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let pm = PoolManager::new();
+            let result = pm.get_driver("missing").await;
+            let err = result.err().expect("expected error");
+            assert!(err.to_string().contains("not found"));
+        });
+    }
+
+    #[test]
+    fn pool_manager_get_config_missing_returns_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let pm = PoolManager::new();
+            let result = pm.get_config("missing").await;
+            let err = result.err().expect("expected error");
+            assert!(err.to_string().contains("not found"));
+        });
+    }
+
+    #[test]
+    fn pool_manager_disconnect_nonexistent_succeeds() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let pm = PoolManager::new();
+            let result = pm.disconnect("nonexistent").await;
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn pool_manager_default_trait() {
+        let pm = PoolManager::default();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            assert!(!pm.is_connected("any").await);
+        });
     }
 }

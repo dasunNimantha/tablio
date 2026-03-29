@@ -17,7 +17,12 @@ impl PostgresDriver {
         let ssl_mode = if config.ssl { "require" } else { "prefer" };
         let url = format!(
             "postgres://{}:{}@{}:{}/{}?sslmode={}",
-            config.user, config.password, config.host, config.port, config.database, ssl_mode
+            urlencoding::encode(&config.user),
+            urlencoding::encode(&config.password),
+            &config.host,
+            config.port,
+            urlencoding::encode(&config.database),
+            ssl_mode
         );
         let pool = PgPoolOptions::new()
             .max_connections(5)
@@ -236,7 +241,7 @@ impl DatabaseDriver for PostgresDriver {
 
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
         let start = Instant::now();
-        let explain_sql = format!("EXPLAIN (ANALYZE, FORMAT JSON) {}", sql);
+        let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", sql);
         let row = sqlx::query(&explain_sql).fetch_one(&self.pool).await?;
         let elapsed = start.elapsed().as_millis() as u64;
 

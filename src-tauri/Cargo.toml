@@ -37,3 +37,6 @@ dirs = "6"
 tauri-plugin-dialog = "2.6.0"
 sysinfo = "0.38.4"
 scylla = "1.5"
+tiberius = { version = "0.12.3", default-features = false, features = ["tokio", "rustls", "tds73"] }
+tokio-util = { version = "0.7.18", features = ["compat"] }
+urlencoding = "2.1.3"

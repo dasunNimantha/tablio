@@ -11,6 +11,7 @@ pub enum DbType {
     Cockroachdb,
     Tidb,
     Cassandra,
+    Mssql,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -540,6 +541,7 @@ mod tests {
             serde_json::to_string(&DbType::Cassandra).unwrap(),
             r#""cassandra""#
         );
+        assert_eq!(serde_json::to_string(&DbType::Mssql).unwrap(), r#""mssql""#);
     }
 
     #[test]
@@ -556,6 +558,8 @@ mod tests {
         matches!(ti, DbType::Tidb);
         let ca: DbType = serde_json::from_str(r#""cassandra""#).unwrap();
         matches!(ca, DbType::Cassandra);
+        let ms: DbType = serde_json::from_str(r#""mssql""#).unwrap();
+        matches!(ms, DbType::Mssql);
     }
 
     #[test]

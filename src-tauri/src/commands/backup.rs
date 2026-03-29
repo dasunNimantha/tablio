@@ -217,6 +217,7 @@ pub async fn backup_database(
         DbType::Mysql | DbType::Mariadb | DbType::Tidb => backup_mysql(&config, &request).await,
         DbType::Sqlite => backup_sqlite(&config, &request).await,
         DbType::Cassandra => Err("Backup is not supported for Cassandra/ScyllaDB".to_string()),
+        DbType::Mssql => Err("Backup is not supported for Microsoft SQL Server".to_string()),
     }
 }
 
@@ -235,6 +236,7 @@ pub async fn restore_database(
         DbType::Mysql | DbType::Mariadb | DbType::Tidb => restore_mysql(&config, &request).await,
         DbType::Sqlite => restore_sqlite(&config, &request).await,
         DbType::Cassandra => Err("Restore is not supported for Cassandra/ScyllaDB".to_string()),
+        DbType::Mssql => Err("Restore is not supported for Microsoft SQL Server".to_string()),
     }
 }
 

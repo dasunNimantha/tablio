@@ -28,6 +28,16 @@ pub fn mysql_row_to_json_values(
                 .ok()
                 .map(|v| serde_json::Value::Number(v.into()))
                 .unwrap_or(serde_json::Value::Null),
+            "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" | "INT UNSIGNED" => row
+                .try_get::<u32, _>(i)
+                .ok()
+                .map(|v| serde_json::Value::Number(v.into()))
+                .unwrap_or(serde_json::Value::Null),
+            "BIGINT UNSIGNED" => row
+                .try_get::<u64, _>(i)
+                .ok()
+                .map(|v| serde_json::Value::Number(v.into()))
+                .unwrap_or(serde_json::Value::Null),
             "FLOAT" | "DOUBLE" => row
                 .try_get::<f64, _>(i)
                 .ok()
@@ -91,8 +101,13 @@ pub fn json_to_sql_literal(val: &serde_json::Value) -> String {
         serde_json::Value::Null => "NULL".to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        _ => format!("'{}'", val.to_string().replace('\'', "''")),
+        serde_json::Value::String(s) => {
+            format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
+        }
+        _ => format!(
+            "'{}'",
+            val.to_string().replace('\\', "\\\\").replace('\'', "''")
+        ),
     }
 }
 
@@ -830,6 +845,9 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
     );
 
     for update in &changes.updates {
+        if update.primary_key_values.is_empty() {
+            anyhow::bail!("Cannot update row: no primary key values provided");
+        }
         let set_clause = format!(
             "{} = {}",
             quote_ident(&update.column_name),
@@ -866,6 +884,9 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
     }
 
     for delete in &changes.deletes {
+        if delete.primary_key_values.is_empty() {
+            anyhow::bail!("Cannot delete row: no primary key values provided");
+        }
         let where_clause: Vec<String> = delete
             .primary_key_values
             .iter()
@@ -1075,5 +1096,64 @@ mod tests {
     #[test]
     fn sql_fragment_unsafe_single_quote() {
         assert!(sql_fragment_is_unsafe("default 'x'"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for fixes applied to prevent future issues
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn json_to_sql_string_escapes_backslash() {
+        let val = json_to_sql_literal(&serde_json::Value::String("path\\to\\file".into()));
+        assert_eq!(val, "'path\\\\to\\\\file'");
+    }
+
+    #[test]
+    fn json_to_sql_string_backslash_quote_injection() {
+        let val = json_to_sql_literal(&serde_json::Value::String("\\' OR 1=1 --".into()));
+        assert_eq!(val, "'\\\\'' OR 1=1 --'");
+        assert!(!val.contains("\\' "));
+    }
+
+    #[test]
+    fn json_to_sql_string_backslash_at_end() {
+        let val = json_to_sql_literal(&serde_json::Value::String("test\\".into()));
+        assert_eq!(val, "'test\\\\'");
+    }
+
+    #[test]
+    fn json_to_sql_array_escapes_backslash() {
+        let val = serde_json::json!(["a\\b"]);
+        let lit = json_to_sql_literal(&val);
+        assert!(lit.contains("\\\\"));
+    }
+
+    #[test]
+    fn filter_unsafe_union_injection() {
+        assert!(filter_is_unsafe("1=1 UNION SELECT * FROM mysql.user--"));
+    }
+
+    #[test]
+    fn filter_unsafe_nested_comment() {
+        assert!(filter_is_unsafe("id = 1 /* "));
+        assert!(filter_is_unsafe("id = 1 */"));
+    }
+
+    #[test]
+    fn filter_safe_normal_operators() {
+        assert!(!filter_is_unsafe("`age` >= 18 AND `status` = 'active'"));
+        assert!(!filter_is_unsafe("`price` BETWEEN 10 AND 100"));
+    }
+
+    #[test]
+    fn quote_ident_prevents_injection() {
+        let evil = "`; DROP TABLE users; --";
+        let quoted = quote_ident(evil);
+        assert_eq!(quoted, "```; DROP TABLE users; --`");
+    }
+
+    #[test]
+    fn sql_fragment_unsafe_double_dash() {
+        assert!(sql_fragment_is_unsafe("text--evil"));
     }
 }

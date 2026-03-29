@@ -17,7 +17,12 @@ impl TidbDriver {
         let ssl_mode = if config.ssl { "REQUIRED" } else { "PREFERRED" };
         let url = format!(
             "mysql://{}:{}@{}:{}/{}?ssl-mode={}",
-            config.user, config.password, config.host, config.port, config.database, ssl_mode
+            urlencoding::encode(&config.user),
+            urlencoding::encode(&config.password),
+            &config.host,
+            config.port,
+            urlencoding::encode(&config.database),
+            ssl_mode
         );
         let pool = MySqlPoolOptions::new()
             .max_connections(5)

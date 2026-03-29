@@ -17,7 +17,12 @@ impl MysqlDriver {
         let ssl_mode = if config.ssl { "REQUIRED" } else { "PREFERRED" };
         let url = format!(
             "mysql://{}:{}@{}:{}/{}?ssl-mode={}",
-            config.user, config.password, config.host, config.port, config.database, ssl_mode
+            urlencoding::encode(&config.user),
+            urlencoding::encode(&config.password),
+            &config.host,
+            config.port,
+            urlencoding::encode(&config.database),
+            ssl_mode
         );
         let pool = MySqlPoolOptions::new()
             .max_connections(5)
@@ -347,27 +352,64 @@ impl DatabaseDriver for MysqlDriver {
           LEFT JOIN information_schema.PROCESSLIST p \
             ON r.trx_mysql_thread_id = p.ID \
           ORDER BY r.trx_started";
-        let rows = sqlx::raw_sql(sql).fetch_all(&self.pool).await?;
+        let result = sqlx::raw_sql(sql).fetch_all(&self.pool).await;
 
-        Ok(rows
-            .iter()
-            .map(|r| LockInfo {
-                pid: r.try_get::<i64, _>("pid").unwrap_or(0) as i32,
-                locktype: r
-                    .try_get::<String, _>("lock_id")
-                    .unwrap_or_else(|_| "InnoDB".into()),
-                database: r.try_get::<String, _>("db").unwrap_or_default(),
-                relation: r.try_get::<String, _>("relation").unwrap_or_default(),
-                mode: r.try_get::<String, _>("mode").unwrap_or_default(),
-                granted: r.try_get::<i32, _>("granted").unwrap_or(0) == 1,
-                query: r.try_get::<String, _>("query").unwrap_or_default(),
-                user: r.try_get::<String, _>("user").unwrap_or_default(),
-                state: r.try_get::<String, _>("state").unwrap_or_default(),
-                duration_ms: r
-                    .try_get::<i64, _>("duration_s")
-                    .ok()
-                    .map(|s| s as f64 * 1000.0),
-            })
-            .collect())
+        match result {
+            Ok(rows) => Ok(rows
+                .iter()
+                .map(|r| LockInfo {
+                    pid: r.try_get::<i64, _>("pid").unwrap_or(0) as i32,
+                    locktype: r
+                        .try_get::<String, _>("lock_id")
+                        .unwrap_or_else(|_| "InnoDB".into()),
+                    database: r.try_get::<String, _>("db").unwrap_or_default(),
+                    relation: r.try_get::<String, _>("relation").unwrap_or_default(),
+                    mode: r.try_get::<String, _>("mode").unwrap_or_default(),
+                    granted: r.try_get::<i32, _>("granted").unwrap_or(0) == 1,
+                    query: r.try_get::<String, _>("query").unwrap_or_default(),
+                    user: r.try_get::<String, _>("user").unwrap_or_default(),
+                    state: r.try_get::<String, _>("state").unwrap_or_default(),
+                    duration_ms: r
+                        .try_get::<i64, _>("duration_s")
+                        .ok()
+                        .map(|s| s as f64 * 1000.0),
+                })
+                .collect()),
+            Err(_) => {
+                // Fallback for MySQL < 8.0 (no performance_schema.data_locks)
+                let fallback_sql = "SELECT \
+                    r.trx_mysql_thread_id AS pid, \
+                    CAST(r.trx_id AS CHAR) AS lock_id, \
+                    IFNULL(r.trx_query, '') AS query, \
+                    IFNULL(CAST(p.USER AS CHAR), '') AS user, \
+                    IFNULL(CAST(r.trx_state AS CHAR), '') AS state, \
+                    TIMESTAMPDIFF(SECOND, r.trx_started, NOW()) AS duration_s \
+                  FROM information_schema.INNODB_TRX r \
+                  LEFT JOIN information_schema.PROCESSLIST p \
+                    ON r.trx_mysql_thread_id = p.ID \
+                  ORDER BY r.trx_started";
+                let rows = sqlx::raw_sql(fallback_sql).fetch_all(&self.pool).await?;
+                Ok(rows
+                    .iter()
+                    .map(|r| LockInfo {
+                        pid: r.try_get::<i64, _>("pid").unwrap_or(0) as i32,
+                        locktype: r
+                            .try_get::<String, _>("lock_id")
+                            .unwrap_or_else(|_| "InnoDB".into()),
+                        database: String::new(),
+                        relation: String::new(),
+                        mode: String::new(),
+                        granted: true,
+                        query: r.try_get::<String, _>("query").unwrap_or_default(),
+                        user: r.try_get::<String, _>("user").unwrap_or_default(),
+                        state: r.try_get::<String, _>("state").unwrap_or_default(),
+                        duration_ms: r
+                            .try_get::<i64, _>("duration_s")
+                            .ok()
+                            .map(|s| s as f64 * 1000.0),
+                    })
+                    .collect())
+            }
+        }
     }
 }

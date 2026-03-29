@@ -1,6 +1,7 @@
 pub mod cassandra;
 pub mod cockroachdb;
 pub mod mariadb;
+pub mod mssql;
 pub mod mysql;
 pub mod mysql_common;
 pub mod pg_common;

@@ -345,6 +345,9 @@ impl DatabaseDriver for CassandraDriver {
         if let Some(ref f) = filter {
             let f = f.trim();
             if !f.is_empty() {
+                if f.contains(';') || f.contains("--") || f.contains("/*") || f.contains("*/") {
+                    anyhow::bail!("Filter contains invalid characters (; -- /* */)");
+                }
                 cql.push_str(&format!(" WHERE {}", f));
             }
         }
@@ -372,6 +375,7 @@ impl DatabaseDriver for CassandraDriver {
             .map_err(|e| anyhow!("{}", e))?;
 
         let (_, all_rows) = rows_from_result(&result);
+        let fetched_total = all_rows.len() as i64;
 
         let rows: Vec<Vec<serde_json::Value>> = all_rows
             .into_iter()
@@ -379,7 +383,7 @@ impl DatabaseDriver for CassandraDriver {
             .take(limit as usize)
             .collect();
 
-        let total = rows.len() as i64 + offset as i64;
+        let total = fetched_total;
 
         Ok(TableData {
             columns,
@@ -500,23 +504,24 @@ impl DatabaseDriver for CassandraDriver {
         let tbl = &changes.table;
         let qualified = format!("{}.{}", quote_ident(ks), quote_ident(tbl));
 
+        let mut stmts = Vec::new();
+
         for update in &changes.updates {
+            if update.primary_key_values.is_empty() {
+                anyhow::bail!("Cannot update row: no primary key values provided");
+            }
             let pk_clause: Vec<String> = update
                 .primary_key_values
                 .iter()
                 .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_cql_literal(val)))
                 .collect();
-            let cql = format!(
+            stmts.push(format!(
                 "UPDATE {} SET {} = {} WHERE {}",
                 qualified,
                 quote_ident(&update.column_name),
                 json_to_cql_literal(&update.new_value),
                 pk_clause.join(" AND ")
-            );
-            self.session
-                .query_unpaged(cql.as_str(), &[])
-                .await
-                .map_err(|e| anyhow!("{}", e))?;
+            ));
         }
 
         for insert in &changes.inserts {
@@ -527,31 +532,43 @@ impl DatabaseDriver for CassandraDriver {
                 .iter()
                 .map(|(_, v)| json_to_cql_literal(v))
                 .collect();
-            let cql = format!(
+            stmts.push(format!(
                 "INSERT INTO {} ({}) VALUES ({})",
                 qualified,
                 col_names.join(", "),
                 vals.join(", ")
-            );
-            self.session
-                .query_unpaged(cql.as_str(), &[])
-                .await
-                .map_err(|e| anyhow!("{}", e))?;
+            ));
         }
 
         for delete in &changes.deletes {
+            if delete.primary_key_values.is_empty() {
+                anyhow::bail!("Cannot delete row: no primary key values provided");
+            }
             let pk_clause: Vec<String> = delete
                 .primary_key_values
                 .iter()
                 .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_cql_literal(val)))
                 .collect();
-            let cql = format!(
+            stmts.push(format!(
                 "DELETE FROM {} WHERE {}",
                 qualified,
                 pk_clause.join(" AND ")
-            );
+            ));
+        }
+
+        if stmts.is_empty() {
+            return Ok(());
+        }
+
+        if stmts.len() == 1 {
             self.session
-                .query_unpaged(cql.as_str(), &[])
+                .query_unpaged(stmts[0].as_str(), &[])
+                .await
+                .map_err(|e| anyhow!("{}", e))?;
+        } else {
+            let batch_cql = format!("BEGIN BATCH\n{}\nAPPLY BATCH", stmts.join(";\n"));
+            self.session
+                .query_unpaged(batch_cql.as_str(), &[])
                 .await
                 .map_err(|e| anyhow!("{}", e))?;
         }
@@ -566,6 +583,15 @@ impl DatabaseDriver for CassandraDriver {
         table_name: &str,
         columns: &[ColumnDefinition],
     ) -> Result<()> {
+        for col in columns {
+            if col.data_type.contains(';')
+                || col.data_type.contains("--")
+                || col.data_type.contains("/*")
+            {
+                anyhow::bail!("Invalid character in data type for column {}", col.name);
+            }
+        }
+
         let col_defs: Vec<String> = columns
             .iter()
             .map(|c| format!("{} {}", quote_ident(&c.name), c.data_type))
@@ -605,6 +631,26 @@ impl DatabaseDriver for CassandraDriver {
     ) -> Result<()> {
         let qualified = format!("{}.{}", quote_ident(database), quote_ident(table_name));
         for op in operations {
+            match op {
+                AlterTableOperation::AddColumn { column } => {
+                    if column.data_type.contains(';')
+                        || column.data_type.contains("--")
+                        || column.data_type.contains("/*")
+                    {
+                        anyhow::bail!("Invalid character in data type for column {}", column.name);
+                    }
+                }
+                AlterTableOperation::ChangeColumnType {
+                    column_name,
+                    new_type,
+                } => {
+                    if new_type.contains(';') || new_type.contains("--") || new_type.contains("/*")
+                    {
+                        anyhow::bail!("Invalid character in data type for column {}", column_name);
+                    }
+                }
+                _ => {}
+            }
             let cql = match op {
                 AlterTableOperation::AddColumn { column } => {
                     format!(
@@ -712,19 +758,41 @@ impl DatabaseDriver for CassandraDriver {
         let col_str = col_list.join(", ");
         let mut count = 0u64;
 
-        for row in rows {
-            let vals: Vec<String> = row.iter().map(json_to_cql_literal).collect();
-            let cql = format!(
-                "INSERT INTO {} ({}) VALUES ({})",
-                qualified,
-                col_str,
-                vals.join(", ")
-            );
-            self.session
-                .query_unpaged(cql.as_str(), &[])
-                .await
-                .map_err(|e| anyhow!("{}", e))?;
-            count += 1;
+        const BATCH_SIZE: usize = 50;
+        for chunk in rows.chunks(BATCH_SIZE) {
+            if chunk.len() == 1 {
+                let vals: Vec<String> = chunk[0].iter().map(json_to_cql_literal).collect();
+                let cql = format!(
+                    "INSERT INTO {} ({}) VALUES ({})",
+                    qualified,
+                    col_str,
+                    vals.join(", ")
+                );
+                self.session
+                    .query_unpaged(cql.as_str(), &[])
+                    .await
+                    .map_err(|e| anyhow!("{}", e))?;
+                count += 1;
+            } else {
+                let stmts: Vec<String> = chunk
+                    .iter()
+                    .map(|row| {
+                        let vals: Vec<String> = row.iter().map(json_to_cql_literal).collect();
+                        format!(
+                            "INSERT INTO {} ({}) VALUES ({})",
+                            qualified,
+                            col_str,
+                            vals.join(", ")
+                        )
+                    })
+                    .collect();
+                let batch_cql = format!("BEGIN BATCH\n{}\nAPPLY BATCH", stmts.join(";\n"));
+                self.session
+                    .query_unpaged(batch_cql.as_str(), &[])
+                    .await
+                    .map_err(|e| anyhow!("{}", e))?;
+                count += chunk.len() as u64;
+            }
         }
         Ok(count)
     }
@@ -872,5 +940,189 @@ impl DatabaseDriver for CassandraDriver {
             .await
             .map_err(|e| anyhow!("{}", e))?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_ident_simple() {
+        assert_eq!(quote_ident("col"), r#""col""#);
+    }
+
+    #[test]
+    fn quote_ident_with_double_quote() {
+        assert_eq!(quote_ident(r#"col"umn"#), r#""col""umn""#);
+    }
+
+    #[test]
+    fn quote_ident_empty() {
+        assert_eq!(quote_ident(""), r#""""#);
+    }
+
+    #[test]
+    fn quote_ident_prevents_injection() {
+        let evil = r#""; DROP KEYSPACE test; --"#;
+        let quoted = quote_ident(evil);
+        assert!(quoted.starts_with('"'));
+        assert!(quoted.ends_with('"'));
+    }
+
+    #[test]
+    fn json_to_cql_literal_null() {
+        assert_eq!(json_to_cql_literal(&serde_json::Value::Null), "NULL");
+    }
+
+    #[test]
+    fn json_to_cql_literal_bool() {
+        assert_eq!(json_to_cql_literal(&serde_json::Value::Bool(true)), "true");
+        assert_eq!(
+            json_to_cql_literal(&serde_json::Value::Bool(false)),
+            "false"
+        );
+    }
+
+    #[test]
+    fn json_to_cql_literal_number() {
+        assert_eq!(
+            json_to_cql_literal(&serde_json::Value::Number(42i64.into())),
+            "42"
+        );
+    }
+
+    #[test]
+    fn json_to_cql_literal_string() {
+        assert_eq!(
+            json_to_cql_literal(&serde_json::Value::String("hello".into())),
+            "'hello'"
+        );
+    }
+
+    #[test]
+    fn json_to_cql_literal_string_escapes_quotes() {
+        assert_eq!(
+            json_to_cql_literal(&serde_json::Value::String("O'Brien".into())),
+            "'O''Brien'"
+        );
+    }
+
+    #[test]
+    fn json_to_cql_literal_string_injection_attempt() {
+        let val = json_to_cql_literal(&serde_json::Value::String("'; DROP TABLE t; --".into()));
+        assert_eq!(val, "'''; DROP TABLE t; --'");
+    }
+
+    #[test]
+    fn json_to_cql_literal_array() {
+        let val = serde_json::json!([1, 2, 3]);
+        let lit = json_to_cql_literal(&val);
+        assert_eq!(lit, "[1, 2, 3]");
+    }
+
+    #[test]
+    fn json_to_cql_literal_map() {
+        let val = serde_json::json!({"key": "val"});
+        let lit = json_to_cql_literal(&val);
+        assert!(lit.starts_with('{'));
+        assert!(lit.ends_with('}'));
+        assert!(lit.contains("'key'"));
+        assert!(lit.contains("'val'"));
+    }
+
+    #[test]
+    fn system_keyspaces_filtered() {
+        for ks in SYSTEM_KEYSPACES {
+            assert!([
+                "system",
+                "system_auth",
+                "system_distributed",
+                "system_distributed_everywhere",
+                "system_schema",
+                "system_traces",
+                "system_views",
+                "system_virtual_schema"
+            ]
+            .contains(ks));
+        }
+    }
+
+    #[test]
+    fn cql_value_to_json_text() {
+        use scylla::value::CqlValue;
+        let val = cql_value_to_json("", &CqlValue::Text("hello".to_string()));
+        assert_eq!(val, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn cql_value_to_json_boolean() {
+        use scylla::value::CqlValue;
+        assert_eq!(
+            cql_value_to_json("", &CqlValue::Boolean(true)),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            cql_value_to_json("", &CqlValue::Boolean(false)),
+            serde_json::json!(false)
+        );
+    }
+
+    #[test]
+    fn cql_value_to_json_int() {
+        use scylla::value::CqlValue;
+        assert_eq!(
+            cql_value_to_json("", &CqlValue::Int(42)),
+            serde_json::json!(42)
+        );
+    }
+
+    #[test]
+    fn cql_value_to_json_bigint() {
+        use scylla::value::CqlValue;
+        assert_eq!(
+            cql_value_to_json("", &CqlValue::BigInt(9999999999i64)),
+            serde_json::json!(9999999999i64)
+        );
+    }
+
+    #[test]
+    fn cql_value_to_json_float() {
+        use scylla::value::CqlValue;
+        let val = cql_value_to_json("", &CqlValue::Float(1.5));
+        assert!((val.as_f64().unwrap() - 1.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn cql_value_to_json_double() {
+        use scylla::value::CqlValue;
+        let val = cql_value_to_json("", &CqlValue::Double(3.14));
+        assert!((val.as_f64().unwrap() - 3.14).abs() < 0.001);
+    }
+
+    #[test]
+    fn cql_value_to_json_empty() {
+        use scylla::value::CqlValue;
+        assert_eq!(
+            cql_value_to_json("", &CqlValue::Empty),
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn cql_value_to_json_blob() {
+        use scylla::value::CqlValue;
+        let val = cql_value_to_json("", &CqlValue::Blob(vec![0xDE, 0xAD]));
+        assert_eq!(val, serde_json::json!("0xdead"));
+    }
+
+    #[test]
+    fn cql_value_to_json_list() {
+        use scylla::value::CqlValue;
+        let val = cql_value_to_json(
+            "",
+            &CqlValue::List(vec![CqlValue::Int(1), CqlValue::Int(2)]),
+        );
+        assert_eq!(val, serde_json::json!([1, 2]));
     }
 }

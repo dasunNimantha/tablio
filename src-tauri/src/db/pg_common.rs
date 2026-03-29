@@ -36,20 +36,36 @@ pub fn pg_row_to_json_values(
             "FLOAT4" => row
                 .try_get::<f32, _>(i)
                 .ok()
-                .and_then(|v| serde_json::Number::from_f64(v as f64))
-                .map(serde_json::Value::Number)
+                .map(|v| {
+                    let f = v as f64;
+                    if f.is_finite() {
+                        serde_json::Number::from_f64(f)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::String(v.to_string()))
+                    } else {
+                        serde_json::Value::String(v.to_string())
+                    }
+                })
                 .unwrap_or(serde_json::Value::Null),
             "FLOAT8" => row
                 .try_get::<f64, _>(i)
                 .ok()
-                .and_then(serde_json::Number::from_f64)
-                .map(serde_json::Value::Number)
+                .map(|v| {
+                    if v.is_finite() {
+                        serde_json::Number::from_f64(v)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::String(v.to_string()))
+                    } else {
+                        serde_json::Value::String(v.to_string())
+                    }
+                })
                 .unwrap_or(serde_json::Value::Null),
             "NUMERIC" => row
                 .try_get::<rust_decimal::Decimal, _>(i)
                 .ok()
                 .map(|d| {
                     use rust_decimal::prelude::ToPrimitive;
+                    // to_f64() can lose precision for large or high-scale decimals; string fallback preserves exact value.
                     d.to_f64()
                         .and_then(serde_json::Number::from_f64)
                         .map(serde_json::Value::Number)
@@ -109,7 +125,17 @@ pub fn quote_ident(name: &str) -> String {
 
 pub fn filter_is_unsafe(filter: &str) -> bool {
     let s = filter.trim();
-    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/")
+    if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
+        return true;
+    }
+    let u = s.to_uppercase();
+    if u.contains("(SELECT") {
+        return true;
+    }
+    // UNION-based injection (narrow patterns to avoid false positives e.g. `'a UNION b'`)
+    u.contains(" UNION SELECT")
+        || u.contains(" UNION ALL SELECT")
+        || u.contains(" UNION DISTINCT SELECT")
 }
 
 pub fn sql_fragment_is_unsafe(s: &str) -> bool {
@@ -352,7 +378,7 @@ pub async fn pg_list_tables(
         "SELECT t.table_name, t.table_type, \
                 COALESCE(c.reltuples::bigint, 0) as row_estimate \
          FROM information_schema.tables t \
-         LEFT JOIN pg_class c ON c.relname = t.table_name \
+         LEFT JOIN pg_class c ON c.relname = t.table_name AND c.relkind IN ('r', 'v', 'm', 'f', 'p') \
          LEFT JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = t.table_schema \
          WHERE t.table_schema = $1 \
          ORDER BY t.table_name",
@@ -647,9 +673,12 @@ pub async fn pg_get_ddl(
 ) -> Result<String> {
     match object_type.to_uppercase().as_str() {
         "VIEW" => {
-            let sql = "SELECT pg_get_viewdef($1::regclass, true) AS def";
-            let fq = format!("{}.{}", schema, object_name);
-            let row = sqlx::query(sql).bind(&fq).fetch_one(pool).await?;
+            let sql = "SELECT pg_get_viewdef((quote_ident($1::text) || '.' || quote_ident($2::text))::regclass, true) AS def";
+            let row = sqlx::query(sql)
+                .bind(schema)
+                .bind(object_name)
+                .fetch_one(pool)
+                .await?;
             let def: String = row.get("def");
             Ok(format!(
                 "CREATE OR REPLACE VIEW {}.{} AS\n{}",
@@ -941,6 +970,16 @@ pub async fn pg_import_data(
     Ok(total_inserted)
 }
 
+fn pg_drop_object_sql_kind(object_type: &str) -> &'static str {
+    match object_type.to_uppercase().as_str() {
+        "VIEW" => "VIEW",
+        "FUNCTION" => "FUNCTION",
+        "PROCEDURE" => "PROCEDURE",
+        "MATERIALIZED VIEW" => "MATERIALIZED VIEW",
+        _ => "TABLE",
+    }
+}
+
 pub async fn pg_drop_object(
     pool: &PgPool,
     _database: &str,
@@ -948,10 +987,7 @@ pub async fn pg_drop_object(
     object_name: &str,
     object_type: &str,
 ) -> Result<()> {
-    let kind = match object_type.to_uppercase().as_str() {
-        "VIEW" => "VIEW",
-        _ => "TABLE",
-    };
+    let kind = pg_drop_object_sql_kind(object_type);
     let sql = format!(
         "DROP {} IF EXISTS {}.{} CASCADE",
         kind,
@@ -1024,6 +1060,9 @@ pub async fn pg_apply_changes(pool: &PgPool, changes: &DataChanges) -> Result<()
     );
 
     for update in &changes.updates {
+        if update.primary_key_values.is_empty() {
+            anyhow::bail!("Cannot update row: no primary key values provided");
+        }
         let set_clause = format!(
             "{} = {}",
             quote_ident(&update.column_name),
@@ -1060,6 +1099,9 @@ pub async fn pg_apply_changes(pool: &PgPool, changes: &DataChanges) -> Result<()
     }
 
     for delete in &changes.deletes {
+        if delete.primary_key_values.is_empty() {
+            anyhow::bail!("Cannot delete row: no primary key values provided");
+        }
         let where_clause: Vec<String> = delete
             .primary_key_values
             .iter()
@@ -1197,5 +1239,116 @@ mod tests {
             json_to_sql_literal(&serde_json::Value::String("O'Brien".into())),
             "'O''Brien'"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for fixes applied to prevent future issues
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn filter_unsafe_union_injection() {
+        assert!(filter_is_unsafe("1=1 UNION SELECT * FROM pg_shadow--"));
+    }
+
+    #[test]
+    fn filter_unsafe_stacked_query() {
+        assert!(filter_is_unsafe("1=1; DROP TABLE users"));
+    }
+
+    #[test]
+    fn filter_unsafe_nested_comment() {
+        assert!(filter_is_unsafe("id = 1 /* "));
+        assert!(filter_is_unsafe("id = 1 */"));
+    }
+
+    #[test]
+    fn filter_safe_normal_operators() {
+        assert!(!filter_is_unsafe("\"age\" >= 18 AND \"status\" = 'active'"));
+        assert!(!filter_is_unsafe("\"price\" BETWEEN 10 AND 100"));
+        assert!(!filter_is_unsafe("\"name\" IS NOT NULL"));
+    }
+
+    #[test]
+    fn json_to_sql_string_multiple_quotes() {
+        assert_eq!(
+            json_to_sql_literal(&serde_json::Value::String("it''s a 'test'".into())),
+            "'it''''s a ''test'''"
+        );
+    }
+
+    #[test]
+    fn json_to_sql_string_with_backslash() {
+        let val = json_to_sql_literal(&serde_json::Value::String("path\\to\\file".into()));
+        assert_eq!(val, "'path\\to\\file'");
+    }
+
+    #[test]
+    fn json_to_sql_array_serializes() {
+        let val = serde_json::json!(["a", "b"]);
+        let lit = json_to_sql_literal(&val);
+        assert!(lit.starts_with('\''));
+        assert!(lit.ends_with('\''));
+    }
+
+    #[test]
+    fn quote_ident_prevents_injection() {
+        let evil = r#""; DROP TABLE users; --"#;
+        let quoted = quote_ident(evil);
+        assert!(quoted.starts_with('"'));
+        assert!(quoted.ends_with('"'));
+        // Inner `"` is doubled so the payload cannot close the identifier early.
+        assert_eq!(quoted, "\"\"\"; DROP TABLE users; --\"");
+    }
+
+    #[test]
+    fn sql_fragment_unsafe_double_dash() {
+        assert!(sql_fragment_is_unsafe("text--evil"));
+    }
+
+    #[test]
+    fn sql_fragment_unsafe_comment_start() {
+        assert!(sql_fragment_is_unsafe("int/*"));
+    }
+
+    #[test]
+    fn sql_fragment_unsafe_comment_end() {
+        assert!(sql_fragment_is_unsafe("int*/"));
+    }
+
+    #[test]
+    fn filter_unsafe_subquery_attempt() {
+        assert!(filter_is_unsafe("1=1) OR (SELECT password FROM pg_shadow)"));
+    }
+
+    #[test]
+    fn pg_drop_object_kind_function_and_materialized_view() {
+        assert_eq!(pg_drop_object_sql_kind("function"), "FUNCTION");
+        assert_eq!(
+            pg_drop_object_sql_kind("Materialized View"),
+            "MATERIALIZED VIEW"
+        );
+        assert_eq!(pg_drop_object_sql_kind("view"), "VIEW");
+        assert_eq!(pg_drop_object_sql_kind("procedure"), "PROCEDURE");
+        assert_eq!(pg_drop_object_sql_kind("table"), "TABLE");
+        assert_eq!(pg_drop_object_sql_kind("unknown"), "TABLE");
+    }
+
+    /// If primary key values were omitted, UPDATE/DELETE would emit `WHERE ` with no predicates.
+    #[test]
+    fn empty_primary_key_values_would_emit_bad_where_clause() {
+        let fq_table = format!("{}.{}", quote_ident("public"), quote_ident("users"));
+        let set_clause = format!(
+            "{} = {}",
+            quote_ident("name"),
+            json_to_sql_literal(&serde_json::json!("x"))
+        );
+        let where_clause: Vec<String> = vec![];
+        let sql = format!(
+            "UPDATE {} SET {} WHERE {}",
+            fq_table,
+            set_clause,
+            where_clause.join(" AND ")
+        );
+        assert_eq!(sql, r#"UPDATE "public"."users" SET "name" = 'x' WHERE "#);
     }
 }

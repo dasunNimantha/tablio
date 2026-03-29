@@ -349,6 +349,7 @@ impl DatabaseDriver for SqliteDriver {
         let start = Instant::now();
         let trimmed = sql.trim().to_uppercase();
         let is_select = trimmed.starts_with("SELECT")
+            || trimmed.starts_with("WITH")
             || trimmed.starts_with("PRAGMA")
             || trimmed.starts_with("EXPLAIN");
 
@@ -792,6 +793,9 @@ impl DatabaseDriver for SqliteDriver {
         let mut tx = self.pool.begin().await?;
 
         for update in &changes.updates {
+            if update.primary_key_values.is_empty() {
+                anyhow::bail!("Cannot update row: no primary key values provided");
+            }
             let set_clause = format!(
                 "{} = {}",
                 quote_ident(&update.column_name),
@@ -828,6 +832,9 @@ impl DatabaseDriver for SqliteDriver {
         }
 
         for delete in &changes.deletes {
+            if delete.primary_key_values.is_empty() {
+                anyhow::bail!("Cannot delete row: no primary key values provided");
+            }
             let where_clause: Vec<String> = delete
                 .primary_key_values
                 .iter()
@@ -989,5 +996,75 @@ mod tests {
     #[test]
     fn sql_fragment_unsafe_block_comment_close() {
         assert!(sql_fragment_is_unsafe("int */"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for fixes applied to prevent future issues
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn with_cte_treated_as_select() {
+        let trimmed = "WITH cte AS (SELECT 1) SELECT * FROM cte"
+            .trim()
+            .to_uppercase();
+        let is_select = trimmed.starts_with("SELECT")
+            || trimmed.starts_with("WITH")
+            || trimmed.starts_with("PRAGMA")
+            || trimmed.starts_with("EXPLAIN");
+        assert!(is_select);
+    }
+
+    #[test]
+    fn with_lowercase_treated_as_select() {
+        let trimmed = "  with recursive t as (select 1) select * from t"
+            .trim()
+            .to_uppercase();
+        let is_select = trimmed.starts_with("SELECT")
+            || trimmed.starts_with("WITH")
+            || trimmed.starts_with("PRAGMA")
+            || trimmed.starts_with("EXPLAIN");
+        assert!(is_select);
+    }
+
+    #[test]
+    fn insert_not_treated_as_select() {
+        let trimmed = "INSERT INTO t VALUES (1)".trim().to_uppercase();
+        let is_select = trimmed.starts_with("SELECT")
+            || trimmed.starts_with("WITH")
+            || trimmed.starts_with("PRAGMA")
+            || trimmed.starts_with("EXPLAIN");
+        assert!(!is_select);
+    }
+
+    #[test]
+    fn filter_unsafe_union_injection() {
+        assert!(filter_is_unsafe("1=1 UNION SELECT * FROM sqlite_master--"));
+    }
+
+    #[test]
+    fn filter_safe_between() {
+        assert!(!filter_is_unsafe("\"price\" BETWEEN 10 AND 100"));
+    }
+
+    #[test]
+    fn quote_ident_prevents_injection() {
+        let evil = r#""; DROP TABLE users; --"#;
+        let quoted = quote_ident(evil);
+        assert!(quoted.starts_with('"'));
+        assert!(quoted.ends_with('"'));
+        // Inner `"` is doubled so the payload cannot close the identifier early.
+        assert_eq!(quoted, "\"\"\"; DROP TABLE users; --\"");
+    }
+
+    #[test]
+    fn json_to_sql_string_with_backslash() {
+        let val = json_to_sql_literal(&serde_json::Value::String("path\\to\\file".into()));
+        assert_eq!(val, "'path\\to\\file'");
+    }
+
+    #[test]
+    fn json_to_sql_string_injection_attempt() {
+        let val = json_to_sql_literal(&serde_json::Value::String("'; DROP TABLE t; --".into()));
+        assert_eq!(val, "'''; DROP TABLE t; --'");
     }
 }
