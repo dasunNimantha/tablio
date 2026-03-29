@@ -139,6 +139,7 @@ export interface ConnectionConfig {
   database: string;
   color: string;
   ssl: boolean;
+  trust_server_cert?: boolean;
   group?: string | null;
   ssh_enabled?: boolean;
   ssh_host?: string;

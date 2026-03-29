@@ -15,7 +15,7 @@
   <description>
     <p>
       Tablio is a free, lightweight, native desktop application for managing databases.
-      Connect to PostgreSQL, MySQL, MariaDB, SQLite, CockroachDB, TiDB, and
+      Connect to PostgreSQL, MySQL, MariaDB, SQL Server, SQLite, CockroachDB, TiDB, and
       Cassandra/ScyllaDB through a single unified interface.
     </p>
     <p>Features include:</p>
@@ -41,6 +41,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.1.17" date="2026-03-29">
+      <description>
+        <p>Add Microsoft SQL Server support with dedicated driver and versioned CI tests. Add SSL/TLS certificate validation with configurable trust settings across all database drivers. Code quality improvements and regression tests.</p>
+      </description>
+    </release>
     <release version="0.1.16" date="2026-03-29">
       <description>
         <p>First public release.</p>

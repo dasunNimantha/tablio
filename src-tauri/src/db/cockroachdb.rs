@@ -14,7 +14,15 @@ pub struct CockroachdbDriver {
 
 impl CockroachdbDriver {
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
-        let ssl_mode = if config.ssl { "require" } else { "disable" };
+        let ssl_mode = if config.ssl {
+            if config.trust_server_cert {
+                "require"
+            } else {
+                "verify-full"
+            }
+        } else {
+            "disable"
+        };
         let url = format!(
             "postgres://{}:{}@{}:{}/{}?sslmode={}",
             urlencoding::encode(&config.user),

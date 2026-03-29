@@ -148,10 +148,13 @@ impl MssqlDriver {
         tcfg.application_name("Tablio");
         if config.ssl {
             tcfg.encryption(EncryptionLevel::Required);
+            if config.trust_server_cert {
+                tcfg.trust_cert();
+            }
         } else {
             tcfg.encryption(EncryptionLevel::Off);
+            tcfg.trust_cert();
         }
-        tcfg.trust_cert();
         let tcp = TcpStream::connect(tcfg.get_addr())
             .await
             .map_err(|e| anyhow!("TCP connect failed: {}", e))?;

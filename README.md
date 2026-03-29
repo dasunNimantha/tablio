@@ -27,14 +27,14 @@
 
 ## Why Tablio?
 
-Most database GUIs are either bloated, expensive, or locked to a single engine. Tablio is a free, lightweight, native desktop application that connects to PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, SQLite, and Cassandra/ScyllaDB through a single unified interface. Built with Rust and React for speed and reliability.
+Most database GUIs are either bloated, expensive, or locked to a single engine. Tablio is a free, lightweight, native desktop application that connects to PostgreSQL, MySQL, MariaDB, SQL Server, CockroachDB, TiDB, SQLite, and Cassandra/ScyllaDB through a single unified interface. Built with Rust and React for speed and reliability.
 
 ---
 
 ## Features
 
 ### Multi-Database Support
-Connect to PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, SQLite, and Cassandra/ScyllaDB from one application. Each database has a dedicated driver with engine-specific optimizations. Save, organize, and color-code your connections. Supports SSL and SSH tunnels.
+Connect to PostgreSQL, MySQL, MariaDB, SQL Server, CockroachDB, TiDB, SQLite, and Cassandra/ScyllaDB from one application. Each database has a dedicated driver with engine-specific optimizations. Save, organize, and color-code your connections. Supports SSL/TLS with configurable certificate validation and SSH tunnels.
 
 ### Data Browsing and Inline Editing
 - Paginated, sortable, and filterable data grid powered by AG Grid
@@ -175,6 +175,7 @@ TEST_MYSQL_URL="mysql://user:pass@localhost/testdb" \
 TEST_MARIADB_URL="mysql://user:pass@localhost:3307/testdb" \
 TEST_COCKROACHDB_URL="postgres://root@localhost:26257/testdb?sslmode=disable" \
 TEST_TIDB_URL="mysql://root@localhost:4000/testdb" \
+TEST_MSSQL_URL="mssql://sa:Password@localhost:1433/testdb" \
 TEST_CASSANDRA_HOST="127.0.0.1" TEST_CASSANDRA_PORT="9042" \
 cargo test
 ```
@@ -194,6 +195,7 @@ tablio/
 │   │   ├── db/             # DatabaseDriver trait + dedicated drivers per engine
 │   │   │   ├── postgres.rs, cockroachdb.rs, pg_common.rs
 │   │   │   ├── mysql.rs, mariadb.rs, tidb.rs, mysql_common.rs
+│   │   │   ├── mssql.rs
 │   │   │   ├── cassandra.rs
 │   │   │   └── sqlite.rs
 │   │   ├── commands/       # Tauri IPC command handlers
@@ -204,7 +206,7 @@ tablio/
 
 | Layer | Stack |
 |-------|-------|
-| Backend | Rust, sqlx, scylla, Tokio, Tauri 2 |
+| Backend | Rust, sqlx, tiberius, scylla, Tokio, Tauri 2 |
 | Frontend | React, TypeScript, AG Grid, Monaco Editor, Chart.js |
 | State | Zustand with localStorage persistence |
 | IPC | Tauri invoke commands |

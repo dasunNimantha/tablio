@@ -166,9 +166,16 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
         ...editConfig,
         id: crypto.randomUUID(),
         name: `${editConfig.name} (copy)`,
+        trust_server_cert: editConfig.trust_server_cert ?? false,
       };
     }
-    return editConfig || {
+    if (editConfig) {
+      return {
+        ...editConfig,
+        trust_server_cert: editConfig.trust_server_cert ?? false,
+      };
+    }
+    return {
       id: crypto.randomUUID(),
       name: "",
       db_type: "postgres",
@@ -179,6 +186,7 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
       database: "",
       color: COLORS[0],
       ssl: false,
+      trust_server_cert: false,
     };
   });
 
@@ -235,6 +243,7 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
   };
 
   const [testing, setTesting] = useState(false);
+  const supportsTlsOptions = !isSqlite && form.db_type !== "cassandra";
 
   const handleTest = async () => {
     if (testingRef.current) return;
@@ -413,6 +422,52 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                 </div>
               </div>
             </>
+          )}
+
+          {supportsTlsOptions && (
+            <section className="security-options" aria-label="Transport security">
+              <label className={`security-toggle${form.ssl ? " security-toggle--active" : ""}`}>
+                <span className="security-toggle__text">
+                  <span className="security-toggle__label">Use SSL / TLS</span>
+                  <span className="security-toggle__meta">encrypt connection</span>
+                </span>
+                <span className="security-toggle__control">
+                  <input
+                    className="security-toggle__input"
+                    type="checkbox"
+                    checked={form.ssl}
+                    onChange={(e) => {
+                      updateField("ssl", e.target.checked);
+                      if (!e.target.checked) updateField("trust_server_cert", false);
+                    }}
+                  />
+                  <span className="security-toggle__slider" aria-hidden="true" />
+                </span>
+              </label>
+
+              <label
+                className={`security-toggle security-toggle--nested${
+                  form.trust_server_cert ? " security-toggle--active" : ""
+                }${
+                  !form.ssl ? " security-toggle--disabled" : ""
+                }`}
+              >
+                <span className="security-toggle__text">
+                  <span className="security-toggle__label">Trust server certificate</span>
+                  <span className="security-toggle__meta">self-signed only</span>
+                </span>
+                <span className="security-toggle__control">
+                  <input
+                    className="security-toggle__input"
+                    type="checkbox"
+                    checked={form.trust_server_cert ?? false}
+                    disabled={!form.ssl}
+                    onChange={(e) => updateField("trust_server_cert", e.target.checked)}
+                  />
+                  <span className="security-toggle__slider" aria-hidden="true" />
+                </span>
+              </label>
+            </section>
           )}
 
           <div className="form-group">

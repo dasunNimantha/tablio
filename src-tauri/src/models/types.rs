@@ -27,6 +27,8 @@ pub struct ConnectionConfig {
     pub color: String,
     pub ssl: bool,
     #[serde(default)]
+    pub trust_server_cert: bool,
+    #[serde(default)]
     pub group: Option<String>,
     #[serde(default)]
     pub ssh_enabled: bool,

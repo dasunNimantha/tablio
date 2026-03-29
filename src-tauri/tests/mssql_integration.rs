@@ -32,6 +32,7 @@ macro_rules! mssql_driver {
             database: database.into(),
             color: "#000".into(),
             ssl: false,
+            trust_server_cert: true,
             group: None,
             ssh_enabled: false,
             ssh_host: String::new(),

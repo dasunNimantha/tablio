@@ -14,7 +14,15 @@ pub struct MariadbDriver {
 
 impl MariadbDriver {
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
-        let ssl_mode = if config.ssl { "REQUIRED" } else { "PREFERRED" };
+        let ssl_mode = if config.ssl {
+            if config.trust_server_cert {
+                "REQUIRED"
+            } else {
+                "VERIFY_IDENTITY"
+            }
+        } else {
+            "PREFERRED"
+        };
         let url = format!(
             "mysql://{}:{}@{}:{}/{}?ssl-mode={}",
             urlencoding::encode(&config.user),

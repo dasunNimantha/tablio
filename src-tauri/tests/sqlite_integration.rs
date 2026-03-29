@@ -16,6 +16,7 @@ async fn create_driver() -> (SqliteDriver, String) {
         database: format!("sqlite:{}?mode=rwc", path),
         color: "#000".into(),
         ssl: false,
+        trust_server_cert: true,
         group: None,
         ssh_enabled: false,
         ssh_host: String::new(),
