@@ -2,8 +2,11 @@
 set -euo pipefail
 
 REPO="dasunNimantha/tablio"
-APT_KEY_URL="https://dasunnimantha.github.io/tablio/apt/key.gpg"
-APT_REPO_URL="https://dasunnimantha.github.io/tablio/apt"
+PAGES_URL="https://dasunnimantha.github.io/tablio"
+APT_KEY_URL="${PAGES_URL}/apt/key.gpg"
+APT_REPO_URL="${PAGES_URL}/apt"
+RPM_KEY_URL="${PAGES_URL}/rpm/key.gpg"
+RPM_REPO_URL="${PAGES_URL}/rpm/tablio.repo"
 KEYRING="/usr/share/keyrings/tablio.gpg"
 LIST="/etc/apt/sources.list.d/tablio.list"
 
@@ -84,31 +87,25 @@ install_apt() {
 
 install_rpm() {
   info "Detected RPM-based distro (${DISTRO_ID})"
-  info "Downloading latest RPM package..."
+  info "Setting up RPM repository..."
 
   need_cmd curl
 
-  local url
-  url="$(latest_asset_url '\.x86_64\.rpm')"
-  if [ -z "$url" ]; then
-    err "No RPM asset found in the latest release"
-    exit 1
-  fi
+  sudo rpm --import "$RPM_KEY_URL"
+  ok "Imported signing key"
 
-  local tmp
-  tmp="$(mktemp /tmp/tablio-XXXXXX.rpm)"
-  curl -fSL --progress-bar -o "$tmp" "$url"
-  ok "Downloaded $(basename "$url")"
+  sudo curl -fsSL -o /etc/yum.repos.d/tablio.repo "$RPM_REPO_URL"
+  ok "Added repository"
 
   if command -v dnf &>/dev/null; then
-    sudo dnf install -y "$tmp"
+    sudo dnf install -y tablio
   elif command -v zypper &>/dev/null; then
-    sudo zypper install -y --allow-unsigned-rpm "$tmp"
+    sudo zypper refresh
+    sudo zypper install -y tablio
   else
-    sudo rpm -i "$tmp"
+    sudo yum install -y tablio
   fi
 
-  rm -f "$tmp"
   ok "Tablio installed via RPM"
 }
 

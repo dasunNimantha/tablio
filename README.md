@@ -95,7 +95,7 @@ Grab the latest build from [Releases](../../releases):
 
 | Platform | Formats |
 |----------|---------|
-| Linux | `.deb`, `.AppImage` |
+| Linux | `.deb`, `.rpm`, `.AppImage` |
 | macOS | `.dmg` (Intel and Apple Silicon) |
 | Windows | `.msi`, `.exe` |
 
@@ -114,6 +114,21 @@ sudo apt update && sudo apt install tablio
 ```
 
 Updates are delivered through `apt upgrade` with each new release.
+
+### RPM Repository (Fedora/RHEL/SUSE)
+
+```bash
+# Import the signing key
+sudo rpm --import https://dasunnimantha.github.io/tablio/rpm/key.gpg
+
+# Add the repository
+sudo curl -fsSL -o /etc/yum.repos.d/tablio.repo https://dasunnimantha.github.io/tablio/rpm/tablio.repo
+
+# Install
+sudo dnf install tablio
+```
+
+Updates are delivered through `dnf upgrade tablio` with each new release.
 
 ### Build from Source
 

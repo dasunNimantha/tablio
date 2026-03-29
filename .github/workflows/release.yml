@@ -359,24 +359,27 @@ jobs:
           releaseBody: |
             ## Tablio v__VERSION__
 
-            Database management tool for Postgres, MySQL, and SQLite.
+            Database management tool for PostgreSQL, MySQL, MariaDB, SQLite, CockroachDB, TiDB, and Cassandra/ScyllaDB.
 
             See the assets below for installers and binaries.
             - **Windows**: `.msi` installer or `.exe` NSIS
             - **macOS**: `.dmg` (Intel and Apple Silicon)
-            - **Linux**: `.deb` (Debian/Ubuntu), `.AppImage` (portable)
+            - **Linux**: `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL/SUSE), `.AppImage` (portable)
           releaseDraft: true
           prerelease: ${{ contains(github.ref, '-') }}
           args: ${{ matrix.args }}
 
-  publish-apt:
-    name: Publish APT repository
+  publish-repos:
+    name: Publish APT & RPM repositories
     needs: [release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           path: source
+
+      - name: Install repo tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils createrepo-c
 
       - name: Setup gh-pages working directory
         run: |
@@ -390,39 +393,43 @@ jobs:
             git remote add origin "$REPO_URL"
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            echo "# Tablio APT Repository" > README.md
+            echo "# Tablio Package Repositories" > README.md
             git add README.md
             git commit -m "Initialize gh-pages branch"
             git push origin gh-pages
             popd
           fi
           mkdir -p gh-pages/apt/pool gh-pages/apt/dists/stable/main/binary-amd64
+          mkdir -p gh-pages/rpm/packages
           touch gh-pages/.nojekyll
 
       - name: Extract version
         id: version
         run: echo "version=$(grep '^version' source/src-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
 
-      - name: Download .deb from release
+      - name: Download packages from release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TAG="v${VERSION}"
-          echo "Looking for .deb in release $TAG..."
+          echo "Looking for packages in release $TAG..."
           for i in $(seq 1 30); do
             ASSETS=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' 2>/dev/null || true)
-            if echo "$ASSETS" | grep -q '\.deb$'; then
-              echo "Found .deb asset(s):"
-              echo "$ASSETS" | grep '\.deb$'
+            if echo "$ASSETS" | grep -qE '\.(deb|rpm)$'; then
+              echo "Found package assets:"
+              echo "$ASSETS" | grep -E '\.(deb|rpm)$'
               break
             fi
-            echo "Waiting for .deb asset... (attempt $i/30)"
+            echo "Waiting for package assets... (attempt $i/30)"
             sleep 30
           done
           gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.deb" --dir gh-pages/apt/pool
-          echo "Downloaded:"
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.rpm" --dir gh-pages/rpm/packages
+          echo "Downloaded APT:"
           ls -la gh-pages/apt/pool/
+          echo "Downloaded RPM:"
+          ls -la gh-pages/rpm/packages/
 
       - name: Import GPG key
         run: |
@@ -437,7 +444,9 @@ jobs:
           echo "Using GPG key: $GPG_KEY_ID"
 
       - name: Export public key
-        run: gpg --armor --export "$GPG_KEY_ID" > gh-pages/apt/key.gpg
+        run: |
+          gpg --armor --export "$GPG_KEY_ID" > gh-pages/apt/key.gpg
+          cp gh-pages/apt/key.gpg gh-pages/rpm/key.gpg
 
       - name: Generate APT metadata and sign
         env:
@@ -474,21 +483,32 @@ jobs:
           ls -la dists/stable/
           ls -la dists/stable/main/binary-amd64/
 
-      - name: Create install instructions
+      - name: Generate RPM metadata and sign
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
+          cd gh-pages/rpm
+          createrepo_c --update .
+
+          echo "$GPG_PASSPHRASE" > /tmp/gpg-pass
+
+          gpg --batch --yes --pinentry-mode loopback --passphrase-file /tmp/gpg-pass \
+            --default-key "$GPG_KEY_ID" --detach-sign --armor repodata/repomd.xml
+
+          rm -f /tmp/gpg-pass
+
           printf '%s\n' \
-            '<!DOCTYPE html>' \
-            '<html><head><title>Tablio APT Repository</title></head>' \
-            '<body>' \
-            '<h1>Tablio APT Repository</h1>' \
-            '<pre>' \
-            'curl -fsSL https://dasunnimantha.github.io/tablio/apt/key.gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/tablio.gpg' \
-            'echo "deb https://dasunnimantha.github.io/tablio/apt stable main" | sudo tee /etc/apt/sources.list.d/tablio.list' \
-            'sudo apt update' \
-            'sudo apt install tablio' \
-            '</pre>' \
-            '</body></html>' \
-            > gh-pages/apt/index.html
+            '[tablio]' \
+            'name=Tablio' \
+            'baseurl=https://dasunnimantha.github.io/tablio/rpm' \
+            'enabled=1' \
+            'gpgcheck=1' \
+            'gpgkey=https://dasunnimantha.github.io/tablio/rpm/key.gpg' \
+            'repo_gpgcheck=1' \
+            > tablio.repo
+
+          echo "RPM metadata generated successfully:"
+          ls -la repodata/
 
       - name: Deploy to GitHub Pages
         run: |
@@ -499,7 +519,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to deploy"
           else
-            git commit -m "Update APT repo for v${{ steps.version.outputs.version }}"
+            git commit -m "Update repos for v${{ steps.version.outputs.version }}"
             git push origin gh-pages
             echo "Deployed successfully"
           fi
