@@ -57,6 +57,14 @@ is_rpm_distro() {
   return 1
 }
 
+is_arch_distro() {
+  case "$DISTRO_ID" in
+    arch|manjaro|endeavouros|garuda|artix|cachyos) return 0 ;;
+  esac
+  [[ "$DISTRO_LIKE" == *"arch"* ]] && return 0
+  return 1
+}
+
 latest_asset_url() {
   local pattern="$1"
   curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
@@ -109,6 +117,31 @@ install_rpm() {
   ok "Tablio installed via RPM"
 }
 
+install_aur() {
+  info "Detected Arch-based distro (${DISTRO_ID})"
+
+  if command -v yay &>/dev/null; then
+    info "Installing from AUR via yay..."
+    yay -S --noconfirm tablio-bin
+  elif command -v paru &>/dev/null; then
+    info "Installing from AUR via paru..."
+    paru -S --noconfirm tablio-bin
+  else
+    info "No AUR helper found, installing with makepkg..."
+    need_cmd git
+    need_cmd makepkg
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    git clone https://aur.archlinux.org/tablio-bin.git "$tmpdir/tablio-bin"
+    cd "$tmpdir/tablio-bin"
+    makepkg -si --noconfirm
+    cd -
+    rm -rf "$tmpdir"
+  fi
+
+  ok "Tablio installed from AUR"
+}
+
 install_appimage() {
   info "Distro not directly supported for package install (${DISTRO_ID})"
   info "Downloading latest AppImage..."
@@ -143,6 +176,8 @@ main() {
     install_apt
   elif is_rpm_distro; then
     install_rpm
+  elif is_arch_distro; then
+    install_aur
   else
     install_appimage
   fi

@@ -5,5 +5,5 @@ Exec=tablio
 Icon=tablio
 Type=Application
 Categories=Development;Database;
-Keywords=database;sql;postgresql;mysql;mariadb;sqlite;
+Keywords=database;sql;postgresql;mysql;mariadb;sqlite;cassandra;scylladb;
 StartupWMClass=tablio

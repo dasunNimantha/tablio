@@ -4349,7 +4349,7 @@ dependencies = [
 
 [[package]]
 name = "tablio"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "anyhow",
  "async-trait",

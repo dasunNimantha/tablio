@@ -1,7 +1,10 @@
 node_modules/
-dist/
 target/
 src-tauri/target/
 *.log
 .DS_Store
 .cursor/
+
+# Frontend build output, but keep dist/aur/
+dist/*
+!dist/aur/
