@@ -27,14 +27,14 @@
 
 ## Why Tablio?
 
-Most database GUIs are either bloated, expensive, or locked to a single engine. Tablio is a free, lightweight, native desktop application that connects to PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, and SQLite through a single unified interface. Built with Rust and React for speed and reliability.
+Most database GUIs are either bloated, expensive, or locked to a single engine. Tablio is a free, lightweight, native desktop application that connects to PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, SQLite, and Cassandra/ScyllaDB through a single unified interface. Built with Rust and React for speed and reliability.
 
 ---
 
 ## Features
 
 ### Multi-Database Support
-Connect to PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, and SQLite from one application. Each database has a dedicated driver with engine-specific optimizations. Save, organize, and color-code your connections. Supports SSL and SSH tunnels.
+Connect to PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, SQLite, and Cassandra/ScyllaDB from one application. Each database has a dedicated driver with engine-specific optimizations. Save, organize, and color-code your connections. Supports SSL and SSH tunnels.
 
 ### Data Browsing and Inline Editing
 - Paginated, sortable, and filterable data grid powered by AG Grid
@@ -81,6 +81,14 @@ Connect to PostgreSQL, MySQL, MariaDB, CockroachDB, TiDB, and SQLite from one ap
 
 ## Installation
 
+### Quick Install (Linux)
+
+```bash
+curl -fsSL https://tablio.dasunnimantha.com/install.sh | bash
+```
+
+Automatically detects your distro and installs via APT (Debian/Ubuntu), RPM (Fedora/RHEL/SUSE), or AppImage (other).
+
 ### Download
 
 Grab the latest build from [Releases](../../releases):
@@ -90,6 +98,22 @@ Grab the latest build from [Releases](../../releases):
 | Linux | `.deb`, `.AppImage` |
 | macOS | `.dmg` (Intel and Apple Silicon) |
 | Windows | `.msi`, `.exe` |
+
+### APT Repository (Debian/Ubuntu)
+
+```bash
+# Import the signing key
+curl -fsSL https://dasunnimantha.github.io/tablio/apt/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/tablio.gpg
+
+# Add the repository
+echo "deb [signed-by=/usr/share/keyrings/tablio.gpg] https://dasunnimantha.github.io/tablio/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/tablio.list
+
+# Install
+sudo apt update && sudo apt install tablio
+```
+
+Updates are delivered through `apt upgrade` with each new release.
 
 ### Build from Source
 
@@ -136,6 +160,7 @@ TEST_MYSQL_URL="mysql://user:pass@localhost/testdb" \
 TEST_MARIADB_URL="mysql://user:pass@localhost:3307/testdb" \
 TEST_COCKROACHDB_URL="postgres://root@localhost:26257/testdb?sslmode=disable" \
 TEST_TIDB_URL="mysql://root@localhost:4000/testdb" \
+TEST_CASSANDRA_HOST="127.0.0.1" TEST_CASSANDRA_PORT="9042" \
 cargo test
 ```
 
@@ -154,6 +179,7 @@ tablio/
 │   │   ├── db/             # DatabaseDriver trait + dedicated drivers per engine
 │   │   │   ├── postgres.rs, cockroachdb.rs, pg_common.rs
 │   │   │   ├── mysql.rs, mariadb.rs, tidb.rs, mysql_common.rs
+│   │   │   ├── cassandra.rs
 │   │   │   └── sqlite.rs
 │   │   ├── commands/       # Tauri IPC command handlers
 │   │   └── lib.rs          # Command registration
@@ -163,7 +189,7 @@ tablio/
 
 | Layer | Stack |
 |-------|-------|
-| Backend | Rust, sqlx, Tokio, Tauri 2 |
+| Backend | Rust, sqlx, scylla, Tokio, Tauri 2 |
 | Frontend | React, TypeScript, AG Grid, Monaco Editor, Chart.js |
 | State | Zustand with localStorage persistence |
 | IPC | Tauri invoke commands |
