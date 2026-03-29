@@ -373,7 +373,7 @@ jobs:
             - **Windows**: `.msi` installer or `.exe` NSIS
             - **macOS**: `.dmg` (Intel and Apple Silicon)
             - **Linux**: `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL/SUSE), `.AppImage` (portable)
-          releaseDraft: true
+          releaseDraft: false
           prerelease: ${{ contains(github.ref, '-') }}
           args: ${{ matrix.args }}
 
