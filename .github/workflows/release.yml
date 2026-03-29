@@ -396,7 +396,7 @@ jobs:
           pkgbuild: dist/aur/PKGBUILD
           assets: |
             dist/aur/tablio-bin.install
-          updpkgsums: true
+          updpkgsums: false
           commit_username: dasunNimantha
           commit_email: ${{ secrets.AUR_EMAIL }}
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
@@ -458,8 +458,8 @@ jobs:
             echo "Waiting for package assets... (attempt $i/30)"
             sleep 30
           done
-          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.deb" --dir gh-pages/apt/pool
-          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.rpm" --dir gh-pages/rpm/packages
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.deb" --dir gh-pages/apt/pool --clobber
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.rpm" --dir gh-pages/rpm/packages --clobber
           echo "Downloaded APT:"
           ls -la gh-pages/apt/pool/
           echo "Downloaded RPM:"
