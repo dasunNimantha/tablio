@@ -287,10 +287,7 @@ async fn cassandra_truncate_table() {
     driver
         .execute_query(
             "",
-            &format!(
-                "INSERT INTO {}.{} (id, data) VALUES (1, 'a')",
-                ks, tbl
-            ),
+            &format!("INSERT INTO {}.{} (id, data) VALUES (1, 'a')", ks, tbl),
         )
         .await
         .unwrap();
@@ -351,18 +348,28 @@ async fn cassandra_fetch_rows() {
                 "",
                 &format!(
                     "INSERT INTO {}.{} (id, name, active) VALUES ({}, 'item{}', {})",
-                    ks, tbl, i, i, i % 2 == 0
+                    ks,
+                    tbl,
+                    i,
+                    i,
+                    i % 2 == 0
                 ),
             )
             .await
             .unwrap();
     }
 
-    let data = driver.fetch_rows(&ks, &ks, &tbl, 0, 3, None, None).await.unwrap();
+    let data = driver
+        .fetch_rows(&ks, &ks, &tbl, 0, 3, None, None)
+        .await
+        .unwrap();
     assert_eq!(data.rows.len(), 3);
     assert_eq!(data.columns.len(), 3);
 
-    let data_all = driver.fetch_rows(&ks, &ks, &tbl, 0, 100, None, None).await.unwrap();
+    let data_all = driver
+        .fetch_rows(&ks, &ks, &tbl, 0, 100, None, None)
+        .await
+        .unwrap();
     assert_eq!(data_all.rows.len(), 5);
 
     teardown_keyspace(&driver, &ks).await;
@@ -414,7 +421,10 @@ async fn cassandra_apply_changes_update() {
     driver.apply_changes(&changes).await.unwrap();
 
     let result = driver
-        .execute_query("", &format!("SELECT value FROM {}.{} WHERE id = 1", ks, tbl))
+        .execute_query(
+            "",
+            &format!("SELECT value FROM {}.{} WHERE id = 1", ks, tbl),
+        )
         .await
         .unwrap();
     assert_eq!(result.rows.len(), 1);
@@ -444,10 +454,7 @@ async fn cassandra_list_indexes() {
     driver
         .execute_query(
             "",
-            &format!(
-                "CREATE INDEX {} ON {}.{} (email)",
-                idx_name, ks, tbl
-            ),
+            &format!("CREATE INDEX {} ON {}.{} (email)", idx_name, ks, tbl),
         )
         .await
         .unwrap();
@@ -571,7 +578,10 @@ async fn cassandra_import_data() {
         vec![serde_json::json!(3), serde_json::json!("gamma")],
     ];
 
-    let count = driver.import_data(&ks, &ks, &tbl, &columns, &rows).await.unwrap();
+    let count = driver
+        .import_data(&ks, &ks, &tbl, &columns, &rows)
+        .await
+        .unwrap();
     assert_eq!(count, 3);
 
     let result = driver
@@ -667,10 +677,7 @@ async fn cassandra_drop_index() {
     driver
         .execute_query(
             "",
-            &format!(
-                "CREATE TABLE {}.{} (id int PRIMARY KEY, val text)",
-                ks, tbl
-            ),
+            &format!("CREATE TABLE {}.{} (id int PRIMARY KEY, val text)", ks, tbl),
         )
         .await
         .unwrap();
@@ -686,7 +693,10 @@ async fn cassandra_drop_index() {
 
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-    driver.drop_object(&ks, &ks, &idx_name, "INDEX").await.unwrap();
+    driver
+        .drop_object(&ks, &ks, &idx_name, "INDEX")
+        .await
+        .unwrap();
 
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
@@ -704,10 +714,7 @@ async fn cassandra_execute_non_select() {
     let result = driver
         .execute_query(
             "",
-            &format!(
-                "CREATE TABLE {}.nonsel (id int PRIMARY KEY, data text)",
-                ks
-            ),
+            &format!("CREATE TABLE {}.nonsel (id int PRIMARY KEY, data text)", ks),
         )
         .await
         .unwrap();

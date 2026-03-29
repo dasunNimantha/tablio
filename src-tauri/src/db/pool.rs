@@ -202,9 +202,7 @@ impl PoolManager {
                 DbType::Mariadb => Box::new(MariadbDriver::connect(&effective_config).await?),
                 DbType::Tidb => Box::new(TidbDriver::connect(&effective_config).await?),
                 DbType::Sqlite => Box::new(SqliteDriver::connect(&effective_config).await?),
-                DbType::Cassandra => {
-                    Box::new(CassandraDriver::connect(&effective_config).await?)
-                }
+                DbType::Cassandra => Box::new(CassandraDriver::connect(&effective_config).await?),
             };
             driver.test_connection().await
         }

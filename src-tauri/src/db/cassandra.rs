@@ -37,7 +37,7 @@ impl CassandraDriver {
     }
 }
 
-fn cql_value_to_json(col_type: &str, raw: &scylla::value::CqlValue) -> serde_json::Value {
+fn cql_value_to_json(_col_type: &str, raw: &scylla::value::CqlValue) -> serde_json::Value {
     use scylla::value::CqlValue;
     match raw {
         CqlValue::Ascii(s) | CqlValue::Text(s) => serde_json::Value::String(s.clone()),
@@ -62,17 +62,13 @@ fn cql_value_to_json(col_type: &str, raw: &scylla::value::CqlValue) -> serde_jso
         CqlValue::Decimal(d) => serde_json::Value::String(format!("{:?}", d)),
         CqlValue::Counter(c) => serde_json::json!(c.0),
         CqlValue::Set(items) => {
-            let arr: Vec<serde_json::Value> = items
-                .iter()
-                .map(|v| cql_value_to_json(col_type, v))
-                .collect();
+            let arr: Vec<serde_json::Value> =
+                items.iter().map(|v| cql_value_to_json("", v)).collect();
             serde_json::Value::Array(arr)
         }
         CqlValue::List(items) => {
-            let arr: Vec<serde_json::Value> = items
-                .iter()
-                .map(|v| cql_value_to_json(col_type, v))
-                .collect();
+            let arr: Vec<serde_json::Value> =
+                items.iter().map(|v| cql_value_to_json("", v)).collect();
             serde_json::Value::Array(arr)
         }
         CqlValue::Map(entries) => {
@@ -83,7 +79,7 @@ fn cql_value_to_json(col_type: &str, raw: &scylla::value::CqlValue) -> serde_jso
                         CqlValue::Text(s) | CqlValue::Ascii(s) => s.clone(),
                         other => format!("{:?}", other),
                     };
-                    (key, cql_value_to_json(col_type, v))
+                    (key, cql_value_to_json("", v))
                 })
                 .collect();
             serde_json::Value::Object(obj)
@@ -92,7 +88,7 @@ fn cql_value_to_json(col_type: &str, raw: &scylla::value::CqlValue) -> serde_jso
             let arr: Vec<serde_json::Value> = fields
                 .iter()
                 .map(|f| match f {
-                    Some(v) => cql_value_to_json(col_type, v),
+                    Some(v) => cql_value_to_json("", v),
                     None => serde_json::Value::Null,
                 })
                 .collect();
@@ -103,7 +99,7 @@ fn cql_value_to_json(col_type: &str, raw: &scylla::value::CqlValue) -> serde_jso
                 .iter()
                 .map(|(name, val)| {
                     let v = match val {
-                        Some(v) => cql_value_to_json(col_type, v),
+                        Some(v) => cql_value_to_json("", v),
                         None => serde_json::Value::Null,
                     };
                     (name.clone(), v)
@@ -146,26 +142,20 @@ fn rows_from_result(result: &QueryRowsResult) -> (Vec<String>, Vec<Vec<serde_jso
     let mut rows = Vec::new();
 
     if let Ok(rows_iter) = result.rows::<scylla::value::Row>() {
-        for row_result in rows_iter {
-            if let Ok(row) = row_result {
-                let json_row: Vec<serde_json::Value> = row
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .map(|(i, opt)| match opt {
-                        Some(v) => {
-                            let col_name = if i < columns.len() {
-                                &columns[i]
-                            } else {
-                                ""
-                            };
-                            cql_value_to_json(col_name, v)
-                        }
-                        None => serde_json::Value::Null,
-                    })
-                    .collect();
-                rows.push(json_row);
-            }
+        for row in rows_iter.flatten() {
+            let json_row: Vec<serde_json::Value> = row
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(i, opt)| match opt {
+                    Some(v) => {
+                        let col_name = if i < columns.len() { &columns[i] } else { "" };
+                        cql_value_to_json(col_name, v)
+                    }
+                    None => serde_json::Value::Null,
+                })
+                .collect();
+            rows.push(json_row);
         }
     }
 
@@ -177,10 +167,7 @@ impl DatabaseDriver for CassandraDriver {
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
         let result = self
             .session
-            .query_unpaged(
-                "SELECT keyspace_name FROM system_schema.keyspaces",
-                &[],
-            )
+            .query_unpaged("SELECT keyspace_name FROM system_schema.keyspaces", &[])
             .await
             .map_err(|e| anyhow!("{}", e))?
             .into_rows_result()
@@ -188,11 +175,9 @@ impl DatabaseDriver for CassandraDriver {
 
         let mut databases = Vec::new();
         if let Ok(rows) = result.rows::<(String,)>() {
-            for row in rows {
-                if let Ok((name,)) = row {
-                    if !SYSTEM_KEYSPACES.contains(&name.as_str()) {
-                        databases.push(DatabaseInfo { name });
-                    }
+            for (name,) in rows.flatten() {
+                if !SYSTEM_KEYSPACES.contains(&name.as_str()) {
+                    databases.push(DatabaseInfo { name });
                 }
             }
         }
@@ -220,15 +205,13 @@ impl DatabaseDriver for CassandraDriver {
 
         let mut tables = Vec::new();
         if let Ok(rows) = result.rows::<(String,)>() {
-            for row in rows {
-                if let Ok((name,)) = row {
-                    tables.push(TableInfo {
-                        name: name.clone(),
-                        schema: database.to_string(),
-                        table_type: "TABLE".to_string(),
-                        row_count_estimate: None,
-                    });
-                }
+            for (name,) in rows.flatten() {
+                tables.push(TableInfo {
+                    name: name.clone(),
+                    schema: database.to_string(),
+                    table_type: "TABLE".to_string(),
+                    row_count_estimate: None,
+                });
             }
         }
         tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -254,19 +237,17 @@ impl DatabaseDriver for CassandraDriver {
 
         let mut columns = Vec::new();
         if let Ok(rows) = result.rows::<(String, String, String, i32)>() {
-            for row in rows {
-                if let Ok((col_name, col_type, kind, position)) = row {
-                    let is_pk = kind == "partition_key" || kind == "clustering";
-                    columns.push(ColumnInfo {
-                        name: col_name,
-                        data_type: col_type,
-                        is_nullable: !is_pk,
-                        is_primary_key: is_pk,
-                        default_value: None,
-                        ordinal_position: position,
-                        is_auto_generated: false,
-                    });
-                }
+            for (col_name, col_type, kind, position) in rows.flatten() {
+                let is_pk = kind == "partition_key" || kind == "clustering";
+                columns.push(ColumnInfo {
+                    name: col_name,
+                    data_type: col_type,
+                    is_nullable: !is_pk,
+                    is_primary_key: is_pk,
+                    default_value: None,
+                    ordinal_position: position,
+                    is_auto_generated: false,
+                });
             }
         }
         columns.sort_by_key(|c| c.ordinal_position);
@@ -292,16 +273,14 @@ impl DatabaseDriver for CassandraDriver {
 
         let mut indexes = Vec::new();
         if let Ok(rows) = result.rows::<(String, std::collections::HashMap<String, String>)>() {
-            for row in rows {
-                if let Ok((name, options)) = row {
-                    let target = options.get("target").cloned().unwrap_or_default();
-                    indexes.push(IndexInfo {
-                        name,
-                        columns: vec![target],
-                        is_unique: false,
-                        index_type: "SECONDARY".to_string(),
-                    });
-                }
+            for (name, options) in rows.flatten() {
+                let target = options.get("target").cloned().unwrap_or_default();
+                indexes.push(IndexInfo {
+                    name,
+                    columns: vec![target],
+                    is_unique: false,
+                    index_type: "SECONDARY".to_string(),
+                });
             }
         }
         Ok(indexes)
@@ -457,10 +436,7 @@ impl DatabaseDriver for CassandraDriver {
 
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
         let start = Instant::now();
-        let raw_text = format!(
-            "CQL does not support EXPLAIN. The query was: {}",
-            sql
-        );
+        let raw_text = format!("CQL does not support EXPLAIN. The query was: {}", sql);
         let elapsed = start.elapsed().as_millis() as u64;
 
         Ok(ExplainResult {
@@ -544,8 +520,13 @@ impl DatabaseDriver for CassandraDriver {
         }
 
         for insert in &changes.inserts {
-            let col_names: Vec<String> = insert.values.iter().map(|(c, _)| quote_ident(c)).collect();
-            let vals: Vec<String> = insert.values.iter().map(|(_, v)| json_to_cql_literal(v)).collect();
+            let col_names: Vec<String> =
+                insert.values.iter().map(|(c, _)| quote_ident(c)).collect();
+            let vals: Vec<String> = insert
+                .values
+                .iter()
+                .map(|(_, v)| json_to_cql_literal(v))
+                .collect();
             let cql = format!(
                 "INSERT INTO {} ({}) VALUES ({})",
                 qualified,
@@ -564,7 +545,11 @@ impl DatabaseDriver for CassandraDriver {
                 .iter()
                 .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_cql_literal(val)))
                 .collect();
-            let cql = format!("DELETE FROM {} WHERE {}", qualified, pk_clause.join(" AND "));
+            let cql = format!(
+                "DELETE FROM {} WHERE {}",
+                qualified,
+                pk_clause.join(" AND ")
+            );
             self.session
                 .query_unpaged(cql.as_str(), &[])
                 .await
@@ -592,7 +577,9 @@ impl DatabaseDriver for CassandraDriver {
             .collect();
 
         if pk_cols.is_empty() {
-            return Err(anyhow!("Cassandra tables require at least one primary key column"));
+            return Err(anyhow!(
+                "Cassandra tables require at least one primary key column"
+            ));
         }
 
         let cql = format!(
@@ -628,7 +615,11 @@ impl DatabaseDriver for CassandraDriver {
                     )
                 }
                 AlterTableOperation::DropColumn { column_name } => {
-                    format!("ALTER TABLE {} DROP {}", qualified, quote_ident(column_name))
+                    format!(
+                        "ALTER TABLE {} DROP {}",
+                        qualified,
+                        quote_ident(column_name)
+                    )
                 }
                 AlterTableOperation::RenameColumn { old_name, new_name } => {
                     format!(
@@ -777,13 +768,18 @@ impl DatabaseDriver for CassandraDriver {
     }
 
     async fn cancel_query(&self, _pid: &str) -> Result<()> {
-        Err(anyhow!("Query cancellation is not supported for Cassandra/ScyllaDB"))
+        Err(anyhow!(
+            "Query cancellation is not supported for Cassandra/ScyllaDB"
+        ))
     }
 
     async fn list_roles(&self) -> Result<Vec<RoleInfo>> {
         let result = self
             .session
-            .query_unpaged("SELECT role, is_superuser, can_login FROM system_auth.roles", &[])
+            .query_unpaged(
+                "SELECT role, is_superuser, can_login FROM system_auth.roles",
+                &[],
+            )
             .await;
 
         match result {
@@ -791,20 +787,18 @@ impl DatabaseDriver for CassandraDriver {
                 let qr = qr.into_rows_result().map_err(|e| anyhow!("{}", e))?;
                 let mut roles = Vec::new();
                 if let Ok(rows) = qr.rows::<(String, bool, bool)>() {
-                    for row in rows {
-                        if let Ok((name, is_superuser, can_login)) = row {
-                            roles.push(RoleInfo {
-                                name,
-                                is_superuser,
-                                can_login,
-                                can_create_db: false,
-                                can_create_role: is_superuser,
-                                is_replication: false,
-                                connection_limit: -1,
-                                valid_until: None,
-                                member_of: vec![],
-                            });
-                        }
+                    for (name, is_superuser, can_login) in rows.flatten() {
+                        roles.push(RoleInfo {
+                            name,
+                            is_superuser,
+                            can_login,
+                            can_create_db: false,
+                            can_create_role: is_superuser,
+                            is_replication: false,
+                            connection_limit: -1,
+                            valid_until: None,
+                            member_of: vec![],
+                        });
                     }
                 }
                 Ok(roles)

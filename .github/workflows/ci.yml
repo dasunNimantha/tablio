@@ -261,19 +261,23 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --test sqlite_integration
 
   test-cassandra:
-    name: Cassandra
+    name: Cassandra ${{ matrix.cassandra_version }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cassandra_version: ["4.0", "4.1", "5.0"]
     services:
       cassandra:
-        image: cassandra:4.1
+        image: cassandra:${{ matrix.cassandra_version }}
         ports:
           - 9042:9042
         options: >-
           --health-cmd "cqlsh -e 'describe cluster'"
           --health-interval 15s
           --health-timeout 10s
-          --health-retries 10
-          --health-start-period 60s
+          --health-retries 15
+          --health-start-period 90s
     steps:
       - uses: actions/checkout@v4
 
@@ -295,11 +299,15 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --test cassandra_integration
 
   test-scylladb:
-    name: ScyllaDB
+    name: ScyllaDB ${{ matrix.scylla_version }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scylla_version: ["5.4", "6.2"]
     services:
       scylladb:
-        image: scylladb/scylla:6.2
+        image: scylladb/scylla:${{ matrix.scylla_version }}
         ports:
           - 9042:9042
         options: >-
