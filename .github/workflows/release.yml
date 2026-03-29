@@ -365,14 +365,14 @@ jobs:
           tagName: v__VERSION__
           releaseName: "v__VERSION__"
           releaseBody: |
-            ## First release
+            ## Tablio v__VERSION__
 
-            Initial public release of Tablio — an open-source desktop database client for PostgreSQL, MySQL, MariaDB, SQLite, CockroachDB, TiDB, and Cassandra/ScyllaDB.
+            Database management tool for PostgreSQL, MySQL, MariaDB, SQLite, CockroachDB, TiDB, and Cassandra/ScyllaDB.
 
-            ### Downloads
-            - **Windows**: `.msi` or `.exe` (NSIS)
+            See the assets below for installers and binaries.
+            - **Windows**: `.msi` installer or `.exe` NSIS
             - **macOS**: `.dmg` (Intel and Apple Silicon)
-            - **Linux**: `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL/SUSE), `.AppImage` (portable), AUR `tablio-bin`
+            - **Linux**: `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL/SUSE), `.AppImage` (portable)
           releaseDraft: false
           prerelease: ${{ contains(github.ref, '-') }}
           args: ${{ matrix.args }}
@@ -402,6 +402,80 @@ jobs:
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           commit_message: "Update to ${{ github.ref_name }}"
           force_push: true
+
+  publish-flatpak:
+    name: Update Flathub
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract version and compute hash
+        id: info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(grep '^version' src-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          DEB_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/Tablio_${VERSION}_amd64.deb"
+          for i in $(seq 1 30); do
+            if curl -fsSL -o /tmp/tablio.deb "$DEB_URL" 2>/dev/null; then
+              break
+            fi
+            echo "Waiting for .deb asset... (attempt $i/30)"
+            sleep 30
+          done
+          SHA=$(sha256sum /tmp/tablio.deb | awk '{print $1}')
+          echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "deb_url=${DEB_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if Flathub repo exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh repo view flathub/com.tablio.app --json name >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Flathub repo not found yet, skipping."
+          fi
+
+      - name: Update Flathub manifest
+        if: steps.check.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.info.outputs.version }}"
+          SHA="${{ steps.info.outputs.sha256 }}"
+          DEB_URL="${{ steps.info.outputs.deb_url }}"
+
+          git clone https://x-access-token:${GH_TOKEN}@github.com/flathub/com.tablio.app.git /tmp/flathub-tablio
+          cd /tmp/flathub-tablio
+
+          sed -i "s|url: https://github.com/.*/releases/download/.*/Tablio_.*_amd64.deb|url: ${DEB_URL}|" com.tablio.app.yml
+          sed -i "s/sha256: .*/sha256: ${SHA}/" com.tablio.app.yml
+
+          EXISTING=$(grep "version=\"${VERSION}\"" com.tablio.app.metainfo.xml || true)
+          if [ -z "$EXISTING" ]; then
+            sed -i "/<releases>/a\\    <release version=\"${VERSION}\" date=\"$(date +%Y-%m-%d)\"><description><p>See release notes on GitHub.</p></description></release>" com.tablio.app.metainfo.xml
+          fi
+
+          if git diff --quiet; then
+            echo "No changes to submit"
+          else
+            BRANCH="update-v${VERSION}"
+            git checkout -b "$BRANCH"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "Update to v${VERSION}"
+            git push origin "$BRANCH"
+            gh pr create --repo flathub/com.tablio.app --base master --head "$BRANCH" \
+              --title "Update to v${VERSION}" \
+              --body "Automated update from [release v${VERSION}](https://github.com/${{ github.repository }}/releases/tag/v${VERSION})."
+          fi
 
   publish-repos:
     name: Publish APT & RPM repositories
