@@ -1,0 +1,7 @@
+[tablio]
+name=Tablio
+baseurl=https://dasunnimantha.github.io/tablio/rpm
+enabled=1
+gpgcheck=1
+gpgkey=https://dasunnimantha.github.io/tablio/rpm/key.gpg
+repo_gpgcheck=1
