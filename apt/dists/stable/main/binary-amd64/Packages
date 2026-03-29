@@ -21,9 +21,9 @@ Installed-Size: 34051
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
 Filename: pool/Tablio_0.1.16_amd64.deb
 Size: 16890274
-MD5sum: dd84be76a71af12b8c909ecb22621e3c
-SHA1: 996859c4dee1400e224e0026658dc47658f3bcec
-SHA256: a9ba7e1a62bc80a06cd4e2dcfbb7a16b068c0cbf8e2058ef5d8c9ea22b0e906c
+MD5sum: c4fec5585838506537f5d538ae6f6075
+SHA1: b18f58e9d6918cda5db60cb7c627fe163765111d
+SHA256: 7c3692bd27551d7f2412e160f8d0e22fe8459acbc6ae9d90b7dfd71e3dc16eab
 Priority: optional
 Description: (none)
  (none)
