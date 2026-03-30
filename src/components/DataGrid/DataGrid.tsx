@@ -39,9 +39,10 @@ import {
   Zap,
   ExternalLink,
   Shuffle,
+  Trash2,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { AllCommunityModule, themeQuartz, type ColDef, type CellContextMenuEvent, type GridApi, type GridReadyEvent, type IHeaderParams } from "ag-grid-community";
+import { AllCommunityModule, themeQuartz, type ColDef, type CellContextMenuEvent, type GridApi, type GridReadyEvent, type IHeaderParams, type SelectionChangedEvent } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import "./DataGrid.css";
 import "./ag-grid-theme.css";
@@ -168,6 +169,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   const [editingRows, setEditingRows] = useState<unknown[][]>([]);
   const [detailRowIdx, setDetailRowIdx] = useState<number | null>(null);
   const [rowContextMenu, setRowContextMenu] = useState<{ x: number; y: number; rowIdx: number } | null>(null);
+  const [selectedRowIndices, setSelectedRowIndices] = useState<Set<number>>(new Set());
   const [refreshInterval, setRefreshInterval] = useState(10);
   const [showRefreshMenu, setShowRefreshMenu] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -238,6 +240,8 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       const sorted = { ...result, columns: sortedColumns, rows: sortedRows };
       setData(sorted);
       setEditingRows(sorted.rows.map((r) => [...r]));
+      setSelectedRowIndices(new Set());
+      gridApiRef.current?.deselectAll();
       setDetailRowIdx((prev) => {
         if (prev == null) return null;
         if (prev >= sorted.rows.length) return null;
@@ -309,6 +313,8 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   }, [showRefreshMenu]);
 
 
+  const deleteSelectedRef = useRef<() => void>(() => {});
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
@@ -321,10 +327,27 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         setSearchQuery("");
         searchCurrentRef.current = null;
       }
+      if (e.key === "Escape" && selectedRowIndices.size > 0) {
+        setSelectedRowIndices(new Set());
+        gridApiRef.current?.deselectAll();
+      }
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedRowIndices.size > 0) {
+        const target = e.target as HTMLElement;
+        if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) return;
+        e.preventDefault();
+        deleteSelectedRef.current();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+        const target = e.target as HTMLElement;
+        if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) return;
+        if (!gridApiRef.current) return;
+        e.preventDefault();
+        gridApiRef.current.selectAll();
+      }
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [showSearch]);
+  }, [showSearch, selectedRowIndices]);
 
   const [searchMatchIdx, setSearchMatchIdx] = useState(-1);
 
@@ -488,7 +511,19 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         return page * PAGE_SIZE + params.data.__rowIdx + 1;
       },
       onCellClicked: (params) => {
-        if (params.data) setDetailRowIdx((prev) => prev === params.data.__rowIdx ? null : params.data.__rowIdx);
+        if (!params.data) return;
+        const e = params.event as MouseEvent;
+        if (e && (e.ctrlKey || e.metaKey)) {
+          const node = params.node;
+          node.setSelected(!node.isSelected());
+          return;
+        }
+        if (e && e.shiftKey) {
+          const node = params.node;
+          node.setSelected(true, false);
+          return;
+        }
+        setDetailRowIdx((prev) => prev === params.data.__rowIdx ? null : params.data.__rowIdx);
       },
     };
 
@@ -586,6 +621,30 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
       return next;
     });
   };
+
+  const handleDeleteSelected = useCallback(() => {
+    if (selectedRowIndices.size === 0) return;
+    setChanges((prev) => {
+      const next = { ...prev, deletedKeys: new Set(prev.deletedKeys) };
+      for (const rowIdx of selectedRowIndices) {
+        if (rowIdx >= originalRowCount) continue;
+        const pkKey = getPkKey(rowIdx);
+        next.deletedKeys.add(pkKey);
+      }
+      return next;
+    });
+    setSelectedRowIndices(new Set());
+    gridApiRef.current?.deselectAll();
+  }, [selectedRowIndices, originalRowCount, getPkKey]);
+
+  useEffect(() => {
+    deleteSelectedRef.current = handleDeleteSelected;
+  }, [handleDeleteSelected]);
+
+  const onSelectionChanged = useCallback((event: SelectionChangedEvent) => {
+    const selected = event.api.getSelectedRows() as RowObj[];
+    setSelectedRowIndices(new Set(selected.map((r) => r.__rowIdx)));
+  }, []);
 
   const handleSave = async () => {
     if (!data || !hasChanges) return;
@@ -729,8 +788,9 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     if (params.data.__isInserted) classes.push("row-inserted");
     if (params.data.__isDeleted) classes.push("row-deleted");
     if (detailRowIdx === params.data.__rowIdx) classes.push("row-selected");
+    if (selectedRowIndices.has(params.data.__rowIdx)) classes.push("row-multi-selected");
     return classes.join(" ");
-  }, [detailRowIdx]);
+  }, [detailRowIdx, selectedRowIndices]);
 
   const onSortChanged = useCallback(() => {
     if (!gridApiRef.current) return;
@@ -1011,6 +1071,16 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           >
             <Shuffle size={14} /> Test Data
           </button>
+          {selectedRowIndices.size > 0 && (
+            <button
+              className="btn-delete-selected"
+              onClick={handleDeleteSelected}
+              title={`Delete ${selectedRowIndices.size} selected row${selectedRowIndices.size > 1 ? "s" : ""} (Delete key)`}
+            >
+              <Trash2 size={14} />
+              Delete {selectedRowIndices.size} row{selectedRowIndices.size > 1 ? "s" : ""}
+            </button>
+          )}
           {hasChanges && (
             <>
               <button className="btn-discard" onClick={handleDiscard}>
@@ -1103,6 +1173,8 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           onGridReady={onGridReady}
           onCellContextMenu={onCellContextMenu}
           onSortChanged={onSortChanged}
+          onSelectionChanged={onSelectionChanged}
+          rowSelection={{ mode: "multiRow", checkboxes: false, headerCheckbox: false, enableClickSelection: false }}
           preventDefaultOnContextMenu={true}
           animateRows={false}
           suppressCellFocus={false}
@@ -1229,17 +1301,30 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
           >
             Copy as INSERT
           </button>
-          <button
-            className="context-menu-item"
-            onClick={() => {
-              const rIdx = rowContextMenu.rowIdx;
-              const isInserted = rIdx >= originalRowCount;
-              if (!isInserted) handleDeleteRow(rIdx);
-              setRowContextMenu(null);
-            }}
-          >
-            {changes.deletedKeys.has(getPkKey(rowContextMenu.rowIdx)) ? "Undo delete" : "Delete row"}
-          </button>
+          {selectedRowIndices.size > 1 && selectedRowIndices.has(rowContextMenu.rowIdx) ? (
+            <button
+              className="context-menu-item context-menu-danger"
+              onClick={() => {
+                handleDeleteSelected();
+                setRowContextMenu(null);
+              }}
+            >
+              <Trash2 size={12} />
+              Delete {selectedRowIndices.size} selected rows
+            </button>
+          ) : (
+            <button
+              className="context-menu-item"
+              onClick={() => {
+                const rIdx = rowContextMenu.rowIdx;
+                const isInserted = rIdx >= originalRowCount;
+                if (!isInserted) handleDeleteRow(rIdx);
+                setRowContextMenu(null);
+              }}
+            >
+              {changes.deletedKeys.has(getPkKey(rowContextMenu.rowIdx)) ? "Undo delete" : "Delete row"}
+            </button>
+          )}
           {data.columns.map((col, colIdx) => {
             const fk = fkMap.get(col.name);
             if (!fk) return null;

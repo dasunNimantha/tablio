@@ -721,3 +721,282 @@ describe("generateTestValue", () => {
     });
   });
 });
+
+// --- Multi-row selection and bulk deletion logic ---
+
+interface SelectionState {
+  deletedKeys: Set<string>;
+}
+
+function computeBulkDelete(
+  selectedIndices: Set<number>,
+  originalRowCount: number,
+  getPkKey: (idx: number) => string,
+  currentState: SelectionState,
+): SelectionState {
+  const next: SelectionState = { deletedKeys: new Set(currentState.deletedKeys) };
+  for (const rowIdx of selectedIndices) {
+    if (rowIdx >= originalRowCount) continue;
+    next.deletedKeys.add(getPkKey(rowIdx));
+  }
+  return next;
+}
+
+function getRowClasses(
+  isInserted: boolean,
+  isDeleted: boolean,
+  isDetailRow: boolean,
+  isMultiSelected: boolean,
+): string {
+  const classes: string[] = [];
+  if (isInserted) classes.push("row-inserted");
+  if (isDeleted) classes.push("row-deleted");
+  if (isDetailRow) classes.push("row-selected");
+  if (isMultiSelected) classes.push("row-multi-selected");
+  return classes.join(" ");
+}
+
+function shouldHandleKeyAsDelete(
+  key: string,
+  selectionSize: number,
+  targetTag: string,
+  isEditable: boolean,
+): boolean {
+  if (selectionSize === 0) return false;
+  if (key !== "Delete" && key !== "Backspace") return false;
+  if (targetTag === "INPUT" || targetTag === "TEXTAREA" || isEditable) return false;
+  return true;
+}
+
+function shouldHandleKeyAsSelectAll(
+  key: string,
+  ctrlKey: boolean,
+  metaKey: boolean,
+  targetTag: string,
+  isEditable: boolean,
+): boolean {
+  if (key.toLowerCase() !== "a") return false;
+  if (!ctrlKey && !metaKey) return false;
+  if (targetTag === "INPUT" || targetTag === "TEXTAREA" || isEditable) return false;
+  return true;
+}
+
+function contextMenuDeleteLabel(
+  selectedCount: number,
+  clickedRowInSelection: boolean,
+  clickedRowAlreadyDeleted: boolean,
+): { label: string; isBulk: boolean } {
+  if (selectedCount > 1 && clickedRowInSelection) {
+    return { label: `Delete ${selectedCount} selected rows`, isBulk: true };
+  }
+  if (clickedRowAlreadyDeleted) {
+    return { label: "Undo delete", isBulk: false };
+  }
+  return { label: "Delete row", isBulk: false };
+}
+
+function deleteButtonLabel(count: number): string {
+  return `Delete ${count} row${count > 1 ? "s" : ""}`;
+}
+
+describe("Multi-row selection bulk delete", () => {
+  const mockGetPkKey = (idx: number) => JSON.stringify([idx * 10]);
+
+  it("marks selected rows as deleted", () => {
+    const selected = new Set([0, 1, 2]);
+    const result = computeBulkDelete(selected, 10, mockGetPkKey, { deletedKeys: new Set() });
+    expect(result.deletedKeys.size).toBe(3);
+    expect(result.deletedKeys.has(JSON.stringify([0]))).toBe(true);
+    expect(result.deletedKeys.has(JSON.stringify([10]))).toBe(true);
+    expect(result.deletedKeys.has(JSON.stringify([20]))).toBe(true);
+  });
+
+  it("skips inserted rows (index >= originalRowCount)", () => {
+    const selected = new Set([0, 5, 10]);
+    const result = computeBulkDelete(selected, 5, mockGetPkKey, { deletedKeys: new Set() });
+    expect(result.deletedKeys.size).toBe(1);
+    expect(result.deletedKeys.has(mockGetPkKey(0))).toBe(true);
+  });
+
+  it("preserves previously deleted keys", () => {
+    const existing = new Set([JSON.stringify([99])]);
+    const selected = new Set([1]);
+    const result = computeBulkDelete(selected, 10, mockGetPkKey, { deletedKeys: existing });
+    expect(result.deletedKeys.size).toBe(2);
+    expect(result.deletedKeys.has(JSON.stringify([99]))).toBe(true);
+    expect(result.deletedKeys.has(mockGetPkKey(1))).toBe(true);
+  });
+
+  it("handles empty selection", () => {
+    const result = computeBulkDelete(new Set(), 10, mockGetPkKey, { deletedKeys: new Set() });
+    expect(result.deletedKeys.size).toBe(0);
+  });
+
+  it("does not duplicate keys already in deletedKeys", () => {
+    const existing = new Set([mockGetPkKey(0)]);
+    const selected = new Set([0, 1]);
+    const result = computeBulkDelete(selected, 10, mockGetPkKey, { deletedKeys: existing });
+    expect(result.deletedKeys.size).toBe(2);
+  });
+
+  it("skips all rows when all are inserted", () => {
+    const selected = new Set([5, 6, 7]);
+    const result = computeBulkDelete(selected, 5, mockGetPkKey, { deletedKeys: new Set() });
+    expect(result.deletedKeys.size).toBe(0);
+  });
+
+  it("handles single row selection", () => {
+    const selected = new Set([3]);
+    const result = computeBulkDelete(selected, 10, mockGetPkKey, { deletedKeys: new Set() });
+    expect(result.deletedKeys.size).toBe(1);
+    expect(result.deletedKeys.has(mockGetPkKey(3))).toBe(true);
+  });
+});
+
+describe("Row class computation with multi-selection", () => {
+  it("returns empty string for normal row", () => {
+    expect(getRowClasses(false, false, false, false)).toBe("");
+  });
+
+  it("returns row-inserted for inserted row", () => {
+    expect(getRowClasses(true, false, false, false)).toBe("row-inserted");
+  });
+
+  it("returns row-deleted for deleted row", () => {
+    expect(getRowClasses(false, true, false, false)).toBe("row-deleted");
+  });
+
+  it("returns row-selected for detail-view row", () => {
+    expect(getRowClasses(false, false, true, false)).toBe("row-selected");
+  });
+
+  it("returns row-multi-selected for multi-selected row", () => {
+    expect(getRowClasses(false, false, false, true)).toBe("row-multi-selected");
+  });
+
+  it("combines multiple classes", () => {
+    const classes = getRowClasses(false, true, false, true);
+    expect(classes).toContain("row-deleted");
+    expect(classes).toContain("row-multi-selected");
+  });
+
+  it("combines all classes", () => {
+    const classes = getRowClasses(true, true, true, true);
+    expect(classes).toBe("row-inserted row-deleted row-selected row-multi-selected");
+  });
+});
+
+describe("Keyboard handler: delete selected rows", () => {
+  it("returns true for Delete key with selection", () => {
+    expect(shouldHandleKeyAsDelete("Delete", 3, "DIV", false)).toBe(true);
+  });
+
+  it("returns true for Backspace key with selection", () => {
+    expect(shouldHandleKeyAsDelete("Backspace", 1, "DIV", false)).toBe(true);
+  });
+
+  it("returns false when no rows are selected", () => {
+    expect(shouldHandleKeyAsDelete("Delete", 0, "DIV", false)).toBe(false);
+  });
+
+  it("returns false when key is not Delete or Backspace", () => {
+    expect(shouldHandleKeyAsDelete("Enter", 5, "DIV", false)).toBe(false);
+    expect(shouldHandleKeyAsDelete("a", 5, "DIV", false)).toBe(false);
+  });
+
+  it("returns false when target is an INPUT", () => {
+    expect(shouldHandleKeyAsDelete("Delete", 3, "INPUT", false)).toBe(false);
+  });
+
+  it("returns false when target is a TEXTAREA", () => {
+    expect(shouldHandleKeyAsDelete("Delete", 3, "TEXTAREA", false)).toBe(false);
+  });
+
+  it("returns false when target is contentEditable", () => {
+    expect(shouldHandleKeyAsDelete("Delete", 3, "DIV", true)).toBe(false);
+  });
+});
+
+describe("Keyboard handler: select all", () => {
+  it("returns true for Ctrl+A on non-input element", () => {
+    expect(shouldHandleKeyAsSelectAll("a", true, false, "DIV", false)).toBe(true);
+  });
+
+  it("returns true for Cmd+A on non-input element", () => {
+    expect(shouldHandleKeyAsSelectAll("a", false, true, "DIV", false)).toBe(true);
+  });
+
+  it("returns true for Ctrl+A with uppercase key", () => {
+    expect(shouldHandleKeyAsSelectAll("A", true, false, "DIV", false)).toBe(true);
+  });
+
+  it("returns false without modifier key", () => {
+    expect(shouldHandleKeyAsSelectAll("a", false, false, "DIV", false)).toBe(false);
+  });
+
+  it("returns false for wrong key", () => {
+    expect(shouldHandleKeyAsSelectAll("b", true, false, "DIV", false)).toBe(false);
+  });
+
+  it("returns false when target is INPUT", () => {
+    expect(shouldHandleKeyAsSelectAll("a", true, false, "INPUT", false)).toBe(false);
+  });
+
+  it("returns false when target is TEXTAREA", () => {
+    expect(shouldHandleKeyAsSelectAll("a", true, false, "TEXTAREA", false)).toBe(false);
+  });
+
+  it("returns false when target is contentEditable", () => {
+    expect(shouldHandleKeyAsSelectAll("a", true, false, "DIV", true)).toBe(false);
+  });
+});
+
+describe("Context menu delete label", () => {
+  it("shows bulk delete when multiple rows selected and clicked row is in selection", () => {
+    const { label, isBulk } = contextMenuDeleteLabel(5, true, false);
+    expect(label).toBe("Delete 5 selected rows");
+    expect(isBulk).toBe(true);
+  });
+
+  it("shows single delete when only 1 row selected", () => {
+    const { label, isBulk } = contextMenuDeleteLabel(1, true, false);
+    expect(label).toBe("Delete row");
+    expect(isBulk).toBe(false);
+  });
+
+  it("shows single delete when clicked row is not in selection", () => {
+    const { label, isBulk } = contextMenuDeleteLabel(3, false, false);
+    expect(label).toBe("Delete row");
+    expect(isBulk).toBe(false);
+  });
+
+  it("shows undo delete when row is already deleted", () => {
+    const { label, isBulk } = contextMenuDeleteLabel(0, false, true);
+    expect(label).toBe("Undo delete");
+    expect(isBulk).toBe(false);
+  });
+
+  it("shows bulk delete even when clicked row is already deleted if in multi-selection", () => {
+    const { label, isBulk } = contextMenuDeleteLabel(4, true, true);
+    expect(label).toBe("Delete 4 selected rows");
+    expect(isBulk).toBe(true);
+  });
+});
+
+describe("Delete button label", () => {
+  it("shows singular for 1 row", () => {
+    expect(deleteButtonLabel(1)).toBe("Delete 1 row");
+  });
+
+  it("shows plural for multiple rows", () => {
+    expect(deleteButtonLabel(5)).toBe("Delete 5 rows");
+  });
+
+  it("shows singular for 0 rows (button hidden in practice)", () => {
+    expect(deleteButtonLabel(0)).toBe("Delete 0 row");
+  });
+
+  it("shows plural for large counts", () => {
+    expect(deleteButtonLabel(100)).toBe("Delete 100 rows");
+  });
+});
