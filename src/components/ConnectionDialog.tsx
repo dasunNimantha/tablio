@@ -83,10 +83,6 @@ function validateConnectionForm(
     errors.user = "Username is required.";
   }
 
-  if (!normalized.database) {
-    errors.database = "Database name is required.";
-  }
-
   return errors;
 }
 
@@ -395,7 +391,7 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
 
               <div className="form-row">
                 <div className={`form-group flex-1${getFieldError("database") ? " form-group--error" : ""}`}>
-                  <label>{form.db_type === "cassandra" ? "Keyspace (optional)" : "Database"}</label>
+                  <label>{form.db_type === "cassandra" ? "Keyspace (optional)" : "Database (optional)"}</label>
                   <input
                     value={form.database}
                     onChange={(e) => updateField("database", e.target.value)}

@@ -23,13 +23,18 @@ impl TidbDriver {
         } else {
             "PREFERRED"
         };
+        let db_segment = if config.database.trim().is_empty() {
+            String::new()
+        } else {
+            format!("/{}", urlencoding::encode(&config.database))
+        };
         let url = format!(
-            "mysql://{}:{}@{}:{}/{}?ssl-mode={}",
+            "mysql://{}:{}@{}:{}{}?ssl-mode={}",
             urlencoding::encode(&config.user),
             urlencoding::encode(&config.password),
             &config.host,
             config.port,
-            urlencoding::encode(&config.database),
+            db_segment,
             ssl_mode
         );
         let pool = MySqlPoolOptions::new()
