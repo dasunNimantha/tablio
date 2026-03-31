@@ -55,7 +55,7 @@ impl PostgresDriver {
         };
         let url = Self::build_url(config, initial_db);
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(4)
             .connect(&url)
             .await?;
         Ok(Self {
@@ -77,7 +77,7 @@ impl PostgresDriver {
         }
         let url = Self::build_url(&self.config, database);
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(4)
             .connect(&url)
             .await?;
         self.db_pools

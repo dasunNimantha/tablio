@@ -38,7 +38,7 @@ impl TidbDriver {
             ssl_mode
         );
         let pool = MySqlPoolOptions::new()
-            .max_connections(5)
+            .max_connections(4)
             .connect(&url)
             .await?;
         Ok(Self { pool })

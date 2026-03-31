@@ -41,6 +41,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.1.20" date="2026-03-31">
+      <description>
+        <p>Reduce connection pool size from 5 to 4 per database for lighter resource usage on remote servers. Default to the maintenance database when connecting without a database name.</p>
+      </description>
+    </release>
     <release version="0.1.19" date="2026-03-29">
       <description>
         <p>Add multi-row selection with Ctrl+Click, Shift+Click, and Ctrl+A support for bulk deletion. Fix per-database connection pooling for PostgreSQL and CockroachDB when connecting without a default database. Preserve row selection across auto-refresh using primary-key-based tracking.</p>
