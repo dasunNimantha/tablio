@@ -5,20 +5,20 @@ Codename: stable
 Architectures: amd64
 Components: main
 Description: Tablio APT repository
-Date: Tue, 31 Mar 2026 05:13:27 +0000
+Date: Tue, 31 Mar 2026 06:24:30 +0000
 MD5Sum:
- f2383f90496ea7f2a7d3906b71d1da4e              171 Release
- 06c1d712fbbcd89607bbea3037685e3d             2382 main/binary-amd64/Packages
- 99cd3978cddc97f9b4338ba8571ad885              846 main/binary-amd64/Packages.gz
+ cd20162177b29a44ea1400529c650bfb              171 Release
+ f21856b2a651f3b4369c5b53c7c276c9             2777 main/binary-amd64/Packages
+ 6805aaf36ebfd016747ae91ee7624457              951 main/binary-amd64/Packages.gz
 SHA1:
- ddadb180d1b5ba46dcc1ce6d78c06b6def32cfe7              171 Release
- cf7ca82f6188bdd0da087ce864f63487c4f0d134             2382 main/binary-amd64/Packages
- 3ce678101a7a5e338140af48915a39907915457e              846 main/binary-amd64/Packages.gz
+ f1ea2158f8c9dee6bb4a1001be3f95cb822b4087              171 Release
+ c9d77ca60c987ed1887da80ef28167d82c318883             2777 main/binary-amd64/Packages
+ dd4b2b75992b72dd7c702e692ae32ef7b45dd7ae              951 main/binary-amd64/Packages.gz
 SHA256:
- 797b9bbf7cdb9c9020741bbf13e2462dbbe000046f2232579e5c0e0b5d47c0c2              171 Release
- 7b2d715fa928a15d7af698361847d0e29770dfdac7906bd5ca43e17ec40eb170             2382 main/binary-amd64/Packages
- baf3266c03b81288b32655352c0aea135122b5327e2ee9b4d809c2c34ac6c0bc              846 main/binary-amd64/Packages.gz
+ cc68a15b65ec379ffe4f39f164703dbaa3121a1b88667aa804d6736b50538b86              171 Release
+ e2bcea5b2ac6310ae7577d0dd2f123ede2fdc941c097b0ecc3a80d5a9a41b391             2777 main/binary-amd64/Packages
+ 8ee95e1df67e86c56f07c3d66de6c48ef208981f63f41bccf6f2db229716f9b0              951 main/binary-amd64/Packages.gz
 SHA512:
- 7423133f76a1a6ebeb1a0336a67c9c9f3f462c5034ae7346cd3ea819ad767eead6d960f6ebdd87727851545ae551176a2c9ff115698c24a489beb82772b11f1c              171 Release
- 731fbdc6bbc8a0b4dfb3f1aed13642ef2b17e991f4ecf4f5093ae0531700bf049329643d8fbfd5bf3b6b2e076567af7f06369188a92f94dc07829eb287ff67af             2382 main/binary-amd64/Packages
- 22499ab913033d687ce996686c82846866ec94e66cf186fc483c694bb0a4f37f4b08ec355575a3c682b69101818f0362e238f49e2354596334b8fe3f635a600e              846 main/binary-amd64/Packages.gz
+ 8d2047d14b8d047c781226e7a6d04a2c043578e0dc816921dbe3a1c07df92696eab2274ca3a52b67efa8bf19a2af8a5ca75691b8dc4e1e856f85d09297bea537              171 Release
+ 72e693407e78ba0f5284e1dfeb007ec855ad3c47ebe60c4718f22dbaa578136b4f720cc39fb3f6c19a0ef79cc5ccac5bb1459c01009be5e4fb45f51e64b6e762             2777 main/binary-amd64/Packages
+ 2173d14edcfc43ce01deb0ecdb632ab5cdc1114621f475d0696e80d799991c28507e0cbb58df36799ceee3266c092a61aaa3bb3d930ed9eba56add923cacda39              951 main/binary-amd64/Packages.gz
