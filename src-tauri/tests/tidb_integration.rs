@@ -44,6 +44,44 @@ macro_rules! tidb_driver {
     }};
 }
 
+macro_rules! tidb_driver_no_db {
+    () => {{
+        let url = match std::env::var("TEST_TIDB_URL") {
+            Ok(v) if !v.is_empty() => v,
+            _ => {
+                eprintln!("Skipping: TEST_TIDB_URL not set");
+                return;
+            }
+        };
+        let parts = url.strip_prefix("mysql://").expect("bad TEST_TIDB_URL");
+        let (user_pass, rest) = parts.split_once('@').expect("missing @");
+        let (user, password) = user_pass.split_once(':').unwrap_or((user_pass, ""));
+        let (host_port, _database) = rest.split_once('/').expect("missing /");
+        let (host, port) = host_port.split_once(':').expect("missing port");
+        let config = ConnectionConfig {
+            id: "test-no-db".into(),
+            name: "test-no-db".into(),
+            db_type: DbType::Tidb,
+            host: host.into(),
+            port: port.parse().unwrap(),
+            user: user.into(),
+            password: password.into(),
+            database: String::new(),
+            color: "#000".into(),
+            ssl: false,
+            trust_server_cert: true,
+            group: None,
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 22,
+            ssh_user: String::new(),
+            ssh_password: String::new(),
+            ssh_key_path: String::new(),
+        };
+        TidbDriver::connect(&config).await.unwrap()
+    }};
+}
+
 fn unique_table(prefix: &str) -> String {
     format!(
         "{}_{}",
@@ -1128,4 +1166,87 @@ async fn tidb_cancel_query_invalid_pid() {
     let (driver, _db) = tidb_driver!();
     let r = driver.cancel_query("not_a_number").await;
     assert!(r.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Optional database connection (connect without specifying a database)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn tidb_no_db_connect_and_list_databases() {
+    let driver = tidb_driver_no_db!();
+    assert!(driver.test_connection().await.unwrap());
+    let dbs = driver.list_databases().await.unwrap();
+    assert!(!dbs.is_empty());
+}
+
+#[tokio::test]
+async fn tidb_no_db_list_tables_on_specific_database() {
+    let (with_db, db) = tidb_driver!();
+    let tbl = unique_table("nodb_tbl");
+    with_db
+        .create_table(
+            &db,
+            &db,
+            &tbl,
+            &[ColumnDefinition {
+                name: "id".into(),
+                data_type: "INT".into(),
+                is_nullable: false,
+                is_primary_key: true,
+                default_value: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let driver = tidb_driver_no_db!();
+    let tables = driver.list_tables(&db, &db).await.unwrap();
+    assert!(
+        tables.iter().any(|t| t.name == tbl),
+        "Table '{}' not found via no-db driver",
+        tbl
+    );
+
+    with_db.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn tidb_no_db_fetch_rows_on_specific_database() {
+    let (with_db, db) = tidb_driver!();
+    let tbl = unique_table("nodb_fetch");
+    with_db
+        .create_table(
+            &db,
+            &db,
+            &tbl,
+            &[ColumnDefinition {
+                name: "id".into(),
+                data_type: "INT".into(),
+                is_nullable: false,
+                is_primary_key: true,
+                default_value: None,
+            }],
+        )
+        .await
+        .unwrap();
+    with_db
+        .import_data(
+            &db,
+            &db,
+            &tbl,
+            &["id".to_string()],
+            &[vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
+        )
+        .await
+        .unwrap();
+
+    let driver = tidb_driver_no_db!();
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .await
+        .unwrap();
+    assert_eq!(data.total_rows, 2);
+
+    with_db.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }

@@ -49,6 +49,47 @@ macro_rules! crdb_driver {
 
 const SCHEMA: &str = "public";
 
+macro_rules! crdb_driver_no_db {
+    () => {{
+        let url = match std::env::var("TEST_COCKROACHDB_URL") {
+            Ok(v) if !v.is_empty() => v,
+            _ => {
+                eprintln!("Skipping: TEST_COCKROACHDB_URL not set");
+                return;
+            }
+        };
+        let parts = url
+            .strip_prefix("postgres://")
+            .or_else(|| url.strip_prefix("postgresql://"))
+            .expect("bad TEST_COCKROACHDB_URL");
+        let (user_pass, rest) = parts.split_once('@').expect("missing @");
+        let (user, password) = user_pass.split_once(':').unwrap_or((user_pass, ""));
+        let (host_port, _database) = rest.split_once('/').expect("missing /");
+        let (host, port) = host_port.split_once(':').expect("missing port");
+        let config = ConnectionConfig {
+            id: "test-no-db".into(),
+            name: "test-no-db".into(),
+            db_type: DbType::Cockroachdb,
+            host: host.into(),
+            port: port.parse().unwrap(),
+            user: user.into(),
+            password: password.into(),
+            database: String::new(),
+            color: "#000".into(),
+            ssl: false,
+            trust_server_cert: true,
+            group: None,
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 22,
+            ssh_user: String::new(),
+            ssh_password: String::new(),
+            ssh_key_path: String::new(),
+        };
+        CockroachdbDriver::connect(&config).await.unwrap()
+    }};
+}
+
 fn unique_table(prefix: &str) -> String {
     format!(
         "{}_{}",
@@ -1186,4 +1227,102 @@ async fn crdb_list_roles() {
     let (driver, _db) = crdb_driver!();
     let roles = driver.list_roles().await.unwrap();
     assert!(!roles.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Per-database pool switching (optional database connection)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn crdb_no_db_connect_and_list_databases() {
+    let driver = crdb_driver_no_db!();
+    assert!(driver.test_connection().await.unwrap());
+    let dbs = driver.list_databases().await.unwrap();
+    assert!(!dbs.is_empty());
+}
+
+#[tokio::test]
+async fn crdb_no_db_list_schemas_on_specific_database() {
+    let (_, db) = crdb_driver!();
+    let driver = crdb_driver_no_db!();
+    let schemas = driver.list_schemas(&db).await.unwrap();
+    assert!(!schemas.is_empty());
+    assert!(schemas.iter().any(|s| s.name == "public"));
+}
+
+#[tokio::test]
+async fn crdb_no_db_list_tables_on_specific_database() {
+    let (with_db, db) = crdb_driver!();
+    let tbl = unique_table("nodb_tbl");
+    with_db
+        .create_table(
+            &db,
+            SCHEMA,
+            &tbl,
+            &[ColumnDefinition {
+                name: "id".into(),
+                data_type: "INT".into(),
+                is_nullable: false,
+                is_primary_key: true,
+                default_value: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let driver = crdb_driver_no_db!();
+    let tables = driver.list_tables(&db, SCHEMA).await.unwrap();
+    assert!(
+        tables.iter().any(|t| t.name == tbl),
+        "Table '{}' not found via no-db driver",
+        tbl
+    );
+
+    with_db
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn crdb_no_db_fetch_rows_on_specific_database() {
+    let (with_db, db) = crdb_driver!();
+    let tbl = unique_table("nodb_fetch");
+    with_db
+        .create_table(
+            &db,
+            SCHEMA,
+            &tbl,
+            &[ColumnDefinition {
+                name: "id".into(),
+                data_type: "INT".into(),
+                is_nullable: false,
+                is_primary_key: true,
+                default_value: None,
+            }],
+        )
+        .await
+        .unwrap();
+    with_db
+        .import_data(
+            &db,
+            SCHEMA,
+            &tbl,
+            &["id".to_string()],
+            &[vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
+        )
+        .await
+        .unwrap();
+
+    let driver = crdb_driver_no_db!();
+    let data = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, None, None)
+        .await
+        .unwrap();
+    assert_eq!(data.total_rows, 2);
+
+    with_db
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
 }

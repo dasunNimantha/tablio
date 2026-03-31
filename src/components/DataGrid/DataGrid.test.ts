@@ -729,15 +729,13 @@ interface SelectionState {
 }
 
 function computeBulkDelete(
-  selectedIndices: Set<number>,
-  originalRowCount: number,
-  getPkKey: (idx: number) => string,
+  selectedPkKeys: Set<string>,
   currentState: SelectionState,
 ): SelectionState {
   const next: SelectionState = { deletedKeys: new Set(currentState.deletedKeys) };
-  for (const rowIdx of selectedIndices) {
-    if (rowIdx >= originalRowCount) continue;
-    next.deletedKeys.add(getPkKey(rowIdx));
+  for (const pkKey of selectedPkKeys) {
+    if (pkKey.startsWith("__")) continue;
+    next.deletedKeys.add(pkKey);
   }
   return next;
 }
@@ -799,57 +797,63 @@ function deleteButtonLabel(count: number): string {
   return `Delete ${count} row${count > 1 ? "s" : ""}`;
 }
 
-describe("Multi-row selection bulk delete", () => {
-  const mockGetPkKey = (idx: number) => JSON.stringify([idx * 10]);
-
-  it("marks selected rows as deleted", () => {
-    const selected = new Set([0, 1, 2]);
-    const result = computeBulkDelete(selected, 10, mockGetPkKey, { deletedKeys: new Set() });
+describe("Multi-row selection bulk delete (PK-based)", () => {
+  it("marks selected PK keys as deleted", () => {
+    const selected = new Set(['[1]', '[2]', '[3]']);
+    const result = computeBulkDelete(selected, { deletedKeys: new Set() });
     expect(result.deletedKeys.size).toBe(3);
-    expect(result.deletedKeys.has(JSON.stringify([0]))).toBe(true);
-    expect(result.deletedKeys.has(JSON.stringify([10]))).toBe(true);
-    expect(result.deletedKeys.has(JSON.stringify([20]))).toBe(true);
+    expect(result.deletedKeys.has('[1]')).toBe(true);
+    expect(result.deletedKeys.has('[2]')).toBe(true);
+    expect(result.deletedKeys.has('[3]')).toBe(true);
   });
 
-  it("skips inserted rows (index >= originalRowCount)", () => {
-    const selected = new Set([0, 5, 10]);
-    const result = computeBulkDelete(selected, 5, mockGetPkKey, { deletedKeys: new Set() });
+  it("skips inserted rows (keys starting with __)", () => {
+    const selected = new Set(['[1]', '__ins_0', '__ins_1']);
+    const result = computeBulkDelete(selected, { deletedKeys: new Set() });
     expect(result.deletedKeys.size).toBe(1);
-    expect(result.deletedKeys.has(mockGetPkKey(0))).toBe(true);
+    expect(result.deletedKeys.has('[1]')).toBe(true);
+  });
+
+  it("skips rows without PKs (keys starting with __nopk_)", () => {
+    const selected = new Set(['__nopk_0', '__nopk_1']);
+    const result = computeBulkDelete(selected, { deletedKeys: new Set() });
+    expect(result.deletedKeys.size).toBe(0);
   });
 
   it("preserves previously deleted keys", () => {
-    const existing = new Set([JSON.stringify([99])]);
-    const selected = new Set([1]);
-    const result = computeBulkDelete(selected, 10, mockGetPkKey, { deletedKeys: existing });
+    const existing = new Set(['[99]']);
+    const selected = new Set(['[10]']);
+    const result = computeBulkDelete(selected, { deletedKeys: existing });
     expect(result.deletedKeys.size).toBe(2);
-    expect(result.deletedKeys.has(JSON.stringify([99]))).toBe(true);
-    expect(result.deletedKeys.has(mockGetPkKey(1))).toBe(true);
+    expect(result.deletedKeys.has('[99]')).toBe(true);
+    expect(result.deletedKeys.has('[10]')).toBe(true);
   });
 
   it("handles empty selection", () => {
-    const result = computeBulkDelete(new Set(), 10, mockGetPkKey, { deletedKeys: new Set() });
+    const result = computeBulkDelete(new Set(), { deletedKeys: new Set() });
     expect(result.deletedKeys.size).toBe(0);
   });
 
   it("does not duplicate keys already in deletedKeys", () => {
-    const existing = new Set([mockGetPkKey(0)]);
-    const selected = new Set([0, 1]);
-    const result = computeBulkDelete(selected, 10, mockGetPkKey, { deletedKeys: existing });
+    const existing = new Set(['[1]']);
+    const selected = new Set(['[1]', '[2]']);
+    const result = computeBulkDelete(selected, { deletedKeys: existing });
     expect(result.deletedKeys.size).toBe(2);
   });
 
-  it("skips all rows when all are inserted", () => {
-    const selected = new Set([5, 6, 7]);
-    const result = computeBulkDelete(selected, 5, mockGetPkKey, { deletedKeys: new Set() });
-    expect(result.deletedKeys.size).toBe(0);
+  it("handles single row selection", () => {
+    const selected = new Set(['[30]']);
+    const result = computeBulkDelete(selected, { deletedKeys: new Set() });
+    expect(result.deletedKeys.size).toBe(1);
+    expect(result.deletedKeys.has('[30]')).toBe(true);
   });
 
-  it("handles single row selection", () => {
-    const selected = new Set([3]);
-    const result = computeBulkDelete(selected, 10, mockGetPkKey, { deletedKeys: new Set() });
-    expect(result.deletedKeys.size).toBe(1);
-    expect(result.deletedKeys.has(mockGetPkKey(3))).toBe(true);
+  it("mixes real PK keys and inserted rows correctly", () => {
+    const selected = new Set(['[1,"alice"]', '[2,"bob"]', '__ins_0', '__ins_1']);
+    const result = computeBulkDelete(selected, { deletedKeys: new Set() });
+    expect(result.deletedKeys.size).toBe(2);
+    expect(result.deletedKeys.has('[1,"alice"]')).toBe(true);
+    expect(result.deletedKeys.has('[2,"bob"]')).toBe(true);
   });
 });
 

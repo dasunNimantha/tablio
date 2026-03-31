@@ -2,7 +2,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 use std::time::Instant;
+use tokio::sync::RwLock;
 
 use crate::db::pg_common::*;
 use crate::db::DatabaseDriver;
@@ -10,11 +12,13 @@ use crate::models::*;
 
 pub struct PostgresDriver {
     pool: PgPool,
+    config: ConnectionConfig,
+    db_pools: RwLock<HashMap<String, PgPool>>,
 }
 
 impl PostgresDriver {
-    pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
-        let ssl_mode = if config.ssl {
+    fn ssl_mode(config: &ConnectionConfig) -> &'static str {
+        if config.ssl {
             if config.trust_server_cert {
                 "require"
             } else {
@@ -22,13 +26,17 @@ impl PostgresDriver {
             }
         } else {
             "prefer"
-        };
-        let db_segment = if config.database.trim().is_empty() {
+        }
+    }
+
+    fn build_url(config: &ConnectionConfig, database: &str) -> String {
+        let ssl_mode = Self::ssl_mode(config);
+        let db_segment = if database.trim().is_empty() {
             String::new()
         } else {
-            format!("/{}", urlencoding::encode(&config.database))
+            format!("/{}", urlencoding::encode(database))
         };
-        let url = format!(
+        format!(
             "postgres://{}:{}@{}:{}{}?sslmode={}",
             urlencoding::encode(&config.user),
             urlencoding::encode(&config.password),
@@ -36,12 +44,42 @@ impl PostgresDriver {
             config.port,
             db_segment,
             ssl_mode
-        );
+        )
+    }
+
+    pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
+        let url = Self::build_url(config, &config.database);
         let pool = PgPoolOptions::new()
             .max_connections(5)
             .connect(&url)
             .await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            config: config.clone(),
+            db_pools: RwLock::new(HashMap::new()),
+        })
+    }
+
+    async fn get_pool(&self, database: &str) -> Result<PgPool> {
+        if database.is_empty() || database == self.config.database {
+            return Ok(self.pool.clone());
+        }
+        {
+            let pools = self.db_pools.read().await;
+            if let Some(pool) = pools.get(database) {
+                return Ok(pool.clone());
+            }
+        }
+        let url = Self::build_url(&self.config, database);
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await?;
+        self.db_pools
+            .write()
+            .await
+            .insert(database.to_string(), pool.clone());
+        Ok(pool)
     }
 }
 
@@ -66,10 +104,12 @@ impl DatabaseDriver for PostgresDriver {
         pg_list_databases(&self.pool).await
     }
     async fn list_schemas(&self, database: &str) -> Result<Vec<SchemaInfo>> {
-        pg_list_schemas(&self.pool, database).await
+        let pool = self.get_pool(database).await?;
+        pg_list_schemas(&pool, database).await
     }
     async fn list_tables(&self, database: &str, schema: &str) -> Result<Vec<TableInfo>> {
-        pg_list_tables(&self.pool, database, schema).await
+        let pool = self.get_pool(database).await?;
+        pg_list_tables(&pool, database, schema).await
     }
     async fn list_indexes(
         &self,
@@ -77,7 +117,8 @@ impl DatabaseDriver for PostgresDriver {
         schema: &str,
         table: &str,
     ) -> Result<Vec<IndexInfo>> {
-        pg_list_indexes(&self.pool, database, schema, table).await
+        let pool = self.get_pool(database).await?;
+        pg_list_indexes(&pool, database, schema, table).await
     }
     async fn list_foreign_keys(
         &self,
@@ -85,10 +126,12 @@ impl DatabaseDriver for PostgresDriver {
         schema: &str,
         table: &str,
     ) -> Result<Vec<ForeignKeyInfo>> {
-        pg_list_foreign_keys(&self.pool, database, schema, table).await
+        let pool = self.get_pool(database).await?;
+        pg_list_foreign_keys(&pool, database, schema, table).await
     }
     async fn list_functions(&self, database: &str, schema: &str) -> Result<Vec<FunctionInfo>> {
-        pg_list_functions(&self.pool, database, schema).await
+        let pool = self.get_pool(database).await?;
+        pg_list_functions(&pool, database, schema).await
     }
     async fn list_triggers(
         &self,
@@ -96,10 +139,12 @@ impl DatabaseDriver for PostgresDriver {
         schema: &str,
         table: &str,
     ) -> Result<Vec<TriggerInfo>> {
-        pg_list_triggers(&self.pool, database, schema, table).await
+        let pool = self.get_pool(database).await?;
+        pg_list_triggers(&pool, database, schema, table).await
     }
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult> {
-        pg_execute_query(&self.pool, database, sql).await
+        let pool = self.get_pool(database).await?;
+        pg_execute_query(&pool, database, sql).await
     }
     async fn get_ddl(
         &self,
@@ -108,7 +153,8 @@ impl DatabaseDriver for PostgresDriver {
         object_name: &str,
         object_type: &str,
     ) -> Result<String> {
-        pg_get_ddl(&self.pool, database, schema, object_name, object_type).await
+        let pool = self.get_pool(database).await?;
+        pg_get_ddl(&pool, database, schema, object_name, object_type).await
     }
     async fn create_table(
         &self,
@@ -117,7 +163,8 @@ impl DatabaseDriver for PostgresDriver {
         table_name: &str,
         columns: &[ColumnDefinition],
     ) -> Result<()> {
-        pg_create_table(&self.pool, database, schema, table_name, columns).await
+        let pool = self.get_pool(database).await?;
+        pg_create_table(&pool, database, schema, table_name, columns).await
     }
     async fn alter_table(
         &self,
@@ -126,7 +173,8 @@ impl DatabaseDriver for PostgresDriver {
         table_name: &str,
         operations: &[AlterTableOperation],
     ) -> Result<()> {
-        pg_alter_table(&self.pool, database, schema, table_name, operations).await
+        let pool = self.get_pool(database).await?;
+        pg_alter_table(&pool, database, schema, table_name, operations).await
     }
     async fn import_data(
         &self,
@@ -136,7 +184,8 @@ impl DatabaseDriver for PostgresDriver {
         columns: &[String],
         rows: &[Vec<serde_json::Value>],
     ) -> Result<u64> {
-        pg_import_data(&self.pool, database, schema, table, columns, rows).await
+        let pool = self.get_pool(database).await?;
+        pg_import_data(&pool, database, schema, table, columns, rows).await
     }
     async fn drop_object(
         &self,
@@ -145,10 +194,12 @@ impl DatabaseDriver for PostgresDriver {
         object_name: &str,
         object_type: &str,
     ) -> Result<()> {
-        pg_drop_object(&self.pool, database, schema, object_name, object_type).await
+        let pool = self.get_pool(database).await?;
+        pg_drop_object(&pool, database, schema, object_name, object_type).await
     }
     async fn truncate_table(&self, database: &str, schema: &str, table_name: &str) -> Result<()> {
-        pg_truncate_table(&self.pool, database, schema, table_name).await
+        let pool = self.get_pool(database).await?;
+        pg_truncate_table(&pool, database, schema, table_name).await
     }
     async fn get_server_activity(&self) -> Result<Vec<ServerActivity>> {
         pg_get_server_activity(&self.pool).await
@@ -157,7 +208,8 @@ impl DatabaseDriver for PostgresDriver {
         pg_cancel_query(&self.pool, pid).await
     }
     async fn apply_changes(&self, changes: &DataChanges) -> Result<()> {
-        pg_apply_changes(&self.pool, changes).await
+        let pool = self.get_pool(&changes.database).await?;
+        pg_apply_changes(&pool, changes).await
     }
 
     // -----------------------------------------------------------------------
@@ -166,10 +218,11 @@ impl DatabaseDriver for PostgresDriver {
 
     async fn list_columns(
         &self,
-        _database: &str,
+        database: &str,
         schema: &str,
         table: &str,
     ) -> Result<Vec<ColumnInfo>> {
+        let pool = self.get_pool(database).await?;
         let rows = sqlx::query(
             "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, c.ordinal_position, \
                     c.is_identity, c.identity_generation, c.is_generated, \
@@ -190,7 +243,7 @@ impl DatabaseDriver for PostgresDriver {
         )
         .bind(schema)
         .bind(table)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await?;
 
         Ok(rows
@@ -245,17 +298,16 @@ impl DatabaseDriver for PostgresDriver {
         sort: Option<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData> {
+        let pool = self.get_pool(database).await?;
         let columns = self.list_columns(database, schema, table).await?;
-        pg_fetch_rows_impl(
-            &self.pool, columns, schema, table, offset, limit, sort, filter,
-        )
-        .await
+        pg_fetch_rows_impl(&pool, columns, schema, table, offset, limit, sort, filter).await
     }
 
-    async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
+    async fn explain_query(&self, database: &str, sql: &str) -> Result<ExplainResult> {
+        let pool = self.get_pool(database).await?;
         let start = Instant::now();
         let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", sql);
-        let row = sqlx::query(&explain_sql).fetch_one(&self.pool).await?;
+        let row = sqlx::query(&explain_sql).fetch_one(&pool).await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let raw_json: serde_json::Value = row.try_get(0)?;
@@ -271,10 +323,11 @@ impl DatabaseDriver for PostgresDriver {
 
     async fn get_table_stats(
         &self,
-        _database: &str,
+        database: &str,
         schema: &str,
         table: &str,
     ) -> Result<TableStats> {
+        let pool = self.get_pool(database).await?;
         let sql = "SELECT c.relname AS table_name,
                    GREATEST(c.reltuples, 0)::bigint AS row_count,
                    pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size,
@@ -291,7 +344,7 @@ impl DatabaseDriver for PostgresDriver {
         let row = sqlx::query(sql)
             .bind(schema)
             .bind(table)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&pool)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Table {}.{} not found", schema, table))?;
 
@@ -533,6 +586,84 @@ impl DatabaseDriver for PostgresDriver {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn test_config(database: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: "test".into(),
+            name: "test".into(),
+            db_type: DbType::Postgres,
+            host: "localhost".into(),
+            port: 5432,
+            user: "myuser".into(),
+            password: "mypass".into(),
+            database: database.into(),
+            color: "#000".into(),
+            ssl: false,
+            trust_server_cert: false,
+            group: None,
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 22,
+            ssh_user: String::new(),
+            ssh_password: String::new(),
+            ssh_key_path: String::new(),
+        }
+    }
+
+    #[test]
+    fn build_url_with_database() {
+        let config = test_config("mydb");
+        let url = PostgresDriver::build_url(&config, "mydb");
+        assert!(url.contains("/mydb?"));
+        assert!(url.starts_with("postgres://myuser:mypass@localhost:5432/"));
+    }
+
+    #[test]
+    fn build_url_empty_database() {
+        let config = test_config("");
+        let url = PostgresDriver::build_url(&config, "");
+        assert!(!url.contains("//myuser:mypass@localhost:5432/"));
+        assert!(url.contains("localhost:5432?"));
+    }
+
+    #[test]
+    fn build_url_different_database() {
+        let config = test_config("default_db");
+        let url = PostgresDriver::build_url(&config, "other_db");
+        assert!(url.contains("/other_db?"));
+        assert!(!url.contains("default_db"));
+    }
+
+    #[test]
+    fn build_url_encodes_special_chars() {
+        let config = test_config("");
+        let url = PostgresDriver::build_url(&config, "my db");
+        assert!(url.contains("/my%20db?"));
+    }
+
+    #[test]
+    fn ssl_mode_no_ssl() {
+        let config = test_config("");
+        assert_eq!(PostgresDriver::ssl_mode(&config), "prefer");
+    }
+
+    #[test]
+    fn ssl_mode_ssl_trusted() {
+        let mut config = test_config("");
+        config.ssl = true;
+        config.trust_server_cert = true;
+        assert_eq!(PostgresDriver::ssl_mode(&config), "require");
+    }
+
+    #[test]
+    fn ssl_mode_ssl_verify() {
+        let mut config = test_config("");
+        config.ssl = true;
+        config.trust_server_cert = false;
+        assert_eq!(PostgresDriver::ssl_mode(&config), "verify-full");
+    }
+
     fn format_column_data_type(
         raw_type: &str,
         char_max_len: Option<i32>,

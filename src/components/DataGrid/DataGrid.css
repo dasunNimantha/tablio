@@ -663,10 +663,15 @@ th.grid-row-number {
 .context-menu-fk {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 12px;
   color: var(--accent);
   border-top: 1px solid var(--border-subtle);
+}
+
+.context-menu-fk svg {
+  flex-shrink: 0;
+  opacity: 0.7;
 }
 
 .context-menu-danger {

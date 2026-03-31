@@ -55,6 +55,47 @@ fn unique_table(prefix: &str) -> String {
 const DB: &str = "testdb";
 const SCHEMA: &str = "public";
 
+macro_rules! pg_driver_no_db {
+    () => {{
+        let url = match std::env::var("TEST_POSTGRES_URL") {
+            Ok(v) if !v.is_empty() => v,
+            _ => {
+                eprintln!("Skipping: TEST_POSTGRES_URL not set");
+                return;
+            }
+        };
+        let parts = url
+            .strip_prefix("postgres://")
+            .or_else(|| url.strip_prefix("postgresql://"))
+            .expect("bad TEST_POSTGRES_URL");
+        let (user_pass, rest) = parts.split_once('@').expect("missing @");
+        let (user, password) = user_pass.split_once(':').expect("missing :");
+        let (host_port, _database) = rest.split_once('/').expect("missing /");
+        let (host, port) = host_port.split_once(':').expect("missing port");
+        let config = ConnectionConfig {
+            id: "test-no-db".into(),
+            name: "test-no-db".into(),
+            db_type: DbType::Postgres,
+            host: host.into(),
+            port: port.parse().unwrap(),
+            user: user.into(),
+            password: password.into(),
+            database: String::new(),
+            color: "#000".into(),
+            ssl: false,
+            trust_server_cert: true,
+            group: None,
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 22,
+            ssh_user: String::new(),
+            ssh_password: String::new(),
+            ssh_key_path: String::new(),
+        };
+        PostgresDriver::connect(&config).await.unwrap()
+    }};
+}
+
 // ---------------------------------------------------------------------------
 // Connection
 // ---------------------------------------------------------------------------
@@ -1687,6 +1728,151 @@ async fn pg_alter_table_rename_table() {
 
     driver
         .drop_object(DB, SCHEMA, &new_name, "TABLE")
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Per-database pool switching (optional database connection)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pg_no_db_connect_and_list_databases() {
+    let driver = pg_driver_no_db!();
+    assert!(driver.test_connection().await.unwrap());
+    let dbs = driver.list_databases().await.unwrap();
+    assert!(!dbs.is_empty());
+}
+
+#[tokio::test]
+async fn pg_no_db_list_schemas_on_specific_database() {
+    let driver = pg_driver_no_db!();
+    let schemas = driver.list_schemas(DB).await.unwrap();
+    assert!(!schemas.is_empty());
+    assert!(schemas.iter().any(|s| s.name == "public"));
+}
+
+#[tokio::test]
+async fn pg_no_db_list_tables_on_specific_database() {
+    let with_db = pg_driver!();
+    let tbl = unique_table("pool_switch");
+    with_db
+        .create_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[ColumnDefinition {
+                name: "id".into(),
+                data_type: "integer".into(),
+                is_nullable: false,
+                is_primary_key: true,
+                default_value: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let driver = pg_driver_no_db!();
+    let tables = driver.list_tables(DB, SCHEMA).await.unwrap();
+    assert!(
+        tables.iter().any(|t| t.name == tbl),
+        "Table '{}' not found via no-db driver in database '{}'",
+        tbl,
+        DB
+    );
+
+    with_db
+        .drop_object(DB, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pg_no_db_fetch_rows_on_specific_database() {
+    let with_db = pg_driver!();
+    let tbl = unique_table("pool_fetch");
+    with_db
+        .create_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[ColumnDefinition {
+                name: "id".into(),
+                data_type: "integer".into(),
+                is_nullable: false,
+                is_primary_key: true,
+                default_value: None,
+            }],
+        )
+        .await
+        .unwrap();
+    with_db
+        .import_data(
+            DB,
+            SCHEMA,
+            &tbl,
+            &["id".to_string()],
+            &[vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
+        )
+        .await
+        .unwrap();
+
+    let driver = pg_driver_no_db!();
+    let data = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .await
+        .unwrap();
+    assert_eq!(data.total_rows, 2);
+    assert_eq!(data.rows.len(), 2);
+
+    with_db
+        .drop_object(DB, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pg_no_db_apply_changes_on_specific_database() {
+    let with_db = pg_driver!();
+    let tbl = unique_table("pool_apply");
+    with_db
+        .create_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[ColumnDefinition {
+                name: "id".into(),
+                data_type: "integer".into(),
+                is_nullable: false,
+                is_primary_key: true,
+                default_value: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let driver = pg_driver_no_db!();
+    let changes = DataChanges {
+        connection_id: "test-no-db".into(),
+        database: DB.into(),
+        schema: SCHEMA.into(),
+        table: tbl.clone(),
+        updates: vec![],
+        inserts: vec![NewRow {
+            values: vec![("id".into(), serde_json::json!(42))],
+        }],
+        deletes: vec![],
+    };
+    driver.apply_changes(&changes).await.unwrap();
+
+    let data = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .await
+        .unwrap();
+    assert_eq!(data.total_rows, 1);
+
+    with_db
+        .drop_object(DB, SCHEMA, &tbl, "TABLE")
         .await
         .unwrap();
 }
