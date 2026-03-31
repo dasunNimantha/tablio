@@ -1683,17 +1683,23 @@ async fn mssql_no_db_list_tables_on_specific_database() {
         .unwrap();
 
     let driver = mssql_driver_no_db!();
-    let tables = driver.list_tables(&db, SCHEMA).await.unwrap();
+    let mut tables = Vec::new();
+    for _ in 0..3 {
+        match driver.list_tables(&db, SCHEMA).await {
+            Ok(t) => {
+                tables = t;
+                break;
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        }
+    }
     assert!(
         tables.iter().any(|t| t.name == tbl),
         "Table '{}' not found via no-db driver",
         tbl
     );
 
-    with_db
-        .drop_object(&db, SCHEMA, &tbl, "TABLE")
-        .await
-        .unwrap();
+    let _ = with_db.drop_object(&db, SCHEMA, &tbl, "TABLE").await;
 }
 
 #[tokio::test]

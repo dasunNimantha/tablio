@@ -48,7 +48,12 @@ impl PostgresDriver {
     }
 
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
-        let url = Self::build_url(config, &config.database);
+        let initial_db = if config.database.trim().is_empty() {
+            "postgres"
+        } else {
+            &config.database
+        };
+        let url = Self::build_url(config, initial_db);
         let pool = PgPoolOptions::new()
             .max_connections(5)
             .connect(&url)
