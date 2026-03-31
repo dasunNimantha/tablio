@@ -88,7 +88,9 @@ install_apt() {
     | sudo tee "$LIST" >/dev/null
   ok "Added repository"
 
-  sudo apt-get update -qq
+  info "Updating package index..."
+  sudo apt-get update
+  info "Installing Tablio..."
   sudo apt-get install -y tablio
   ok "Tablio installed via APT"
 }
@@ -105,6 +107,7 @@ install_rpm() {
   sudo curl -fsSL -o /etc/yum.repos.d/tablio.repo "$RPM_REPO_URL"
   ok "Added repository"
 
+  info "Installing Tablio..."
   if command -v dnf &>/dev/null; then
     sudo dnf install -y tablio
   elif command -v zypper &>/dev/null; then
