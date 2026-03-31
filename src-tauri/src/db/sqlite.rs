@@ -448,6 +448,24 @@ impl DatabaseDriver for SqliteDriver {
         })
     }
 
+    async fn validate_query(&self, _database: &str, sql: &str) -> Result<Option<ValidationError>> {
+        use sqlx::Executor;
+        match self.pool.prepare(sql).await {
+            Ok(_) => Ok(None),
+            Err(e) => {
+                let message = if let Some(db_err) = e.as_database_error() {
+                    db_err.message().to_string()
+                } else {
+                    e.to_string()
+                };
+                Ok(Some(ValidationError {
+                    message,
+                    position: None,
+                }))
+            }
+        }
+    }
+
     async fn get_ddl(
         &self,
         _database: &str,

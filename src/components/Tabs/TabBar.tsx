@@ -89,7 +89,7 @@ export function TabBar() {
                 <Terminal size={12} />
               )}
             </span>
-            <span className="tab-title" title={tab.title}>
+            <span className="tab-title">
               {tab.title}
             </span>
             <button

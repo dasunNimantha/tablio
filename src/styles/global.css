@@ -325,10 +325,18 @@ button {
   color: var(--text-primary);
 }
 
+.app-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
 .app-layout {
   display: flex;
-  height: 100%;
+  flex: 1;
   flex-direction: row;
+  overflow: hidden;
 }
 
 .sidebar {

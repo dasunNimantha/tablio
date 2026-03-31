@@ -363,3 +363,162 @@ describe("SQL autocomplete dot context detection", () => {
     expect(detectDotContext("WHERE users.")).toBe("users");
   });
 });
+
+// ---------------------------------------------------------------------------
+// SQL validation marker positioning helpers
+// ---------------------------------------------------------------------------
+
+interface ValidationError {
+  message: string;
+  position: number | null;
+}
+
+function computeLineCol(
+  sql: string,
+  byteOffset: number
+): { line: number; col: number } {
+  const text = sql.slice(0, byteOffset);
+  const lines = text.split("\n");
+  return { line: lines.length, col: lines[lines.length - 1].length + 1 };
+}
+
+function computeMarkerRange(
+  sql: string,
+  error: ValidationError
+): { startLine: number; startCol: number; endLine: number; endCol: number } {
+  if (error.position != null && error.position > 0) {
+    const offset = error.position - 1;
+    const { line, col } = computeLineCol(sql, offset);
+    const currentLineStart = sql.lastIndexOf("\n", offset - 1) + 1;
+    const currentLineEnd = sql.indexOf("\n", offset);
+    const lineText = sql.slice(
+      currentLineStart,
+      currentLineEnd === -1 ? sql.length : currentLineEnd
+    );
+    const wordMatch = lineText.slice(col - 1).match(/^\w+/);
+    const endCol = wordMatch ? col + wordMatch[0].length : col + 1;
+    return { startLine: line, startCol: col, endLine: line, endCol };
+  }
+  const lines = sql.split("\n");
+  return {
+    startLine: 1,
+    startCol: 1,
+    endLine: lines.length,
+    endCol: lines[lines.length - 1].length + 1,
+  };
+}
+
+function shouldSkipValidation(sql: string, executing: boolean): boolean {
+  if (executing) return true;
+  if (!sql.trim()) return true;
+  return false;
+}
+
+describe("SQL validation marker positioning", () => {
+  it("position at start of single-line query", () => {
+    const result = computeMarkerRange("SELCT 1", { message: "syntax error", position: 1 });
+    expect(result.startLine).toBe(1);
+    expect(result.startCol).toBe(1);
+    expect(result.endCol).toBe(6);
+  });
+
+  it("position in middle of single-line query", () => {
+    const result = computeMarkerRange("SELECT * FORM users", { message: "syntax error", position: 10 });
+    expect(result.startLine).toBe(1);
+    expect(result.startCol).toBe(10);
+    expect(result.endCol).toBe(14);
+  });
+
+  it("position on second line of multi-line query", () => {
+    const sql = "SELECT *\nFORM users";
+    const result = computeMarkerRange(sql, { message: "syntax error", position: 10 });
+    expect(result.startLine).toBe(2);
+    expect(result.startCol).toBe(1);
+    expect(result.endCol).toBe(5);
+  });
+
+  it("no position underlines entire query", () => {
+    const sql = "SELECT * FROM bad_table";
+    const result = computeMarkerRange(sql, { message: "table not found", position: null });
+    expect(result.startLine).toBe(1);
+    expect(result.startCol).toBe(1);
+    expect(result.endLine).toBe(1);
+    expect(result.endCol).toBe(sql.length + 1);
+  });
+
+  it("no position on multi-line query spans all lines", () => {
+    const sql = "SELECT *\nFROM users\nWHERE id = 1";
+    const result = computeMarkerRange(sql, { message: "error", position: null });
+    expect(result.startLine).toBe(1);
+    expect(result.endLine).toBe(3);
+  });
+
+  it("position at end of line", () => {
+    const sql = "SELECT 1 +";
+    const result = computeMarkerRange(sql, { message: "expected expression", position: 11 });
+    expect(result.startLine).toBe(1);
+    expect(result.startCol).toBe(11);
+  });
+
+  it("position zero treated as no position", () => {
+    const sql = "bad query";
+    const result = computeMarkerRange(sql, { message: "error", position: 0 });
+    expect(result.startLine).toBe(1);
+    expect(result.startCol).toBe(1);
+    expect(result.endLine).toBe(1);
+  });
+
+  it("handles position beyond string length gracefully", () => {
+    const sql = "SELECT 1";
+    const result = computeMarkerRange(sql, { message: "error", position: 100 });
+    expect(result.startLine).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("SQL validation skip logic", () => {
+  it("skips when executing", () => {
+    expect(shouldSkipValidation("SELECT 1", true)).toBe(true);
+  });
+
+  it("skips for empty SQL", () => {
+    expect(shouldSkipValidation("", false)).toBe(true);
+  });
+
+  it("skips for whitespace-only SQL", () => {
+    expect(shouldSkipValidation("   \n  ", false)).toBe(true);
+  });
+
+  it("does not skip for valid SQL when not executing", () => {
+    expect(shouldSkipValidation("SELECT 1", false)).toBe(false);
+  });
+
+  it("does not skip for partial SQL", () => {
+    expect(shouldSkipValidation("SEL", false)).toBe(false);
+  });
+});
+
+describe("SQL validation line/column computation", () => {
+  it("single line offset 0", () => {
+    expect(computeLineCol("SELECT 1", 0)).toEqual({ line: 1, col: 1 });
+  });
+
+  it("single line offset 7", () => {
+    expect(computeLineCol("SELECT 1", 7)).toEqual({ line: 1, col: 8 });
+  });
+
+  it("second line start", () => {
+    expect(computeLineCol("SELECT\n1", 7)).toEqual({ line: 2, col: 1 });
+  });
+
+  it("second line middle", () => {
+    expect(computeLineCol("SELECT\nFROM users", 12)).toEqual({ line: 2, col: 6 });
+  });
+
+  it("third line", () => {
+    expect(computeLineCol("A\nB\nC", 4)).toEqual({ line: 3, col: 1 });
+  });
+
+  it("empty string", () => {
+    expect(computeLineCol("", 0)).toEqual({ line: 1, col: 1 });
+  });
+});

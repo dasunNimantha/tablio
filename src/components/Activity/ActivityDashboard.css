@@ -7,12 +7,47 @@
 .activity-toolbar {
   display: flex;
   align-items: center;
-  padding: 0 var(--gutter-lg);
-  height: var(--toolbar-height);
-  min-height: var(--toolbar-height);
+  justify-content: space-between;
+  padding: 10px var(--gutter-lg);
+  min-height: 60px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   gap: var(--gutter);
+  flex-wrap: wrap;
+}
+
+.activity-toolbar-left,
+.activity-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.activity-toolbar-left {
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.activity-toolbar-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 96px;
+}
+
+.activity-toolbar-kicker {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.activity-toolbar-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
 }
 
 .activity-count {
@@ -91,23 +126,25 @@
 .dashboard-sub-tabs {
   display: flex;
   align-items: center;
-  background: var(--bg-primary);
-  border-radius: var(--radius-sm);
-  padding: 3px;
-  gap: 2px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  gap: 6px;
+  box-shadow: none;
 }
 
 .dashboard-sub-tab {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 14px;
-  font-size: 12px;
-  font-weight: 500;
+  gap: 7px;
+  padding: 8px 15px;
+  font-size: 13px;
+  font-weight: 400;
   color: var(--text-muted);
-  background: none;
-  border: none;
-  border-radius: var(--radius-xs);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: all 0.15s;
   white-space: nowrap;
@@ -116,12 +153,56 @@
 .dashboard-sub-tab:hover {
   color: var(--text-primary);
   background: var(--bg-hover);
+  border-color: transparent;
 }
 
 .dashboard-sub-tab.active {
-  background: var(--accent);
-  color: var(--text-inverse);
-  box-shadow: var(--shadow-sm);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--text-primary);
+  box-shadow: none;
+}
+
+.dashboard-sub-tab.active svg {
+  color: var(--accent);
+}
+
+.activity-live-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.activity-live-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.activity-live-toggle.live {
+  border-color: color-mix(in srgb, var(--success) 30%, var(--border));
+  color: var(--success);
+}
+
+.activity-live-toggle.paused {
+  color: var(--warning);
+}
+
+.activity-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 14%, transparent);
 }
 
 /* Sub-content wrapper */
@@ -135,11 +216,12 @@
 .activity-sub-toolbar {
   display: flex;
   align-items: center;
-  padding: var(--gutter-sm) var(--gutter-lg);
+  padding: 10px var(--gutter-lg);
   gap: var(--gutter-sm);
   border-bottom: 1px solid var(--border);
   background: var(--bg-secondary);
-  min-height: 36px;
+  min-height: 48px;
+  flex-wrap: wrap;
 }
 
 /* Empty state */
@@ -158,32 +240,34 @@
 
 /* Overview stats bar */
 .overview-stats-bar {
-  display: flex;
-  align-items: stretch;
-  gap: 1px;
-  background: var(--border);
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px var(--gutter-lg);
+  background: var(--bg-primary);
   border-bottom: 1px solid var(--border);
 }
 
 .overview-stat {
-  flex: 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 10px 12px;
+  padding: 14px 16px;
   background: var(--bg-secondary);
-  gap: 1px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  gap: 3px;
+  min-height: 72px;
 }
 
 .overview-stat-divider {
-  width: 1px;
-  background: var(--border);
+  display: none;
 }
 
 .overview-stat-value {
-  font-size: 20px;
-  font-weight: 600;
+  font-size: 22px;
+  font-weight: 400;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
@@ -198,11 +282,11 @@
 }
 
 .overview-stat-label {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  font-weight: 500;
+  letter-spacing: 0.55px;
+  font-weight: 400;
 }
 
 /* Chart grid */
@@ -210,10 +294,11 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-template-rows: 1fr 1fr;
-  gap: 1px;
-  background: var(--border);
+  gap: 12px;
+  background: var(--bg-primary);
   flex: 1;
   overflow: hidden;
+  padding: 14px var(--gutter-lg) var(--gutter-lg);
 }
 
 .chart-card {
@@ -222,6 +307,9 @@
   background: var(--bg-primary);
   padding: 12px 14px 4px;
   overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
 }
 
 .chart-card-header {
@@ -246,8 +334,8 @@
 }
 
 .chart-card-title {
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 400;
   color: var(--text-primary);
 }
 
@@ -262,7 +350,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
@@ -279,7 +367,7 @@
 }
 
 .chart-legend-value {
-  font-weight: 600;
+  font-weight: 400;
   color: var(--text-primary);
 }
 
@@ -376,6 +464,37 @@
   color: var(--text-primary);
 }
 
+@media (max-width: 980px) {
+  .overview-stats-bar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .chart-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .activity-toolbar {
+    align-items: stretch;
+  }
+
+  .activity-toolbar-left,
+  .activity-toolbar-right {
+    width: 100%;
+  }
+
+  .dashboard-sub-tabs {
+    overflow-x: auto;
+    max-width: 100%;
+  }
+
+  .overview-stats-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 /* Config */
 .config-search {
   display: flex;
@@ -394,7 +513,7 @@
   background: none;
   outline: none;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: 13px;
   width: 160px;
   padding: 0;
   height: 100%;
@@ -426,13 +545,13 @@
 }
 
 .config-category-name {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 400;
   color: var(--text-primary);
 }
 
 .config-category-count {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-muted);
   background: var(--bg-hover);
   padding: 1px 6px;
@@ -450,19 +569,19 @@
 
 .config-name {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--accent);
 }
 
 .config-value {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-primary);
-  font-weight: 500;
+  font-weight: 400;
 }
 
 .config-context-badge {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-muted);
   background: var(--bg-hover);
   padding: 1px 6px;
@@ -471,17 +590,17 @@
 }
 
 .config-source {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted);
 }
 
 .config-source.modified {
   color: var(--accent);
-  font-weight: 500;
+  font-weight: 400;
 }
 
 .config-desc {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted);
   max-width: 280px;
   overflow: hidden;
@@ -494,8 +613,8 @@
 }
 
 .config-restart-badge {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 400;
   color: var(--warning);
   background: rgba(245, 183, 49, 0.10);
   padding: 2px 9px;
@@ -506,8 +625,8 @@
 }
 
 .config-modified-badge {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 400;
   color: var(--accent);
   background: var(--accent-soft);
   padding: 2px 9px;

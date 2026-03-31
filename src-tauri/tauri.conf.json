@@ -1,6 +1,6 @@
 {
   "productName": "Tablio",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "com.tablio.app",
   "build": {
     "frontendDist": "../dist",
@@ -15,7 +15,8 @@
         "width": 1400,
         "height": 900,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "decorations": false
       }
     ],
     "security": {

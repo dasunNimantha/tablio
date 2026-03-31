@@ -27,6 +27,26 @@
   overflow: hidden;
 }
 
+/* Match QueryConsole: one rounded hover surface (Monaco adds a square outer frame) */
+.ddl-editor-wrapper .monaco-editor .monaco-resizable-hover {
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.ddl-editor-wrapper .monaco-editor .monaco-resizable-hover > .monaco-hover {
+  border-radius: 6px !important;
+}
+
+.ddl-editor-wrapper .monaco-editor .monaco-hover {
+  border: 1px solid var(--border) !important;
+  border-radius: 6px !important;
+  background: var(--bg-surface) !important;
+  box-shadow: var(--shadow-dropdown) !important;
+  overflow: hidden !important;
+}
+
 .ddl-loading {
   display: flex;
   flex-direction: column;

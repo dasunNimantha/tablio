@@ -23,11 +23,19 @@
   min-height: var(--toolbar-height);
 }
 
-.query-toolbar .btn-primary {
-  height: 24px;
-  font-size: 11px;
+.query-toolbar .btn-primary,
+.query-toolbar .btn-secondary,
+.query-toolbar .btn-ghost {
+  height: 30px;
+  font-size: 13px;
   padding: 0 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
+  white-space: nowrap;
+}
+
+.query-toolbar .btn-primary,
+.query-toolbar .btn-secondary {
+  font-weight: 400;
 }
 
 .query-hint {
@@ -42,7 +50,8 @@
 
 .query-editor-wrapper {
   flex: 1;
-  overflow: hidden;
+  overflow: visible;
+  position: relative;
   zoom: calc(1 / var(--app-zoom, 1));
   width: calc(100% * var(--app-zoom, 1));
   height: calc(100% * var(--app-zoom, 1));
@@ -51,10 +60,11 @@
 /* Monaco suggest widget styling */
 .query-editor-wrapper .monaco-editor .suggest-widget {
   border: 1px solid var(--border) !important;
-  border-radius: 8px !important;
+  border-radius: 0 !important;
   background: var(--bg-surface) !important;
   box-shadow: var(--shadow-dropdown) !important;
   overflow: hidden;
+  font-size: 15px !important;
 }
 
 .query-editor-wrapper .monaco-editor .suggest-widget .monaco-list {
@@ -62,9 +72,11 @@
 }
 
 .query-editor-wrapper .monaco-editor .suggest-widget .monaco-list .monaco-list-row {
-  border-radius: 4px;
+  border-radius: 0;
   margin: 1px 4px;
   padding: 0 8px;
+  font-family: var(--font-mono) !important;
+  color: var(--text-primary) !important;
 }
 
 .query-editor-wrapper .monaco-editor .suggest-widget .monaco-list .monaco-list-row.focused {
@@ -74,6 +86,7 @@
 
 .query-editor-wrapper .monaco-editor .suggest-widget .monaco-list .monaco-list-row:hover {
   background: var(--bg-hover) !important;
+  color: var(--text-primary) !important;
 }
 
 .query-editor-wrapper .monaco-editor .suggest-widget .suggest-status-bar {
@@ -82,23 +95,95 @@
 
 .query-editor-wrapper .monaco-editor .suggest-widget .details-label {
   color: var(--text-muted) !important;
-  font-size: 11px !important;
+  font-size: 15px !important;
+  font-weight: 300 !important;
 }
 
 .query-editor-wrapper .monaco-editor .suggest-details {
   border: 1px solid var(--border) !important;
-  border-radius: 8px !important;
+  border-radius: 0 !important;
   background: var(--bg-surface) !important;
   box-shadow: var(--shadow-dropdown) !important;
 }
 
 .query-editor-wrapper .monaco-editor .suggest-widget .monaco-icon-label .icon-label-description-container {
-  opacity: 0.6;
-  font-size: 11px;
+  opacity: 0.7;
+  font-size: 15px !important;
+  font-weight: 300 !important;
+}
+
+.query-editor-wrapper .monaco-editor .suggest-widget .monaco-icon-label .label-name {
+  font-size: 15px !important;
+  font-weight: 400 !important;
+  color: var(--text-primary) !important;
 }
 
 .query-editor-wrapper .monaco-editor .suggest-widget .monaco-icon-label::before {
   margin-right: 6px;
+}
+
+/* Strip the outer resizable wrapper so only the inner .monaco-hover is visible */
+.query-editor-wrapper .monaco-editor .monaco-resizable-hover {
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.query-editor-wrapper .monaco-hover {
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-md) !important;
+  background: linear-gradient(180deg, var(--bg-elevated) 0%, var(--bg-surface) 100%) !important;
+  box-shadow: var(--shadow-dropdown) !important;
+  overflow: hidden !important;
+  min-width: 260px;
+  max-width: min(420px, calc(100vw - 32px)) !important;
+}
+
+.query-editor-wrapper .monaco-hover .hover-row {
+  align-items: stretch;
+}
+
+.query-editor-wrapper .monaco-hover .hover-contents {
+  padding: 9px 12px !important;
+  font-size: 15px !important;
+  line-height: 1.4 !important;
+  font-family: "Inter", var(--font-sans) !important;
+  color: var(--text-primary) !important;
+}
+
+.query-editor-wrapper .monaco-hover .marker.hover-contents {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 14px !important;
+}
+
+.query-editor-wrapper .monaco-hover .marker.hover-contents::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--error);
+  opacity: 0.9;
+}
+
+.query-editor-wrapper .monaco-hover .marker.hover-contents > span:first-child {
+  font-weight: 400 !important;
+}
+
+.query-editor-wrapper .monaco-hover .marker.hover-contents > :not(:first-child) {
+  color: var(--text-secondary) !important;
+  font-size: 13.5px !important;
+}
+
+.query-editor-wrapper .monaco-hover .hover-row.status-bar,
+.query-editor-wrapper .monaco-hover .hover-copy-button {
+  display: none !important;
 }
 
 .query-results-section {

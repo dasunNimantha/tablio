@@ -461,6 +461,16 @@ impl DatabaseDriver for CassandraDriver {
         })
     }
 
+    async fn validate_query(&self, _database: &str, sql: &str) -> Result<Option<ValidationError>> {
+        match self.session.prepare(sql).await {
+            Ok(_) => Ok(None),
+            Err(e) => Ok(Some(ValidationError {
+                message: e.to_string(),
+                position: None,
+            })),
+        }
+    }
+
     async fn get_ddl(
         &self,
         database: &str,

@@ -1348,3 +1348,40 @@ async fn mariadb_no_db_fetch_rows_on_specific_database() {
 
     with_db.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// validate_query integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn validate_query_valid_select() {
+    let (driver, db) = mariadb_driver!();
+    let result = driver.validate_query(&db, "SELECT 1").await.unwrap();
+    assert!(result.is_none(), "valid SQL should return None");
+}
+
+#[tokio::test]
+async fn validate_query_syntax_error() {
+    let (driver, db) = mariadb_driver!();
+    let result = driver.validate_query(&db, "SELCT 1").await.unwrap();
+    assert!(result.is_some(), "invalid SQL should return Some");
+    let err = result.unwrap();
+    assert!(!err.message.is_empty());
+}
+
+#[tokio::test]
+async fn validate_query_nonexistent_table() {
+    let (driver, db) = mariadb_driver!();
+    let result = driver
+        .validate_query(&db, "SELECT * FROM nonexistent_table_xyz_12345")
+        .await
+        .unwrap();
+    assert!(result.is_some());
+}
+
+#[tokio::test]
+async fn validate_query_empty_string() {
+    let (driver, db) = mariadb_driver!();
+    let result = driver.validate_query(&db, "").await.unwrap();
+    assert!(result.is_some(), "empty SQL should be an error");
+}

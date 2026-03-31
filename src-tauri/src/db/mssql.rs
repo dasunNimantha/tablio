@@ -905,6 +905,22 @@ impl DatabaseDriver for MssqlDriver {
         }
     }
 
+    async fn validate_query(&self, database: &str, sql: &str) -> Result<Option<ValidationError>> {
+        self.use_database(database).await?;
+        let batch = format!("SET PARSEONLY ON; {}; SET PARSEONLY OFF;", sql);
+        let mut client = self.client.lock().await;
+        match client.execute(&*batch, &[]).await {
+            Ok(_) => Ok(None),
+            Err(e) => {
+                let message = e.to_string();
+                Ok(Some(ValidationError {
+                    message,
+                    position: None,
+                }))
+            }
+        }
+    }
+
     async fn get_ddl(
         &self,
         database: &str,

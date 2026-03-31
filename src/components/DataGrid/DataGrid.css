@@ -26,6 +26,7 @@
   font-weight: 400;
   height: 30px;
   font-size: 13px;
+  white-space: nowrap;
 }
 
 .btn-discard {
@@ -45,6 +46,8 @@
   display: flex;
   align-items: center;
   gap: 14px;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 .grid-table-name {
@@ -52,6 +55,9 @@
   font-weight: 600;
   font-family: var(--font-mono);
   color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .grid-row-count {
@@ -67,6 +73,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .grid-error-banner {

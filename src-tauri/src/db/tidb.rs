@@ -235,6 +235,10 @@ impl DatabaseDriver for TidbDriver {
         })
     }
 
+    async fn validate_query(&self, _database: &str, sql: &str) -> Result<Option<ValidationError>> {
+        my_validate_query(&self.pool, sql).await
+    }
+
     async fn list_functions(&self, _database: &str, _schema: &str) -> Result<Vec<FunctionInfo>> {
         Ok(vec![])
     }

@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { api, DatabaseStats } from "../../lib/tauri";
 import { computeRate, formatVal, makeLabels, type RatePoint } from "../../lib/dashboardUtils";
+import { chartDevicePixelRatio, chartFontFamily } from "../../lib/chartRendering";
 import { Loader2, Activity, ArrowUpDown, Database, HardDrive } from "lucide-react";
 import {
   Chart as ChartJS,
@@ -52,31 +53,121 @@ interface ChartCardProps {
   unit?: string;
 }
 
+function applyDpr(chart: ChartJS) {
+  const next = chartDevicePixelRatio();
+  if (chart.options.devicePixelRatio !== next) {
+    chart.options.devicePixelRatio = next;
+    chart.resize();
+  }
+}
+
 function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chartRef = useRef<ChartJS | null>(null);
   const unitRef = useRef(unit);
   unitRef.current = unit;
+  const datasetsRef = useRef(datasets);
+  datasetsRef.current = datasets;
 
   const labels = useMemo(() => {
     const maxLen = Math.max(...datasets.map((d) => d.data.length), 0);
     return makeLabels(Math.max(maxLen, MAX_POINTS));
   }, [datasets]);
+  const labelsRef = useRef(labels);
+  labelsRef.current = labels;
 
-  // Init chart once on mount, destroy on unmount
-  useEffect(() => {
+  const syncChartData = useCallback(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
+    const curLabels = labelsRef.current;
+    const curDatasets = datasetsRef.current;
+
+    const makeGradient = (color: string) => {
+      const m = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+      const [r, g, b] = m ? [m[1], m[2], m[3]] : ["130", "130", "150"];
+      const h = canvas.clientHeight || 200;
+      const grad = ctx.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, `rgba(${r},${g},${b},0.25)`);
+      grad.addColorStop(0.6, `rgba(${r},${g},${b},0.08)`);
+      grad.addColorStop(1, `rgba(${r},${g},${b},0.01)`);
+      return grad;
+    };
+
     const tc = getThemeColors();
+    chart.data.labels = curLabels;
+
+    while (chart.data.datasets.length > curDatasets.length) chart.data.datasets.pop();
+
+    curDatasets.forEach((ds, i) => {
+      const padded = new Array(Math.max(0, curLabels.length - ds.data.length)).fill(null).concat(ds.data);
+      if (chart.data.datasets[i]) {
+        chart.data.datasets[i].data = padded;
+        chart.data.datasets[i].backgroundColor = makeGradient(ds.color) as any;
+      } else {
+        chart.data.datasets.push({
+          label: ds.label,
+          data: padded,
+          borderColor: ds.color,
+          backgroundColor: makeGradient(ds.color),
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHoverRadius: 5,
+          pointHoverBackgroundColor: ds.color,
+          pointHoverBorderColor: tc.pointHoverBorder,
+          pointHoverBorderWidth: 2,
+          tension: 0.4,
+          fill: true,
+        } as any);
+      }
+    });
+
+    const opts = chart.options;
+    const ff = chartFontFamily();
+    const tickFont = { size: 12, family: ff, weight: "400" as const };
+
+    for (const axis of ["x", "y"] as const) {
+      const scale = (opts.scales as any)?.[axis];
+      if (!scale) continue;
+      if (scale.grid) { scale.grid.color = tc.grid; scale.grid.tickColor = tc.tick; }
+      if (scale.ticks) { scale.ticks.color = tc.label; scale.ticks.font = tickFont; }
+      if (scale.border) { scale.border.color = tc.border; }
+    }
+
+    if (opts.plugins?.tooltip) {
+      Object.assign(opts.plugins.tooltip, {
+        backgroundColor: tc.tooltipBg, titleColor: tc.tooltipTitle,
+        bodyColor: tc.tooltipBody, borderColor: tc.tooltipBorder,
+        titleFont: { size: 13, weight: "500", family: ff },
+        bodyFont: { size: 13, weight: "400", family: ff },
+      } as any);
+    }
+
+    applyDpr(chart);
+    chart.update("none");
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d", { alpha: true });
+    if (!ctx) return;
+
+    const tc = getThemeColors();
+    const ff = chartFontFamily();
+    const tickFont = { size: 12, family: ff, weight: "400" as const };
+
     chartRef.current = new ChartJS(ctx, {
       type: "line",
       data: { labels: [], datasets: [] },
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        devicePixelRatio: chartDevicePixelRatio(),
         animation: false,
         interaction: { mode: "index", intersect: false },
         hover: { mode: "index", intersect: false },
@@ -84,13 +175,26 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
         scales: {
           x: {
             grid: { color: tc.grid, drawTicks: true, tickLength: 4, tickColor: tc.tick },
-            ticks: { color: tc.label, font: { size: 10 }, maxRotation: 0, autoSkip: true, autoSkipPadding: 12, padding: 4 },
+            ticks: {
+              color: tc.label,
+              font: tickFont,
+              maxRotation: 0,
+              autoSkip: true,
+              autoSkipPadding: 12,
+              padding: 6,
+            },
             border: { display: true, color: tc.border },
           },
           y: {
             beginAtZero: true,
             grid: { color: tc.grid, drawTicks: true, tickLength: 4, tickColor: tc.tick },
-            ticks: { color: tc.label, font: { size: 10 }, maxTicksLimit: 5, callback: (val) => formatVal(Number(val)), padding: 4 },
+            ticks: {
+              color: tc.label,
+              font: tickFont,
+              maxTicksLimit: 5,
+              callback: (val) => formatVal(Number(val)),
+              padding: 6,
+            },
             border: { display: true, color: tc.border },
           },
         },
@@ -101,8 +205,8 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
             backgroundColor: tc.tooltipBg, titleColor: tc.tooltipTitle, bodyColor: tc.tooltipBody, borderColor: tc.tooltipBorder,
             borderWidth: 1,
             padding: { top: 12, bottom: 12, left: 16, right: 16 },
-            titleFont: { size: 12, weight: 600, family: "'JetBrains Mono', monospace" },
-            bodyFont: { size: 12, weight: 500, family: "'JetBrains Mono', monospace" },
+            titleFont: { size: 13, weight: "500", family: ff },
+            bodyFont: { size: 13, weight: "400", family: ff },
             bodySpacing: 8, displayColors: true, boxWidth: 11, boxHeight: 11, boxPadding: 8,
             cornerRadius: 8, caretSize: 0, usePointStyle: true,
             callbacks: {
@@ -141,87 +245,31 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
       }],
     });
 
+    syncChartData();
+
+    const chart = chartRef.current;
+    const parent = canvas.parentElement;
+    const ro =
+      parent && typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(() => { if (chart) { applyDpr(chart); syncChartData(); } })
+        : null;
+    if (parent && ro) ro.observe(parent);
+    const onWinResize = () => chart && applyDpr(chart);
+    window.addEventListener("resize", onWinResize);
+
     return () => {
+      window.removeEventListener("resize", onWinResize);
+      ro?.disconnect();
       if (chartRef.current) {
         chartRef.current.destroy();
         chartRef.current = null;
       }
     };
-  }, []);
+  }, [syncChartData]);
 
-  // Update chart data in-place on every poll (no destroy/recreate)
   useEffect(() => {
-    const chart = chartRef.current;
-    if (!chart) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const makeGradient = (color: string) => {
-      const m = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-      const [r, g, b] = m ? [m[1], m[2], m[3]] : ["130", "130", "150"];
-      const grad = ctx.createLinearGradient(0, 0, 0, canvas.clientHeight);
-      grad.addColorStop(0, `rgba(${r},${g},${b},0.25)`);
-      grad.addColorStop(0.6, `rgba(${r},${g},${b},0.08)`);
-      grad.addColorStop(1, `rgba(${r},${g},${b},0.01)`);
-      return grad;
-    };
-
-    const tc = getThemeColors();
-
-    chart.data.labels = labels;
-
-    // Sync dataset count
-    while (chart.data.datasets.length > datasets.length) chart.data.datasets.pop();
-
-    datasets.forEach((ds, i) => {
-      const padded = new Array(Math.max(0, labels.length - ds.data.length)).fill(null).concat(ds.data);
-      if (chart.data.datasets[i]) {
-        chart.data.datasets[i].data = padded;
-        chart.data.datasets[i].backgroundColor = makeGradient(ds.color) as any;
-      } else {
-        chart.data.datasets.push({
-          label: ds.label,
-          data: padded,
-          borderColor: ds.color,
-          backgroundColor: makeGradient(ds.color),
-          borderWidth: 2,
-          pointRadius: 0,
-          pointHoverRadius: 5,
-          pointHoverBackgroundColor: ds.color,
-          pointHoverBorderColor: tc.pointHoverBorder,
-          pointHoverBorderWidth: 2,
-          tension: 0.4,
-          fill: true,
-        } as any);
-      }
-    });
-
-    // Update theme colors
-    const opts = chart.options;
-    if (opts.scales?.x) {
-      const xScale = opts.scales.x as any;
-      if (xScale.grid) { xScale.grid.color = tc.grid; xScale.grid.tickColor = tc.tick; }
-      if (xScale.ticks) { xScale.ticks.color = tc.label; }
-      if (xScale.border) { xScale.border.color = tc.border; }
-    }
-    if (opts.scales?.y) {
-      const yScale = opts.scales.y as any;
-      if (yScale.grid) { yScale.grid.color = tc.grid; yScale.grid.tickColor = tc.tick; }
-      if (yScale.ticks) { yScale.ticks.color = tc.label; }
-      if (yScale.border) { yScale.border.color = tc.border; }
-    }
-    if (opts.plugins?.tooltip) {
-      const tip = opts.plugins.tooltip as Record<string, unknown>;
-      tip.backgroundColor = tc.tooltipBg;
-      tip.titleColor = tc.tooltipTitle;
-      tip.bodyColor = tc.tooltipBody;
-      tip.borderColor = tc.tooltipBorder;
-    }
-
-    chart.update("none");
-  }, [datasets, labels]);
+    syncChartData();
+  }, [datasets, labels, syncChartData]);
 
   return (
     <div className="chart-card">

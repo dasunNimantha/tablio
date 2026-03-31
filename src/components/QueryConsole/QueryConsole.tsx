@@ -1,10 +1,10 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import Editor, { OnMount, BeforeMount, type Monaco } from "@monaco-editor/react";
 import { api, QueryResult, ExplainResult } from "../../lib/tauri";
+import { syncMonacoTheme, isLightTheme } from "../../lib/monacoTheme";
 import { ResultTable, parseSimpleSelect, type SourceTable } from "./ResultTable";
 import { ExplainView } from "./ExplainView";
-import { Play, Search, Clock, Loader2, History, AlignLeft, Bookmark, BookmarkPlus, BarChart3, Copy, Pin, CheckCircle2 } from "lucide-react";
-import { ExportMenu } from "../ExportMenu";
+import { Play, Search, Clock, Loader2, History, AlignLeft, Bookmark, BookmarkPlus, Copy, Pin, CheckCircle2, Sparkles } from "lucide-react";
 import { SavedQueries } from "../SavedQueries/SavedQueries";
 import { ChartView } from "../ChartView/ChartView";
 import { format as formatSQL } from "sql-formatter";
@@ -45,10 +45,8 @@ const SQL_KEYWORDS = [
   "BIGSERIAL", "UUID", "JSONB", "JSON", "ARRAY", "INTERVAL",
 ];
 
-const EXPLAIN_BTN_STYLE = { height: 24, fontSize: 11, borderRadius: 6 } as const;
-
-function getCssVar(name: string, fallback: string) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+function formatValidationMessage(message: string) {
+  return message.replace(/[A-Za-z]/, (char) => char.toUpperCase());
 }
 
 export function QueryConsole({ connectionId, database }: Props) {
@@ -68,8 +66,10 @@ export function QueryConsole({ connectionId, database }: Props) {
   const [saveQueryName, setSaveQueryName] = useState("");
   const [editorHeight, setEditorHeight] = useState(45);
   const [pinnedQueries, setPinnedQueries] = useState<Set<number>>(() => new Set());
+  const [suggestionsEnabled, setSuggestionsEnabled] = useState(true);
+  const suggestionsEnabledRef = useRef(true);
   const [monacoTheme, setMonacoTheme] = useState<string>(() =>
-    document.documentElement.getAttribute("data-theme") === "light" ? "tablio-light-0" : "tablio-dark-0"
+    isLightTheme() ? "tablio-light-0" : "tablio-dark-0"
   );
 
   const saveInputRef = useRef<HTMLInputElement>(null);
@@ -83,12 +83,11 @@ export function QueryConsole({ connectionId, database }: Props) {
   const tablesRef = useRef<{ name: string; schema: string }[]>([]);
   const tablesLoadedRef = useRef(false);
   const columnsCache = useRef<Map<string, { name: string; type: string }[]>>(new Map());
-  const completionDisposableRef = useRef<any>(null);
-  const inlineDisposableRef = useRef<any>(null);
   const historyRef = useRef<HistoryEntry[]>([]);
 
   useEffect(() => { connRef.current = { connectionId, database }; }, [connectionId, database]);
   useEffect(() => { historyRef.current = history; }, [history]);
+  useEffect(() => { suggestionsEnabledRef.current = suggestionsEnabled; }, [suggestionsEnabled]);
 
   // ── Monaco theme sync ──
 
@@ -96,47 +95,7 @@ export function QueryConsole({ connectionId, database }: Props) {
     const monaco = monacoRef.current;
     if (!monaco) return;
     const ver = ++themeVersionRef.current;
-    const bg = getCssVar("--bg-primary", "#1e1e1e");
-    const bgSurface = getCssVar("--bg-surface", "#252526");
-    const textPrimary = getCssVar("--text-primary", "#d4d4d4");
-    const textMuted = getCssVar("--text-muted", "#6e6e7c");
-    const accent = getCssVar("--accent", "#6398ff");
-    const isLight = document.documentElement.getAttribute("data-theme") === "light";
-    const colors = {
-      "editor.background": bg,
-      "editor.foreground": textPrimary,
-      "editorLineNumber.foreground": textMuted,
-      "editor.selectionBackground": accent + "33",
-      "editorWidget.background": bgSurface,
-      "editorWidget.border": bgSurface,
-    };
-    const darkName = `tablio-dark-${ver}`;
-    const lightName = `tablio-light-${ver}`;
-    monaco.editor.defineTheme(darkName, {
-      base: "vs-dark", inherit: true,
-      rules: [
-        { token: "string.sql", foreground: "98c379" },
-        { token: "string", foreground: "98c379" },
-        { token: "keyword", foreground: "6daaef" },
-        { token: "number", foreground: "d19a66" },
-        { token: "comment", foreground: "6a737d", fontStyle: "italic" },
-        { token: "operator", foreground: "c8ccd4" },
-      ],
-      colors,
-    });
-    monaco.editor.defineTheme(lightName, {
-      base: "vs", inherit: true,
-      rules: [
-        { token: "string.sql", foreground: "50a14f" },
-        { token: "string", foreground: "50a14f" },
-        { token: "keyword", foreground: "4078f2" },
-        { token: "number", foreground: "986801" },
-        { token: "comment", foreground: "a0a1a7", fontStyle: "italic" },
-        { token: "operator", foreground: "383a42" },
-      ],
-      colors,
-    });
-    setMonacoTheme(isLight ? lightName : darkName);
+    setMonacoTheme(syncMonacoTheme(monaco, ver));
   }, []);
 
   useEffect(() => {
@@ -184,11 +143,10 @@ export function QueryConsole({ connectionId, database }: Props) {
     tablesLoadedRef.current = false;
     tablesRef.current = [];
     columnsCache.current.clear();
-    loadTablesIfNeeded().then(() => {
-      const batch = tablesRef.current.map((t) => loadColumnsForTable(t.name, t.schema));
-      Promise.allSettled(batch);
-    });
-  }, [connectionId, database, loadTablesIfNeeded, loadColumnsForTable]);
+    const timer = window.setTimeout(() => loadTablesIfNeeded(), 250);
+
+    return () => window.clearTimeout(timer);
+  }, [connectionId, database, loadTablesIfNeeded]);
 
   // ── Editor setup ──
 
@@ -196,14 +154,19 @@ export function QueryConsole({ connectionId, database }: Props) {
     monacoRef.current = monaco;
     syncTheme();
 
-    if (completionDisposableRef.current) completionDisposableRef.current.dispose();
-    if (inlineDisposableRef.current) inlineDisposableRef.current.dispose();
+    if ((monaco as any).__tablioCompletionDisposable) {
+      try { (monaco as any).__tablioCompletionDisposable.dispose(); } catch {}
+    }
+    if ((monaco as any).__tablioInlineDisposable) {
+      try { (monaco as any).__tablioInlineDisposable.dispose(); } catch {}
+    }
 
-    completionDisposableRef.current = monaco.languages.registerCompletionItemProvider("sql", {
-      triggerCharacters: [".", " ", "("],
+    (monaco as any).__tablioCompletionDisposable = monaco.languages.registerCompletionItemProvider("sql", {
+      triggerCharacters: [".", "("],
       provideCompletionItems: async (model: any, position: any) => {
         await loadTablesIfNeeded();
         const word = model.getWordUntilPosition(position);
+
         const range = {
           startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
           startColumn: word.startColumn, endColumn: word.endColumn,
@@ -255,7 +218,12 @@ export function QueryConsole({ connectionId, database }: Props) {
           }
         }
 
-        const tableSuggestions = tablesRef.current.map((t) => ({
+        const seenTables = new Set<string>();
+        const tableSuggestions = tablesRef.current.filter((t) => {
+          if (seenTables.has(t.name)) return false;
+          seenTables.add(t.name);
+          return true;
+        }).map((t) => ({
           label: { label: t.name, description: t.schema },
           kind: monaco.languages.CompletionItemKind.Struct,
           insertText: t.name,
@@ -275,8 +243,10 @@ export function QueryConsole({ connectionId, database }: Props) {
       },
     });
 
-    inlineDisposableRef.current = monaco.languages.registerInlineCompletionsProvider("sql", {
+    (monaco as any).__tablioInlineDisposable = monaco.languages.registerInlineCompletionsProvider("sql", {
       provideInlineCompletions(model: any, position: any) {
+        if (!suggestionsEnabledRef.current) return { items: [] };
+
         const textUntilCursor = model.getValueInRange({
           startLineNumber: 1, startColumn: 1,
           endLineNumber: position.lineNumber, endColumn: position.column,
@@ -307,6 +277,7 @@ export function QueryConsole({ connectionId, database }: Props) {
         };
       },
       freeInlineCompletions() {},
+      disposeInlineCompletions() {},
     });
   };
 
@@ -320,7 +291,116 @@ export function QueryConsole({ connectionId, database }: Props) {
     });
   }, []);
 
+  useEffect(() => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!editor || !monaco) return;
+
+    const typeDisposable = editor.onDidType((text: string) => {
+      if (text === " ") {
+        const pos = editor.getPosition();
+        const model = editor.getModel();
+        if (pos && model && pos.column > 2) {
+          const prevChar = model.getValueInRange({
+            startLineNumber: pos.lineNumber, startColumn: pos.column - 2,
+            endLineNumber: pos.lineNumber, endColumn: pos.column - 1,
+          });
+          if (prevChar === " ") {
+            editor.trigger("keyboard", "hideSuggestWidget", null);
+            return;
+          }
+        }
+        editor.trigger("editor", "editor.action.triggerSuggest", null);
+      }
+    });
+
+    const contentDisposable = editor.onDidChangeModelContent((e) => {
+      if (e.isFlush) return;
+      for (const change of e.changes) {
+        if (change.text.endsWith(" ") && change.text.length > 1) {
+          setTimeout(() => editor.trigger("editor", "editor.action.triggerSuggest", null), 50);
+          break;
+        }
+      }
+    });
+
+    return () => {
+      typeDisposable.dispose();
+      contentDisposable.dispose();
+    };
+  });
+
   const handleSqlChange = useCallback((v: string | undefined) => setSql(v || ""), []);
+
+  // ── Real-time SQL validation ──
+
+  const validationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const validationSeqRef = useRef(0);
+
+  useEffect(() => {
+    const monaco = monacoRef.current;
+    const editor = editorRef.current;
+    if (!monaco || !editor) return;
+    const model = editor.getModel();
+    if (!model) return;
+
+    if (validationTimerRef.current) clearTimeout(validationTimerRef.current);
+
+    monaco.editor.setModelMarkers(model, "sql-validation", []);
+
+    const trimmed = sql.trim();
+    if (!trimmed) return;
+
+    const seq = ++validationSeqRef.current;
+
+    validationTimerRef.current = setTimeout(async () => {
+      if (executing) return;
+      try {
+        const result = await api.validateQuery({
+          connection_id: connectionId,
+          database,
+          sql: trimmed,
+        });
+        if (seq !== validationSeqRef.current) return;
+
+        const currentModel = editorRef.current?.getModel();
+        if (!currentModel) return;
+
+        if (result && result.message) {
+          let startLine = 1, startCol = 1, endLine = currentModel.getLineCount(), endCol = currentModel.getLineMaxColumn(endLine);
+
+          if (result.position != null && result.position > 0) {
+            const pos = currentModel.getPositionAt(result.position - 1);
+            startLine = pos.lineNumber;
+            startCol = pos.column;
+            const wordAtPos = currentModel.getWordAtPosition(pos);
+            if (wordAtPos) {
+              endLine = startLine;
+              endCol = wordAtPos.endColumn;
+            } else {
+              endLine = startLine;
+              endCol = Math.min(startCol + 10, currentModel.getLineMaxColumn(startLine));
+            }
+          }
+
+          monaco.editor.setModelMarkers(currentModel, "sql-validation", [{
+            severity: monaco.MarkerSeverity.Error,
+            message: formatValidationMessage(result.message),
+            startLineNumber: startLine,
+            startColumn: startCol,
+            endLineNumber: endLine,
+            endColumn: endCol,
+          }]);
+        }
+      } catch {
+        // validation failures are non-critical
+      }
+    }, 800);
+
+    return () => {
+      if (validationTimerRef.current) clearTimeout(validationTimerRef.current);
+    };
+  }, [sql, connectionId, database, executing]);
 
   // ── Query execution ──
 
@@ -559,7 +639,7 @@ export function QueryConsole({ connectionId, database }: Props) {
             {executing && resultMode === "results" ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
             Execute
           </button>
-          <button className="btn-secondary" onClick={explainCurrentStatement} disabled={executing} style={EXPLAIN_BTN_STYLE}>
+          <button className="btn-secondary" onClick={explainCurrentStatement} disabled={executing}>
             {executing && resultMode === "explain" ? <Loader2 size={14} className="spin" /> : <Search size={14} />}
             Explain
           </button>
@@ -577,6 +657,13 @@ export function QueryConsole({ connectionId, database }: Props) {
           <button className="btn-ghost" onClick={() => setShowHistory(!showHistory)}>
             <History size={14} /> History
           </button>
+          <button
+            className={`btn-ghost ${suggestionsEnabled ? "active-filter" : ""}`}
+            onClick={() => setSuggestionsEnabled((v) => !v)}
+            title={suggestionsEnabled ? "Disable inline suggestions from history" : "Enable inline suggestions from history"}
+          >
+            <Sparkles size={14} /> Suggest
+          </button>
         </div>
         <div className="query-editor-wrapper">
           <Editor
@@ -589,7 +676,8 @@ export function QueryConsole({ connectionId, database }: Props) {
             theme={monacoTheme}
             options={{
               minimap: { enabled: false },
-              fontSize: 15,
+              fontSize: 16,
+              fontWeight: "350",
               fontFamily: "var(--font-mono)",
               lineNumbers: "on",
               scrollBeyondLastLine: false,
@@ -597,9 +685,11 @@ export function QueryConsole({ connectionId, database }: Props) {
               automaticLayout: true,
               tabSize: 2,
               padding: { top: 8 },
+              fixedOverflowWidgets: true,
+              hover: { enabled: true, delay: 300 },
               quickSuggestions: true,
-              suggestOnTriggerCharacters: true,
               wordBasedSuggestions: "off",
+              acceptSuggestionOnCommitCharacter: false,
               suggest: { showIcons: true, showStatusBar: false, preview: false, insertMode: "replace" },
               inlineSuggest: { enabled: true, showToolbar: "onHover" },
             }}

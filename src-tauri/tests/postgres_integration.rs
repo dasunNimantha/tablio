@@ -1876,3 +1876,87 @@ async fn pg_no_db_apply_changes_on_specific_database() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// validate_query integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn validate_query_valid_select() {
+    let driver = pg_driver!();
+    let result = driver.validate_query(DB, "SELECT 1").await.unwrap();
+    assert!(result.is_none(), "valid SQL should return None");
+}
+
+#[tokio::test]
+async fn validate_query_syntax_error() {
+    let driver = pg_driver!();
+    let result = driver.validate_query(DB, "SELCT 1").await.unwrap();
+    assert!(result.is_some(), "invalid SQL should return Some");
+    let err = result.unwrap();
+    assert!(!err.message.is_empty());
+}
+
+#[tokio::test]
+async fn validate_query_error_has_position() {
+    let driver = pg_driver!();
+    let result = driver
+        .validate_query(DB, "SELECT * FROM nonexistent_table_xyz_12345")
+        .await
+        .unwrap();
+    assert!(result.is_some());
+    let err = result.unwrap();
+    assert!(!err.message.is_empty());
+}
+
+#[tokio::test]
+async fn validate_query_incomplete_where() {
+    let driver = pg_driver!();
+    let result = driver.validate_query(DB, "SELECT 1 WHERE").await.unwrap();
+    assert!(result.is_some(), "incomplete WHERE should be an error");
+}
+
+#[tokio::test]
+async fn validate_query_valid_insert_syntax() {
+    let driver = pg_driver!();
+    let tbl = format!(
+        "val_insert_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {}.{} (id int PRIMARY KEY)", SCHEMA, tbl),
+        )
+        .await
+        .unwrap();
+    let result = driver
+        .validate_query(
+            DB,
+            &format!("INSERT INTO {}.{} (id) VALUES (1)", SCHEMA, tbl),
+        )
+        .await
+        .unwrap();
+    assert!(result.is_none(), "valid INSERT should return None");
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn validate_query_empty_string() {
+    let driver = pg_driver!();
+    let result = driver.validate_query(DB, "").await.unwrap();
+    assert!(result.is_some(), "empty SQL should be an error");
+}
+
+#[tokio::test]
+async fn validate_query_valid_with_cte() {
+    let driver = pg_driver!();
+    let result = driver
+        .validate_query(DB, "WITH cte AS (SELECT 1 AS x) SELECT * FROM cte")
+        .await
+        .unwrap();
+    assert!(result.is_none(), "valid CTE should return None");
+}

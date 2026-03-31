@@ -208,18 +208,10 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     }
   };
 
-  const toggleExpand = useCallback(
+  const expandNode = useCallback(
     async (node: TreeNode) => {
       const nodeId = node.id;
-
-      if (expanded.has(nodeId)) {
-        setExpanded((prev) => {
-          const next = new Set(prev);
-          next.delete(nodeId);
-          return next;
-        });
-        return;
-      }
+      if (expanded.has(nodeId)) return;
 
       setExpanded((prev) => new Set(prev).add(nodeId));
 
@@ -248,7 +240,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
             };
             setExpanded((prev) => new Set(prev).add(dbNodeId));
             children = [dbNode];
-            setTimeout(() => toggleExpand(dbNode), 50);
+            setTimeout(() => expandNode(dbNode), 50);
           } else {
             children = userDbs.map((db) => ({
               id: `${node.connectionId}:${db.name}`,
@@ -402,6 +394,24 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     [expanded, childrenMap]
   );
 
+  const toggleExpand = useCallback(
+    async (node: TreeNode) => {
+      const nodeId = node.id;
+
+      if (expanded.has(nodeId)) {
+        setExpanded((prev) => {
+          const next = new Set(prev);
+          next.delete(nodeId);
+          return next;
+        });
+        return;
+      }
+
+      await expandNode(node);
+    },
+    [expanded, expandNode]
+  );
+
   const handleConnectDirect = async (conn: import("../../lib/tauri").ConnectionConfig) => {
     if (connectingId) return;
     setConnectingId(conn.id);
@@ -439,7 +449,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
               database: conn.database,
               schema: "",
             });
-            setTimeout(() => toggleExpand(node), 100);
+            await expandNode(node);
           } catch (e) {
             console.error("Connection failed:", e);
           } finally { setConnectingId(null); }
@@ -721,6 +731,22 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       items.push({
         label: "Open Table",
         action: () => handleDoubleClick(node),
+      });
+      items.push({
+        label: "Query",
+        action: () => {
+          const tabId = `query:${node.connectionId}:${node.database}:${node.tableName}:${Date.now()}`;
+          const tab: TabInfo = {
+            id: tabId,
+            type: "query",
+            title: `Query - ${node.tableName}`,
+            connectionId: node.connectionId,
+            connectionColor: node.connectionColor,
+            database: node.database!,
+            schema: "",
+          };
+          openTab(tab);
+        },
       });
       items.push({
         label: "View Structure",

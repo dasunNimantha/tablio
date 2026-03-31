@@ -836,6 +836,24 @@ pub async fn my_cancel_query(pool: &MySqlPool, pid: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn my_validate_query(pool: &MySqlPool, sql: &str) -> Result<Option<ValidationError>> {
+    use sqlx::Executor;
+    match pool.prepare(sql).await {
+        Ok(_) => Ok(None),
+        Err(e) => {
+            let message = if let Some(db_err) = e.as_database_error() {
+                db_err.message().to_string()
+            } else {
+                e.to_string()
+            };
+            Ok(Some(ValidationError {
+                message,
+                position: None,
+            }))
+        }
+    }
+}
+
 pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result<()> {
     let mut tx = pool.begin().await?;
     let fq_table = format!(
@@ -1155,5 +1173,27 @@ mod tests {
     #[test]
     fn sql_fragment_unsafe_double_dash() {
         assert!(sql_fragment_is_unsafe("text--evil"));
+    }
+
+    #[test]
+    fn mysql_validation_error_no_position() {
+        let err = ValidationError {
+            message: "You have an error in your SQL syntax".to_string(),
+            position: None,
+        };
+        assert!(err.position.is_none());
+        assert!(err.message.contains("SQL syntax"));
+    }
+
+    #[test]
+    fn mysql_validation_error_serialization() {
+        let err = ValidationError {
+            message: "Table 'db.unknown' doesn't exist".to_string(),
+            position: None,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let deserialized: ValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.message, err.message);
+        assert!(deserialized.position.is_none());
     }
 }

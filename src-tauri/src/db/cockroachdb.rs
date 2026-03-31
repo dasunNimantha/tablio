@@ -348,6 +348,11 @@ impl DatabaseDriver for CockroachdbDriver {
         })
     }
 
+    async fn validate_query(&self, database: &str, sql: &str) -> Result<Option<ValidationError>> {
+        let pool = self.get_pool(database).await?;
+        pg_validate_query(&pool, sql).await
+    }
+
     async fn get_table_stats(
         &self,
         database: &str,

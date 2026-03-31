@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Editor, { type BeforeMount, type Monaco } from "@monaco-editor/react";
 import { api } from "../../lib/tauri";
+import { syncMonacoTheme, isLightTheme } from "../../lib/monacoTheme";
 import { Loader2, Copy, Check } from "lucide-react";
 import "./DDLViewer.css";
 
@@ -10,10 +11,6 @@ interface Props {
   schema: string;
   objectName: string;
   objectType: string;
-}
-
-function getCssVar(name: string, fallback: string) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
 export function DDLViewer({
@@ -28,9 +25,7 @@ export function DDLViewer({
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [monacoTheme, setMonacoTheme] = useState<string>(() =>
-    document.documentElement.getAttribute("data-theme") === "light"
-      ? "tablio-light-0"
-      : "tablio-dark-0"
+    isLightTheme() ? "tablio-light-0" : "tablio-dark-0"
   );
   const monacoRef = useRef<Monaco | null>(null);
   const themeVersionRef = useRef(0);
@@ -70,56 +65,8 @@ export function DDLViewer({
   const syncTheme = useCallback(() => {
     const monaco = monacoRef.current;
     if (!monaco) return;
-
     const ver = ++themeVersionRef.current;
-    const bg = getCssVar("--bg-primary", "#1e1e1e");
-    const bgSurface = getCssVar("--bg-surface", "#252526");
-    const textPrimary = getCssVar("--text-primary", "#d4d4d4");
-    const textMuted = getCssVar("--text-muted", "#6e6e7c");
-    const accent = getCssVar("--accent", "#6398ff");
-    const isLight = document.documentElement.getAttribute("data-theme") === "light";
-
-    const colors = {
-      "editor.background": bg,
-      "editor.foreground": textPrimary,
-      "editorLineNumber.foreground": textMuted,
-      "editor.selectionBackground": accent + "33",
-      "editorWidget.background": bgSurface,
-      "editorWidget.border": bgSurface,
-    };
-
-    const darkName = `tablio-dark-${ver}`;
-    const lightName = `tablio-light-${ver}`;
-
-    monaco.editor.defineTheme(darkName, {
-      base: "vs-dark",
-      inherit: true,
-      rules: [
-        { token: "string.sql", foreground: "98c379" },
-        { token: "string", foreground: "98c379" },
-        { token: "keyword", foreground: "6daaef" },
-        { token: "number", foreground: "d19a66" },
-        { token: "comment", foreground: "6a737d", fontStyle: "italic" },
-        { token: "operator", foreground: "c8ccd4" },
-      ],
-      colors,
-    });
-
-    monaco.editor.defineTheme(lightName, {
-      base: "vs",
-      inherit: true,
-      rules: [
-        { token: "string.sql", foreground: "50a14f" },
-        { token: "string", foreground: "50a14f" },
-        { token: "keyword", foreground: "4078f2" },
-        { token: "number", foreground: "986801" },
-        { token: "comment", foreground: "a0a1a7", fontStyle: "italic" },
-        { token: "operator", foreground: "383a42" },
-      ],
-      colors,
-    });
-
-    setMonacoTheme(isLight ? lightName : darkName);
+    setMonacoTheme(syncMonacoTheme(monaco, ver));
   }, []);
 
   useEffect(() => {

@@ -41,6 +41,7 @@ pub fn run() {
             get_table_stats,
             execute_query,
             explain_query,
+            validate_query,
             fetch_rows,
             apply_changes,
             get_ddl,

@@ -164,6 +164,12 @@ pub struct ExecuteQueryRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationError {
+    pub message: String,
+    pub position: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExplainNode {
     pub node_type: String,
     pub relation: Option<String>,

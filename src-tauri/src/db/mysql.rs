@@ -238,6 +238,10 @@ impl DatabaseDriver for MysqlDriver {
         })
     }
 
+    async fn validate_query(&self, _database: &str, sql: &str) -> Result<Option<ValidationError>> {
+        my_validate_query(&self.pool, sql).await
+    }
+
     async fn list_functions(&self, database: &str, _schema: &str) -> Result<Vec<FunctionInfo>> {
         let sql = "SELECT CAST(ROUTINE_NAME AS CHAR) AS name, \
                    CAST(ROUTINE_SCHEMA AS CHAR) AS `schema`, \

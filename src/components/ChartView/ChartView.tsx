@@ -19,6 +19,7 @@ import {
   Title,
 } from "chart.js";
 import "./ChartView.css";
+import { chartDevicePixelRatio, chartFontFamily } from "../../lib/chartRendering";
 
 ChartJS.register(
   CategoryScale,
@@ -72,6 +73,20 @@ export function ChartView({ columns, rows }: Props) {
   const [chartType, setChartType] = useState<ChartType>("bar");
   const [xColumn, setXColumn] = useState<string>("");
   const [yColumns, setYColumns] = useState<string[]>([]);
+  const chartCanvasWrapRef = useRef<HTMLDivElement>(null);
+  const [layoutTick, setLayoutTick] = useState(0);
+
+  useEffect(() => {
+    const el = chartCanvasWrapRef.current;
+    const bump = () => setLayoutTick((k) => k + 1);
+    const ro = el && typeof ResizeObserver !== "undefined" ? new ResizeObserver(bump) : null;
+    if (el && ro) ro.observe(el);
+    window.addEventListener("resize", bump);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener("resize", bump);
+    };
+  }, []);
 
   const numericColumnIndices = useMemo(
     () => getNumericColumnIndices(columns, rows),
@@ -176,32 +191,42 @@ export function ChartView({ columns, rows }: Props) {
     const style = getComputedStyle(document.documentElement);
     const textMuted = style.getPropertyValue("--text-muted").trim() || "#a1a1aa";
     const gridColor = style.getPropertyValue("--border").trim() || "rgba(255,255,255,0.08)";
+    const ff = chartFontFamily();
+    const tickFont = { size: 12, family: ff, weight: "400" as const };
 
     return {
       responsive: true,
       maintainAspectRatio: false,
+      devicePixelRatio: chartDevicePixelRatio(),
       backgroundColor: "transparent",
       plugins: {
         legend: {
-          labels: { color: textMuted },
+          labels: {
+            color: textMuted,
+            font: { size: 12, family: ff, weight: "400" },
+          },
         },
         title: { display: false },
+        tooltip: {
+          titleFont: { size: 13, weight: "500", family: ff },
+          bodyFont: { size: 13, weight: "400", family: ff },
+        },
       },
       scales:
         chartType !== "pie"
           ? {
               x: {
                 grid: { color: gridColor },
-                ticks: { color: textMuted },
+                ticks: { color: textMuted, font: tickFont },
               },
               y: {
                 grid: { color: gridColor },
-                ticks: { color: textMuted },
+                ticks: { color: textMuted, font: tickFont },
               },
             }
           : undefined,
     };
-  }, [chartType]);
+  }, [chartType, layoutTick]);
 
   const hasData = rows.length > 0 && columns.length > 0;
 
@@ -255,7 +280,7 @@ export function ChartView({ columns, rows }: Props) {
           )}
         </div>
       </div>
-      <div className="chart-canvas">
+      <div className="chart-canvas" ref={chartCanvasWrapRef}>
         {chartData && (
           <>
             {chartType === "bar" && (

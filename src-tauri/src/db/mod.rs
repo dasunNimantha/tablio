@@ -63,6 +63,7 @@ pub trait DatabaseDriver: Send + Sync {
     ) -> Result<TableData>;
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult>;
     async fn explain_query(&self, database: &str, sql: &str) -> Result<ExplainResult>;
+    async fn validate_query(&self, database: &str, sql: &str) -> Result<Option<ValidationError>>;
     async fn get_ddl(
         &self,
         database: &str,

@@ -49,6 +49,8 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
     }
     case "explain_query":
       return mock.generateExplainResult() as T;
+    case "validate_query":
+      return null as T;
     case "get_ddl":
       return mock.mockDdl as T;
     case "apply_changes":
@@ -236,6 +238,11 @@ export interface ExecuteQueryRequest {
   connection_id: string;
   database: string;
   sql: string;
+}
+
+export interface ValidationError {
+  message: string;
+  position: number | null;
 }
 
 export interface ExplainNode {
@@ -594,6 +601,9 @@ export const api = {
 
   explainQuery: (request: ExecuteQueryRequest): Promise<ExplainResult> =>
     invoke("explain_query", { request }),
+
+  validateQuery: (request: ExecuteQueryRequest): Promise<ValidationError | null> =>
+    invoke("validate_query", { request }),
 
   getDdl: (request: GetDdlRequest): Promise<string> =>
     invoke("get_ddl", { request }),

@@ -375,7 +375,7 @@ pub async fn pg_list_tables(
     schema: &str,
 ) -> Result<Vec<TableInfo>> {
     let rows = sqlx::query(
-        "SELECT t.table_name, t.table_type, \
+        "SELECT DISTINCT ON (t.table_name) t.table_name, t.table_type, \
                 COALESCE(c.reltuples::bigint, 0) as row_estimate \
          FROM information_schema.tables t \
          LEFT JOIN pg_class c ON c.relname = t.table_name AND c.relkind IN ('r', 'v', 'm', 'f', 'p') \
@@ -1051,6 +1051,28 @@ pub async fn pg_cancel_query(pool: &PgPool, pid: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn pg_validate_query(pool: &PgPool, sql: &str) -> Result<Option<ValidationError>> {
+    use sqlx::Executor;
+    match pool.prepare(sql).await {
+        Ok(_) => Ok(None),
+        Err(e) => {
+            let mut position: Option<usize> = None;
+            let message = if let Some(db_err) = e.as_database_error() {
+                if let Some(pg_pos) = db_err.try_downcast_ref::<sqlx::postgres::PgDatabaseError>() {
+                    position = pg_pos.position().and_then(|p| match p {
+                        sqlx::postgres::PgErrorPosition::Original(offset) => Some(offset),
+                        _ => None,
+                    });
+                }
+                db_err.message().to_string()
+            } else {
+                e.to_string()
+            };
+            Ok(Some(ValidationError { message, position }))
+        }
+    }
+}
+
 pub async fn pg_apply_changes(pool: &PgPool, changes: &DataChanges) -> Result<()> {
     let mut tx = pool.begin().await?;
     let fq_table = format!(
@@ -1350,5 +1372,81 @@ mod tests {
             where_clause.join(" AND ")
         );
         assert_eq!(sql, r#"UPDATE "public"."users" SET "name" = 'x' WHERE "#);
+    }
+
+    #[test]
+    fn validation_error_none_position() {
+        let err = ValidationError {
+            message: "syntax error".to_string(),
+            position: None,
+        };
+        assert_eq!(err.message, "syntax error");
+        assert!(err.position.is_none());
+    }
+
+    #[test]
+    fn validation_error_with_position() {
+        let err = ValidationError {
+            message: "column does not exist".to_string(),
+            position: Some(42),
+        };
+        assert_eq!(err.message, "column does not exist");
+        assert_eq!(err.position, Some(42));
+    }
+
+    #[test]
+    fn validation_error_serialization_roundtrip() {
+        let err = ValidationError {
+            message: "syntax error at or near \"SELCT\"".to_string(),
+            position: Some(1),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let deserialized: ValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.message, err.message);
+        assert_eq!(deserialized.position, err.position);
+    }
+
+    #[test]
+    fn validation_error_serialization_null_position() {
+        let err = ValidationError {
+            message: "some error".to_string(),
+            position: None,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains(r#""position":null"#));
+        let deserialized: ValidationError = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.position.is_none());
+    }
+
+    #[test]
+    fn validation_error_position_zero() {
+        let err = ValidationError {
+            message: "error at start".to_string(),
+            position: Some(0),
+        };
+        assert_eq!(err.position, Some(0));
+    }
+
+    #[test]
+    fn validation_error_long_message() {
+        let long_msg = "a".repeat(500);
+        let err = ValidationError {
+            message: long_msg.clone(),
+            position: Some(100),
+        };
+        assert_eq!(err.message.len(), 500);
+        assert_eq!(err.position, Some(100));
+    }
+
+    #[test]
+    fn validation_error_message_with_special_chars() {
+        let err = ValidationError {
+            message: r#"syntax error at or near "FROM" (SQLSTATE 42601)"#.to_string(),
+            position: Some(15),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let deserialized: ValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.message, err.message);
+        assert_eq!(deserialized.position, Some(15));
     }
 }

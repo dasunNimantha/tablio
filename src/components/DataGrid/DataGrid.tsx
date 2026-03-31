@@ -932,18 +932,18 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
 
   const handleOpenQuery = useCallback(() => {
     const conn = connections.find((c) => c.id === connectionId);
-    const tabId = `query:${connectionId}:${database}:${Date.now()}`;
+    const tabId = `query:${connectionId}:${database}:${table}:${Date.now()}`;
     const tab: TabInfo = {
       id: tabId,
       type: "query",
-      title: `Query - ${database}`,
+      title: `Query - ${table}`,
       connectionId,
       connectionColor: conn?.color || "#6398ff",
       database,
       schema: "",
     };
     openTab(tab);
-  }, [connectionId, database, connections, openTab]);
+  }, [connectionId, database, table, connections, openTab]);
 
   const handleExplainResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1055,6 +1055,13 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
               </div>
             )}
           </div>
+          <button
+            className="btn-ghost"
+            onClick={handleOpenQuery}
+            title="Open SQL query console for this database"
+          >
+            <Terminal size={14} /> Query
+          </button>
           {data && (
             <ColumnOrganizer
               columns={data.columns}
@@ -1068,13 +1075,6 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
             title="Explain current query"
           >
             <Zap size={14} /> Explain
-          </button>
-          <button
-            className="btn-ghost"
-            onClick={handleOpenQuery}
-            title="Open SQL query console for this database"
-          >
-            <Terminal size={14} /> Query
           </button>
           <ExportMenu onExport={handleExport} />
           <button

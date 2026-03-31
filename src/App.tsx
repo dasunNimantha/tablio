@@ -2,6 +2,7 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { ObjectTree } from "./components/Sidebar/ObjectTree";
 import { TabBar } from "./components/Tabs/TabBar";
 import { TabContent } from "./components/Tabs/TabContent";
+import { TitleBar } from "./components/TitleBar/TitleBar";
 import { ConnectionDialog } from "./components/ConnectionDialog";
 import { CreateTableDialog } from "./components/CreateTable/CreateTableDialog";
 import { AlterTableDialog } from "./components/AlterTable/AlterTableDialog";
@@ -12,6 +13,7 @@ import { KeyboardShortcuts } from "./components/KeyboardShortcuts/KeyboardShortc
 import { ToastContainer } from "./components/Toast/Toast";
 import { useConnectionStore } from "./stores/connectionStore";
 import { useTabStore } from "./stores/tabStore";
+import { loader } from "@monaco-editor/react";
 import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick } from "lucide-react";
 import { themes, getThemeById, applyTheme } from "./lib/themes";
 import { api } from "./lib/tauri";
@@ -141,6 +143,19 @@ export default function App() {
     loadConnections();
   }, [loadConnections]);
 
+  useEffect(() => {
+    const warmMonaco = () => {
+      void loader.init().catch(() => {});
+    };
+
+    if ("requestIdleCallback" in window) {
+      const id = window.requestIdleCallback(warmMonaco, { timeout: 1500 });
+      return () => window.cancelIdleCallback(id);
+    }
+
+    const id = window.setTimeout(warmMonaco, 400);
+    return () => window.clearTimeout(id);
+  }, []);
 
   useEffect(() => {
     const t = getThemeById(themeId);
@@ -241,7 +256,9 @@ export default function App() {
   );
 
   return (
-    <div className="app-layout">
+    <div className="app-root">
+      <TitleBar />
+      <div className="app-layout">
       <div ref={sidebarElRef} className="sidebar" style={{ width: sidebarWidth, minWidth: sidebarWidth }}>
         <ObjectTree
           onAddConnection={onAddConnection}
@@ -384,6 +401,7 @@ export default function App() {
         <KeyboardShortcuts onClose={() => setShowShortcuts(false)} />
       )}
       <ToastContainer />
+    </div>
     </div>
   );
 }

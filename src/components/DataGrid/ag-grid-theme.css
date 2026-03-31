@@ -130,6 +130,15 @@
   border-right: 1px solid var(--border) !important;
 }
 
+.ag-grid-wrapper .ag-header-cell.grid-row-number .ag-header-cell-label {
+  justify-content: center;
+}
+
+.ag-grid-wrapper .ag-cell.grid-row-number .ag-cell-wrapper {
+  width: 100%;
+  justify-content: center;
+}
+
 .ag-grid-wrapper .ag-root-wrapper {
   border: none;
   border-radius: 0;
