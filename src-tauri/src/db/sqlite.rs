@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Column, Row, SqlitePool, TypeInfo};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::db::DatabaseDriver;
 use crate::models::*;
@@ -20,6 +20,8 @@ impl SqliteDriver {
         };
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
+            .min_connections(0)
+            .idle_timeout(Duration::from_secs(1800))
             .connect(&url)
             .await?;
         Ok(Self { pool })

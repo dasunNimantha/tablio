@@ -116,6 +116,10 @@
   background: var(--bg-selected) !important;
 }
 
+.ag-grid-wrapper .row-multi-selected .ag-cell {
+  background: var(--bg-selected) !important;
+}
+
 .ag-grid-wrapper .grid-row-number {
   color: var(--text-muted) !important;
   background: var(--bg-secondary) !important;

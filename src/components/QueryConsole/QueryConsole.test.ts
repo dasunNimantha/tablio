@@ -210,6 +210,134 @@ describe("SQL autocomplete context parsing", () => {
   });
 });
 
+// --- Query history deduplication logic ---
+
+function addToHistory(
+  history: HistoryEntry[],
+  sql: string,
+  executionTimeMs: number,
+  rowCount: number,
+  error?: string,
+): HistoryEntry[] {
+  const trimmed = sql.trim();
+  const filtered = history.filter((h) => h.sql.trim() !== trimmed);
+  const newEntry: HistoryEntry = {
+    sql,
+    timestamp: Date.now(),
+    executionTimeMs,
+    rowCount,
+    error,
+  };
+  return [newEntry, ...filtered.slice(0, 99)];
+}
+
+describe("QueryConsole history deduplication", () => {
+  it("adds new query to empty history", () => {
+    const result = addToHistory([], "SELECT 1", 10, 1);
+    expect(result).toHaveLength(1);
+    expect(result[0].sql).toBe("SELECT 1");
+  });
+
+  it("adds different query to existing history", () => {
+    const existing: HistoryEntry[] = [
+      { sql: "SELECT 1", timestamp: 1000, executionTimeMs: 10, rowCount: 1 },
+    ];
+    const result = addToHistory(existing, "SELECT 2", 20, 2);
+    expect(result).toHaveLength(2);
+    expect(result[0].sql).toBe("SELECT 2");
+    expect(result[1].sql).toBe("SELECT 1");
+  });
+
+  it("deduplicates same query — moves to top with updated stats", () => {
+    const existing: HistoryEntry[] = [
+      { sql: "SELECT 1", timestamp: 1000, executionTimeMs: 10, rowCount: 1 },
+      { sql: "SELECT 2", timestamp: 2000, executionTimeMs: 20, rowCount: 2 },
+    ];
+    const result = addToHistory(existing, "SELECT 1", 50, 5);
+    expect(result).toHaveLength(2);
+    expect(result[0].sql).toBe("SELECT 1");
+    expect(result[0].executionTimeMs).toBe(50);
+    expect(result[0].rowCount).toBe(5);
+    expect(result[1].sql).toBe("SELECT 2");
+  });
+
+  it("deduplicates with whitespace differences", () => {
+    const existing: HistoryEntry[] = [
+      { sql: "  SELECT 1  ", timestamp: 1000, executionTimeMs: 10, rowCount: 1 },
+    ];
+    const result = addToHistory(existing, "SELECT 1", 20, 1);
+    expect(result).toHaveLength(1);
+    expect(result[0].sql).toBe("SELECT 1");
+  });
+
+  it("does not deduplicate case-different queries", () => {
+    const existing: HistoryEntry[] = [
+      { sql: "SELECT 1", timestamp: 1000, executionTimeMs: 10, rowCount: 1 },
+    ];
+    const result = addToHistory(existing, "select 1", 20, 1);
+    expect(result).toHaveLength(2);
+  });
+
+  it("caps history at 100 entries", () => {
+    const existing: HistoryEntry[] = Array.from({ length: 105 }, (_, i) => ({
+      sql: `SELECT ${i}`,
+      timestamp: i * 1000,
+      executionTimeMs: 10,
+      rowCount: 1,
+    }));
+    const result = addToHistory(existing, "SELECT new", 5, 1);
+    expect(result).toHaveLength(100);
+    expect(result[0].sql).toBe("SELECT new");
+  });
+
+  it("preserves error entries from different queries", () => {
+    const existing: HistoryEntry[] = [
+      { sql: "SELECT bad", timestamp: 1000, executionTimeMs: 0, rowCount: 0, error: "syntax error" },
+    ];
+    const result = addToHistory(existing, "SELECT good", 10, 1);
+    expect(result).toHaveLength(2);
+    expect(result[1].error).toBe("syntax error");
+  });
+
+  it("replaces error entry when same query succeeds", () => {
+    const existing: HistoryEntry[] = [
+      { sql: "SELECT * FROM users", timestamp: 1000, executionTimeMs: 0, rowCount: 0, error: "table not found" },
+    ];
+    const result = addToHistory(existing, "SELECT * FROM users", 30, 10);
+    expect(result).toHaveLength(1);
+    expect(result[0].error).toBeUndefined();
+    expect(result[0].rowCount).toBe(10);
+  });
+
+  it("replaces success entry when same query fails", () => {
+    const existing: HistoryEntry[] = [
+      { sql: "SELECT * FROM users", timestamp: 1000, executionTimeMs: 30, rowCount: 10 },
+    ];
+    const result = addToHistory(existing, "SELECT * FROM users", 0, 0, "connection lost");
+    expect(result).toHaveLength(1);
+    expect(result[0].error).toBe("connection lost");
+  });
+
+  it("handles rapid re-execution without duplicating", () => {
+    let history: HistoryEntry[] = [];
+    for (let i = 0; i < 10; i++) {
+      history = addToHistory(history, "SELECT * FROM orders", i * 5, i);
+    }
+    expect(history).toHaveLength(1);
+    expect(history[0].rowCount).toBe(9);
+  });
+
+  it("maintains order: newest first", () => {
+    let history: HistoryEntry[] = [];
+    history = addToHistory(history, "SELECT 1", 10, 1);
+    history = addToHistory(history, "SELECT 2", 20, 2);
+    history = addToHistory(history, "SELECT 3", 30, 3);
+    expect(history[0].sql).toBe("SELECT 3");
+    expect(history[1].sql).toBe("SELECT 2");
+    expect(history[2].sql).toBe("SELECT 1");
+  });
+});
+
 describe("SQL autocomplete dot context detection", () => {
   it("detects table name before dot", () => {
     expect(detectDotContext("SELECT users.")).toBe("users");

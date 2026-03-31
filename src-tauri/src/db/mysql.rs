@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{MySqlPool, Row};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::db::mysql_common::*;
 use crate::db::DatabaseDriver;
@@ -39,6 +39,8 @@ impl MysqlDriver {
         );
         let pool = MySqlPoolOptions::new()
             .max_connections(4)
+            .min_connections(0)
+            .idle_timeout(Duration::from_secs(1800))
             .connect(&url)
             .await?;
         Ok(Self { pool })

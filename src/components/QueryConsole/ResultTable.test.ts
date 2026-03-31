@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { parseSimpleSelect } from "./ResultTable";
 
 function computeEditCount(
   editingRows: unknown[][],
@@ -341,6 +342,323 @@ describe("ResultTable row data builder", () => {
     const cols = ["x", "y"];
     const result = buildRowData(rows, cols);
     expect(result).toEqual([{ __rowIdx: 0, x: null, y: "test" }]);
+  });
+});
+
+describe("parseSimpleSelect", () => {
+  it("parses simple SELECT * FROM table with empty schema", () => {
+    expect(parseSimpleSelect("SELECT * FROM users")).toEqual({ schema: "", table: "users" });
+  });
+
+  it("parses SELECT with schema.table", () => {
+    expect(parseSimpleSelect("SELECT * FROM myschema.users")).toEqual({ schema: "myschema", table: "users" });
+  });
+
+  it('parses SELECT with quoted "schema"."table"', () => {
+    expect(parseSimpleSelect('SELECT * FROM "my_schema"."my_table"')).toEqual({ schema: "my_schema", table: "my_table" });
+  });
+
+  it('parses SELECT with quoted "table" only — schema is empty', () => {
+    expect(parseSimpleSelect('SELECT * FROM "my_table"')).toEqual({ schema: "", table: "my_table" });
+  });
+
+  it("parses SELECT with columns listed", () => {
+    expect(parseSimpleSelect("SELECT id, name FROM customers WHERE id > 5")).toEqual({ schema: "", table: "customers" });
+  });
+
+  it("parses case-insensitive FROM", () => {
+    expect(parseSimpleSelect("select * from Products")).toEqual({ schema: "", table: "Products" });
+  });
+
+  it("returns null for JOIN query", () => {
+    expect(parseSimpleSelect("SELECT * FROM users JOIN orders ON users.id = orders.user_id")).toBeNull();
+  });
+
+  it("returns null for UNION query", () => {
+    expect(parseSimpleSelect("SELECT * FROM users UNION SELECT * FROM admins")).toBeNull();
+  });
+
+  it("returns null for INSERT statement", () => {
+    expect(parseSimpleSelect("INSERT INTO users (name) VALUES ('test')")).toBeNull();
+  });
+
+  it("returns null for UPDATE statement", () => {
+    expect(parseSimpleSelect("UPDATE users SET name = 'test'")).toBeNull();
+  });
+
+  it("returns null for DELETE statement", () => {
+    expect(parseSimpleSelect("DELETE FROM users WHERE id = 1")).toBeNull();
+  });
+
+  it("returns null for CTE (WITH clause)", () => {
+    expect(parseSimpleSelect("WITH cte AS (SELECT * FROM users) SELECT * FROM cte")).toBeNull();
+  });
+
+  it("returns null for multiple FROM tables", () => {
+    expect(parseSimpleSelect("SELECT * FROM users, orders")).toBeNull();
+  });
+
+  it("returns null for INTERSECT query", () => {
+    expect(parseSimpleSelect("SELECT id FROM a INTERSECT SELECT id FROM b")).toBeNull();
+  });
+
+  it("returns null for EXCEPT query", () => {
+    expect(parseSimpleSelect("SELECT id FROM a EXCEPT SELECT id FROM b")).toBeNull();
+  });
+
+  it("handles trailing whitespace", () => {
+    expect(parseSimpleSelect("  SELECT * FROM users  ")).toEqual({ schema: "", table: "users" });
+  });
+
+  it("handles WHERE, ORDER BY, LIMIT clauses", () => {
+    expect(parseSimpleSelect("SELECT * FROM users WHERE active = true ORDER BY id LIMIT 100")).toEqual({ schema: "", table: "users" });
+  });
+
+  it("returns null for empty string", () => {
+    expect(parseSimpleSelect("")).toBeNull();
+  });
+});
+
+// --- isUpdatable logic (editable vs read-only detection) ---
+
+interface ColumnMeta {
+  name: string;
+  is_primary_key: boolean;
+}
+
+interface SourceTable {
+  schema: string;
+  table: string;
+}
+
+function computeIsUpdatable(
+  sourceTable: SourceTable | null,
+  tableColumns: ColumnMeta[] | null,
+  resultColumns: string[],
+): boolean {
+  if (!sourceTable) return false;
+  if (!tableColumns) return false;
+  const pkColumns = tableColumns.filter((c) => c.is_primary_key);
+  if (pkColumns.length === 0) return false;
+  return pkColumns.every((pk) => resultColumns.includes(pk.name));
+}
+
+function computeReadOnlyReason(
+  sourceTable: SourceTable | null,
+  tableColumns: ColumnMeta[] | null,
+  resultColumns: string[],
+): string {
+  if (!sourceTable) return "Complex query — no single source table detected";
+  if (!tableColumns) return "Column metadata not loaded";
+  const pkColumns = tableColumns.filter((c) => c.is_primary_key);
+  if (pkColumns.length === 0) return "Table has no primary key";
+  const missingPks = pkColumns.filter((pk) => !resultColumns.includes(pk.name));
+  if (missingPks.length > 0) {
+    return `PK column${missingPks.length > 1 ? "s" : ""} (${missingPks.map((c) => c.name).join(", ")}) not in result`;
+  }
+  return "";
+}
+
+describe("ResultTable isUpdatable logic", () => {
+  const tableWithPk: ColumnMeta[] = [
+    { name: "id", is_primary_key: true },
+    { name: "name", is_primary_key: false },
+    { name: "email", is_primary_key: false },
+  ];
+
+  const tableWithCompositePk: ColumnMeta[] = [
+    { name: "user_id", is_primary_key: true },
+    { name: "role_id", is_primary_key: true },
+    { name: "assigned_at", is_primary_key: false },
+  ];
+
+  const tableWithoutPk: ColumnMeta[] = [
+    { name: "log_message", is_primary_key: false },
+    { name: "created_at", is_primary_key: false },
+  ];
+
+  const source: SourceTable = { schema: "public", table: "users" };
+
+  it("is editable when source table has PK and all PKs in result", () => {
+    expect(computeIsUpdatable(source, tableWithPk, ["id", "name", "email"])).toBe(true);
+  });
+
+  it("is editable when result has PKs plus extra columns", () => {
+    expect(computeIsUpdatable(source, tableWithPk, ["id", "name", "email", "extra"])).toBe(true);
+  });
+
+  it("is editable with subset of columns as long as PK is present", () => {
+    expect(computeIsUpdatable(source, tableWithPk, ["id", "name"])).toBe(true);
+  });
+
+  it("is read-only when PK column is missing from result", () => {
+    expect(computeIsUpdatable(source, tableWithPk, ["name", "email"])).toBe(false);
+  });
+
+  it("is read-only when no source table (complex query)", () => {
+    expect(computeIsUpdatable(null, tableWithPk, ["id", "name"])).toBe(false);
+  });
+
+  it("is read-only when table has no primary key", () => {
+    expect(computeIsUpdatable(source, tableWithoutPk, ["log_message", "created_at"])).toBe(false);
+  });
+
+  it("is read-only when table columns not loaded yet", () => {
+    expect(computeIsUpdatable(source, null, ["id", "name"])).toBe(false);
+  });
+
+  it("handles composite PK — editable when all PK columns present", () => {
+    expect(computeIsUpdatable(source, tableWithCompositePk, ["user_id", "role_id", "assigned_at"])).toBe(true);
+  });
+
+  it("handles composite PK — read-only when one PK column missing", () => {
+    expect(computeIsUpdatable(source, tableWithCompositePk, ["user_id", "assigned_at"])).toBe(false);
+  });
+
+  it("handles composite PK — read-only when all PK columns missing", () => {
+    expect(computeIsUpdatable(source, tableWithCompositePk, ["assigned_at"])).toBe(false);
+  });
+
+  it("handles empty result columns", () => {
+    expect(computeIsUpdatable(source, tableWithPk, [])).toBe(false);
+  });
+
+  it("handles empty table columns", () => {
+    expect(computeIsUpdatable(source, [], ["id"])).toBe(false);
+  });
+});
+
+describe("ResultTable read-only reason", () => {
+  const tableWithPk: ColumnMeta[] = [
+    { name: "id", is_primary_key: true },
+    { name: "name", is_primary_key: false },
+  ];
+
+  const tableWithCompositePk: ColumnMeta[] = [
+    { name: "user_id", is_primary_key: true },
+    { name: "role_id", is_primary_key: true },
+  ];
+
+  const source: SourceTable = { schema: "public", table: "users" };
+
+  it("returns complex query reason when no source table", () => {
+    expect(computeReadOnlyReason(null, tableWithPk, ["id"])).toContain("no single source table");
+  });
+
+  it("returns metadata not loaded reason", () => {
+    expect(computeReadOnlyReason(source, null, ["id"])).toContain("metadata not loaded");
+  });
+
+  it("returns no primary key reason", () => {
+    const noPk: ColumnMeta[] = [{ name: "x", is_primary_key: false }];
+    expect(computeReadOnlyReason(source, noPk, ["x"])).toContain("no primary key");
+  });
+
+  it("returns missing PK column reason for single PK", () => {
+    const reason = computeReadOnlyReason(source, tableWithPk, ["name"]);
+    expect(reason).toContain("id");
+    expect(reason).toContain("not in result");
+  });
+
+  it("returns missing PK columns reason for composite PK", () => {
+    const reason = computeReadOnlyReason(source, tableWithCompositePk, ["name"]);
+    expect(reason).toContain("user_id");
+    expect(reason).toContain("role_id");
+    expect(reason).toContain("not in result");
+  });
+
+  it("returns empty string when all conditions met (editable)", () => {
+    expect(computeReadOnlyReason(source, tableWithPk, ["id", "name"])).toBe("");
+  });
+});
+
+// --- Read-only mode behavior ---
+
+function shouldShowEditButtons(isUpdatable: boolean): {
+  showAddRow: boolean;
+  showTestData: boolean;
+  showDeleteSelected: boolean;
+  showSaveToDb: boolean;
+} {
+  return {
+    showAddRow: isUpdatable,
+    showTestData: isUpdatable,
+    showDeleteSelected: isUpdatable,
+    showSaveToDb: isUpdatable,
+  };
+}
+
+function shouldCellBeEditable(isUpdatable: boolean, colName: string, _pkColumns: string[]): boolean {
+  if (!isUpdatable) return false;
+  return true;
+}
+
+function shouldHandleKeyboardShortcut(
+  isUpdatable: boolean,
+  key: string,
+  ctrlKey: boolean,
+): boolean {
+  if (!isUpdatable) return false;
+  if ((key === "Delete" || key === "Backspace")) return true;
+  if (ctrlKey && key.toLowerCase() === "a") return true;
+  return false;
+}
+
+describe("ResultTable read-only mode — button visibility", () => {
+  it("hides all edit buttons when read-only", () => {
+    const result = shouldShowEditButtons(false);
+    expect(result.showAddRow).toBe(false);
+    expect(result.showTestData).toBe(false);
+    expect(result.showDeleteSelected).toBe(false);
+    expect(result.showSaveToDb).toBe(false);
+  });
+
+  it("shows all edit buttons when editable", () => {
+    const result = shouldShowEditButtons(true);
+    expect(result.showAddRow).toBe(true);
+    expect(result.showTestData).toBe(true);
+    expect(result.showDeleteSelected).toBe(true);
+    expect(result.showSaveToDb).toBe(true);
+  });
+});
+
+describe("ResultTable read-only mode — cell editability", () => {
+  it("cells are not editable when read-only", () => {
+    expect(shouldCellBeEditable(false, "name", ["id"])).toBe(false);
+  });
+
+  it("cells are editable when updatable", () => {
+    expect(shouldCellBeEditable(true, "name", ["id"])).toBe(true);
+  });
+
+  it("PK cells are editable when updatable", () => {
+    expect(shouldCellBeEditable(true, "id", ["id"])).toBe(true);
+  });
+});
+
+describe("ResultTable read-only mode — keyboard shortcuts", () => {
+  it("ignores Delete key when read-only", () => {
+    expect(shouldHandleKeyboardShortcut(false, "Delete", false)).toBe(false);
+  });
+
+  it("ignores Backspace key when read-only", () => {
+    expect(shouldHandleKeyboardShortcut(false, "Backspace", false)).toBe(false);
+  });
+
+  it("ignores Ctrl+A when read-only", () => {
+    expect(shouldHandleKeyboardShortcut(false, "a", true)).toBe(false);
+  });
+
+  it("handles Delete key when editable", () => {
+    expect(shouldHandleKeyboardShortcut(true, "Delete", false)).toBe(true);
+  });
+
+  it("handles Backspace key when editable", () => {
+    expect(shouldHandleKeyboardShortcut(true, "Backspace", false)).toBe(true);
+  });
+
+  it("handles Ctrl+A when editable", () => {
+    expect(shouldHandleKeyboardShortcut(true, "a", true)).toBe(true);
   });
 });
 

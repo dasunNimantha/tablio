@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import Editor, { OnMount, BeforeMount, type Monaco } from "@monaco-editor/react";
 import { api, QueryResult, ExplainResult } from "../../lib/tauri";
-import { ResultTable } from "./ResultTable";
+import { ResultTable, parseSimpleSelect, type SourceTable } from "./ResultTable";
 import { ExplainView } from "./ExplainView";
 import { Play, Search, Clock, Loader2, History, AlignLeft, Bookmark, BookmarkPlus, BarChart3, Copy, Pin, CheckCircle2 } from "lucide-react";
 import { ExportMenu } from "../ExportMenu";
@@ -59,6 +59,8 @@ export function QueryConsole({ connectionId, database }: Props) {
   const [resultMode, setResultMode] = useState<ResultMode>("results");
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sourceTable, setSourceTable] = useState<SourceTable | null>(null);
+  const lastQueryRef = useRef("");
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [showSavedQueries, setShowSavedQueries] = useState(false);
@@ -82,8 +84,11 @@ export function QueryConsole({ connectionId, database }: Props) {
   const tablesLoadedRef = useRef(false);
   const columnsCache = useRef<Map<string, { name: string; type: string }[]>>(new Map());
   const completionDisposableRef = useRef<any>(null);
+  const inlineDisposableRef = useRef<any>(null);
+  const historyRef = useRef<HistoryEntry[]>([]);
 
   useEffect(() => { connRef.current = { connectionId, database }; }, [connectionId, database]);
+  useEffect(() => { historyRef.current = history; }, [history]);
 
   // ── Monaco theme sync ──
 
@@ -192,6 +197,7 @@ export function QueryConsole({ connectionId, database }: Props) {
     syncTheme();
 
     if (completionDisposableRef.current) completionDisposableRef.current.dispose();
+    if (inlineDisposableRef.current) inlineDisposableRef.current.dispose();
 
     completionDisposableRef.current = monaco.languages.registerCompletionItemProvider("sql", {
       triggerCharacters: [".", " ", "("],
@@ -268,6 +274,40 @@ export function QueryConsole({ connectionId, database }: Props) {
         return { suggestions: [...colSuggestions, ...tableSuggestions, ...kwSuggestions] };
       },
     });
+
+    inlineDisposableRef.current = monaco.languages.registerInlineCompletionsProvider("sql", {
+      provideInlineCompletions(model: any, position: any) {
+        const textUntilCursor = model.getValueInRange({
+          startLineNumber: 1, startColumn: 1,
+          endLineNumber: position.lineNumber, endColumn: position.column,
+        }).trimStart();
+
+        if (textUntilCursor.length < 3) return { items: [] };
+
+        const prefix = textUntilCursor.toLowerCase();
+        const matches = historyRef.current
+          .filter((h: HistoryEntry) => h.sql.toLowerCase().startsWith(prefix) && h.sql.length > textUntilCursor.length)
+          .sort((a: HistoryEntry, b: HistoryEntry) => b.timestamp - a.timestamp);
+
+        if (matches.length === 0) return { items: [] };
+
+        const best = matches[0];
+        const insertText = best.sql.slice(textUntilCursor.length);
+
+        return {
+          items: [{
+            insertText,
+            range: {
+              startLineNumber: position.lineNumber,
+              startColumn: position.column,
+              endLineNumber: position.lineNumber,
+              endColumn: position.column,
+            },
+          }],
+        };
+      },
+      freeInlineCompletions() {},
+    });
   };
 
   const handleEditorMount: OnMount = useCallback((editor) => {
@@ -301,26 +341,69 @@ export function QueryConsole({ connectionId, database }: Props) {
     setExecuting(true);
     setError(null);
     setResultMode("results");
+    lastQueryRef.current = queryToRun;
     try {
       const res = await api.executeQuery({ connection_id: connectionId, database, sql: queryToRun });
       setResult(res);
       setExplainResult(null);
-      setHistory((prev) => [{
-        sql: queryToRun, timestamp: Date.now(),
-        executionTimeMs: res.execution_time_ms, rowCount: res.rows.length,
-      }, ...prev.slice(0, 99)]);
+      if (res.is_select) {
+        const parsed = parseSimpleSelect(queryToRun);
+        if (parsed && !parsed.schema) {
+          const entry = tablesRef.current.find(
+            (t) => t.name.toLowerCase() === parsed.table.toLowerCase()
+          );
+          if (entry) {
+            parsed.schema = entry.schema;
+          } else {
+            parsed.schema = "public";
+          }
+        }
+        setSourceTable(parsed);
+      } else {
+        setSourceTable(null);
+      }
+      setHistory((prev) => {
+        const trimmed = queryToRun.trim();
+        const filtered = prev.filter((h) => h.sql.trim() !== trimmed);
+        return [{
+          sql: queryToRun, timestamp: Date.now(),
+          executionTimeMs: res.execution_time_ms, rowCount: res.rows.length,
+        }, ...filtered.slice(0, 99)];
+      });
+      setPinnedQueries(new Set());
     } catch (e) {
       const errMsg = String(e);
       setError(errMsg);
       setResult(null);
-      setHistory((prev) => [{
-        sql: queryToRun, timestamp: Date.now(),
-        executionTimeMs: 0, rowCount: 0, error: errMsg,
-      }, ...prev.slice(0, 99)]);
+      setSourceTable(null);
+      setHistory((prev) => {
+        const trimmed = queryToRun.trim();
+        const filtered = prev.filter((h) => h.sql.trim() !== trimmed);
+        return [{
+          sql: queryToRun, timestamp: Date.now(),
+          executionTimeMs: 0, rowCount: 0, error: errMsg,
+        }, ...filtered.slice(0, 99)];
+      });
+      setPinnedQueries(new Set());
     } finally {
       setExecuting(false);
     }
   }, [connectionId, database, getQueryText]);
+
+  const handleReExecute = useCallback(async () => {
+    const queryToRun = lastQueryRef.current;
+    if (!queryToRun) return;
+    setExecuting(true);
+    setError(null);
+    try {
+      const res = await api.executeQuery({ connection_id: connectionId, database, sql: queryToRun });
+      setResult(res);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setExecuting(false);
+    }
+  }, [connectionId, database]);
 
   useEffect(() => { executeRef.current = executeCurrentStatement; }, [executeCurrentStatement]);
 
@@ -518,6 +601,7 @@ export function QueryConsole({ connectionId, database }: Props) {
               suggestOnTriggerCharacters: true,
               wordBasedSuggestions: "off",
               suggest: { showIcons: true, showStatusBar: false, preview: false, insertMode: "replace" },
+              inlineSuggest: { enabled: true, showToolbar: "onHover" },
             }}
           />
         </div>
@@ -526,6 +610,7 @@ export function QueryConsole({ connectionId, database }: Props) {
       <div className="query-split-handle" onMouseDown={handleSplitDragStart} />
 
       <div className="query-results-section">
+        {executing && <div className="query-loading-bar" />}
         {error && (
           <div className="query-error"><span>{error}</span></div>
         )}
@@ -545,24 +630,22 @@ export function QueryConsole({ connectionId, database }: Props) {
                   {result.rows_affected} rows affected
                 </span>
               )}
-              <div className="flex-spacer" />
-              {result.is_select && result.rows.length > 0 && (
-                <>
-                  <button
-                    className={`btn-ghost ${resultMode === "chart" ? "active-filter" : ""}`}
-                    onClick={toggleResultMode}
-                    title="Toggle Chart View"
-                  >
-                    <BarChart3 size={14} /> Chart
-                  </button>
-                  <ExportMenu onExport={handleExportResult} />
-                </>
-              )}
             </div>
             {resultMode === "chart" && result.is_select && result.rows.length > 0 ? (
               <ChartView columns={result.columns} rows={result.rows as unknown[][]} />
             ) : (
-              result.is_select && result.rows.length > 0 && <ResultTable result={result} />
+              result.is_select && result.rows.length > 0 && (
+                <ResultTable
+                  result={result}
+                  resultMode={resultMode}
+                  onToggleChart={toggleResultMode}
+                  onExport={handleExportResult}
+                  connectionId={connectionId}
+                  database={database}
+                  sourceTable={sourceTable}
+                  onReExecute={handleReExecute}
+                />
+              )
             )}
           </>
         )}

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::db::pg_common::*;
@@ -48,14 +48,18 @@ impl CockroachdbDriver {
     }
 
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
+        // CockroachDB defaults to "defaultdb" when no database is specified
         let initial_db = if config.database.trim().is_empty() {
             "defaultdb"
         } else {
             &config.database
         };
         let url = Self::build_url(config, initial_db);
+        // Desktop app: 4 max conns, scale to zero when idle, 30 min idle timeout
         let pool = PgPoolOptions::new()
             .max_connections(4)
+            .min_connections(0)
+            .idle_timeout(Duration::from_secs(1800))
             .connect(&url)
             .await?;
         Ok(Self {
@@ -78,6 +82,8 @@ impl CockroachdbDriver {
         let url = Self::build_url(&self.config, database);
         let pool = PgPoolOptions::new()
             .max_connections(4)
+            .min_connections(0)
+            .idle_timeout(Duration::from_secs(1800))
             .connect(&url)
             .await?;
         self.db_pools
@@ -561,5 +567,53 @@ mod tests {
         config.ssl = true;
         config.trust_server_cert = false;
         assert_eq!(CockroachdbDriver::ssl_mode(&config), "verify-full");
+    }
+
+    #[test]
+    fn default_db_when_empty_is_defaultdb() {
+        let config = test_config("");
+        let initial_db = if config.database.trim().is_empty() {
+            "defaultdb"
+        } else {
+            &config.database
+        };
+        assert_eq!(initial_db, "defaultdb");
+    }
+
+    #[test]
+    fn default_db_when_whitespace_is_defaultdb() {
+        let config = test_config("   ");
+        let initial_db = if config.database.trim().is_empty() {
+            "defaultdb"
+        } else {
+            &config.database
+        };
+        assert_eq!(initial_db, "defaultdb");
+    }
+
+    #[test]
+    fn default_db_when_specified_uses_value() {
+        let config = test_config("app_db");
+        let initial_db = if config.database.trim().is_empty() {
+            "defaultdb"
+        } else {
+            &config.database
+        };
+        assert_eq!(initial_db, "app_db");
+    }
+
+    #[test]
+    fn pool_idle_timeout_is_30_minutes() {
+        assert_eq!(Duration::from_secs(1800), Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn per_database_pool_builds_separate_urls() {
+        let config = test_config("defaultdb");
+        let url_main = CockroachdbDriver::build_url(&config, "defaultdb");
+        let url_other = CockroachdbDriver::build_url(&config, "app_db");
+        assert!(url_main.contains("/defaultdb?"));
+        assert!(url_other.contains("/app_db?"));
+        assert!(!url_other.contains("/defaultdb"));
     }
 }

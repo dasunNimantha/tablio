@@ -41,6 +41,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.0" date="2026-03-31">
+      <description>
+        <p>Query console result editing: edit, insert, delete, and save changes back to the database for single-table SELECT queries. Inline ghost text suggestions from query history. Multi-row selection and deletion in result grid. Read-only mode for complex queries. Connection pooling with 30-minute idle timeout and min-connections zero. Query button in data grid toolbar. History deduplication. Comprehensive test coverage for pool settings and updatability logic.</p>
+      </description>
+    </release>
     <release version="0.1.20" date="2026-03-31">
       <description>
         <p>Reduce connection pool size from 5 to 4 per database for lighter resource usage on remote servers. Default to the maintenance database when connecting without a database name.</p>

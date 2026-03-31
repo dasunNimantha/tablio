@@ -40,6 +40,7 @@ import {
   ExternalLink,
   Shuffle,
   Trash2,
+  Terminal,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { AllCommunityModule, themeQuartz, type ColDef, type CellClickedEvent, type CellContextMenuEvent, type GridApi, type GridReadyEvent, type IHeaderParams, type SelectionChangedEvent } from "ag-grid-community";
@@ -929,6 +930,21 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     addToast(`Opened ${fk.referenced_table} — filter by ${fk.referenced_column} = ${JSON.stringify(cellValue)}`);
   }, [connectionId, database, schema, connections, openTab, addToast]);
 
+  const handleOpenQuery = useCallback(() => {
+    const conn = connections.find((c) => c.id === connectionId);
+    const tabId = `query:${connectionId}:${database}:${Date.now()}`;
+    const tab: TabInfo = {
+      id: tabId,
+      type: "query",
+      title: `Query - ${database}`,
+      connectionId,
+      connectionColor: conn?.color || "#6398ff",
+      database,
+      schema: "",
+    };
+    openTab(tab);
+  }, [connectionId, database, connections, openTab]);
+
   const handleExplainResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     explainDragging.current = true;
@@ -1052,6 +1068,13 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
             title="Explain current query"
           >
             <Zap size={14} /> Explain
+          </button>
+          <button
+            className="btn-ghost"
+            onClick={handleOpenQuery}
+            title="Open SQL query console for this database"
+          >
+            <Terminal size={14} /> Query
           </button>
           <ExportMenu onExport={handleExport} />
           <button

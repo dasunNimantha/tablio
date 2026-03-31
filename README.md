@@ -212,6 +212,42 @@ tablio/
 | IPC | Tauri invoke commands |
 | Build | Vite, cargo, GitHub Actions |
 
+### Connection Management
+
+Tablio uses sqlx connection pools for PostgreSQL, CockroachDB, MySQL, MariaDB, TiDB, and SQLite. MSSQL uses a single tiberius client connection.
+
+#### Pool Settings
+
+| Setting | Value | Rationale |
+|---------|-------|-----------|
+| Max connections | 4 | Sufficient for a single-user desktop app running queries, browsing data, and fetching metadata concurrently |
+| Min connections | 0 | No connections are kept alive when idle; the pool scales down to zero |
+| Idle timeout | 30 minutes | Idle connections are closed after 30 minutes of inactivity, matching DBeaver's production connection type default |
+
+#### Per-Database Connection Pools
+
+PostgreSQL and CockroachDB support connecting to multiple databases on the same server. Tablio creates a separate connection pool per database, stored in a `RwLock<HashMap<String, Pool>>`. When the user switches to a different database in the sidebar, a new pool is created on demand and cached for reuse.
+
+#### Optional Database Name
+
+The database field is optional when creating a connection. When no database is specified:
+- **PostgreSQL** defaults to the `postgres` maintenance database
+- **CockroachDB** defaults to `defaultdb` (implicit server behavior)
+- **MySQL/MariaDB/TiDB** connect to the server without selecting a database; the user can browse and select one from the sidebar
+- **SQL Server** connects to the default database configured for the login
+
+This allows users to connect to a server first and then explore available databases, similar to pgAdmin's workflow.
+
+#### Query Console Result Editing
+
+When a query is executed in the SQL console, Tablio detects if the result is editable:
+1. The SQL is parsed to check if it targets a single table (no JOINs, UNIONs, subqueries, or CTEs)
+2. If a single table is detected, column metadata is fetched to find primary key columns
+3. If all PK columns are present in the SELECT result, the grid becomes editable with Save writing changes back to the database via UPDATE/INSERT/DELETE statements
+4. Otherwise the grid is read-only (cells are non-editable, Add Row/Delete/Save buttons are hidden)
+
+A badge in the result toolbar shows "Editable" or "Read-only" with a tooltip explaining why.
+
 ---
 
 ## License
