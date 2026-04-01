@@ -449,6 +449,12 @@ impl DatabaseDriver for SqliteDriver {
     }
 
     async fn validate_query(&self, _database: &str, sql: &str) -> Result<Option<ValidationError>> {
+        if sql.trim().is_empty() {
+            return Ok(Some(ValidationError {
+                message: "Empty query".to_string(),
+                position: None,
+            }));
+        }
         use sqlx::Executor;
         match self.pool.prepare(sql).await {
             Ok(_) => Ok(None),

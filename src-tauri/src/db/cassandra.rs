@@ -462,6 +462,12 @@ impl DatabaseDriver for CassandraDriver {
     }
 
     async fn validate_query(&self, _database: &str, sql: &str) -> Result<Option<ValidationError>> {
+        if sql.trim().is_empty() {
+            return Ok(Some(ValidationError {
+                message: "Empty query".to_string(),
+                position: None,
+            }));
+        }
         match self.session.prepare(sql).await {
             Ok(_) => Ok(None),
             Err(e) => Ok(Some(ValidationError {

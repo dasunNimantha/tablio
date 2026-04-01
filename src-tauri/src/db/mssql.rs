@@ -906,6 +906,12 @@ impl DatabaseDriver for MssqlDriver {
     }
 
     async fn validate_query(&self, database: &str, sql: &str) -> Result<Option<ValidationError>> {
+        if sql.trim().is_empty() {
+            return Ok(Some(ValidationError {
+                message: "Empty query".to_string(),
+                position: None,
+            }));
+        }
         self.use_database(database).await?;
         let batch = format!("SET PARSEONLY ON; {}; SET PARSEONLY OFF;", sql);
         let mut client = self.client.lock().await;

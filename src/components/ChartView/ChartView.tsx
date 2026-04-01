@@ -192,7 +192,7 @@ export function ChartView({ columns, rows }: Props) {
     const textMuted = style.getPropertyValue("--text-muted").trim() || "#a1a1aa";
     const gridColor = style.getPropertyValue("--border").trim() || "rgba(255,255,255,0.08)";
     const ff = chartFontFamily();
-    const tickFont = { size: 12, family: ff, weight: "400" as const };
+    const tickFont = { size: 12, family: ff, weight: 400 as const };
 
     return {
       responsive: true,
@@ -203,13 +203,13 @@ export function ChartView({ columns, rows }: Props) {
         legend: {
           labels: {
             color: textMuted,
-            font: { size: 12, family: ff, weight: "400" },
+            font: { size: 12, family: ff, weight: 400 as const },
           },
         },
         title: { display: false },
         tooltip: {
-          titleFont: { size: 13, weight: "500", family: ff },
-          bodyFont: { size: 13, weight: "400", family: ff },
+          titleFont: { size: 13, weight: 500 as const, family: ff },
+          bodyFont: { size: 13, weight: 400 as const, family: ff },
         },
       },
       scales:

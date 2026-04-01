@@ -128,7 +128,7 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
 
     const opts = chart.options;
     const ff = chartFontFamily();
-    const tickFont = { size: 12, family: ff, weight: "400" as const };
+    const tickFont = { size: 12, family: ff, weight: 400 as const };
 
     for (const axis of ["x", "y"] as const) {
       const scale = (opts.scales as any)?.[axis];
@@ -142,8 +142,8 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
       Object.assign(opts.plugins.tooltip, {
         backgroundColor: tc.tooltipBg, titleColor: tc.tooltipTitle,
         bodyColor: tc.tooltipBody, borderColor: tc.tooltipBorder,
-        titleFont: { size: 13, weight: "500", family: ff },
-        bodyFont: { size: 13, weight: "400", family: ff },
+        titleFont: { size: 13, weight: 500 as const, family: ff },
+        bodyFont: { size: 13, weight: 400 as const, family: ff },
       } as any);
     }
 
@@ -159,7 +159,7 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
 
     const tc = getThemeColors();
     const ff = chartFontFamily();
-    const tickFont = { size: 12, family: ff, weight: "400" as const };
+    const tickFont = { size: 12, family: ff, weight: 400 as const };
 
     chartRef.current = new ChartJS(ctx, {
       type: "line",
@@ -205,8 +205,8 @@ function ChartCard({ title, icon, datasets, unit }: ChartCardProps) {
             backgroundColor: tc.tooltipBg, titleColor: tc.tooltipTitle, bodyColor: tc.tooltipBody, borderColor: tc.tooltipBorder,
             borderWidth: 1,
             padding: { top: 12, bottom: 12, left: 16, right: 16 },
-            titleFont: { size: 13, weight: "500", family: ff },
-            bodyFont: { size: 13, weight: "400", family: ff },
+            titleFont: { size: 13, weight: 500 as const, family: ff },
+            bodyFont: { size: 13, weight: 400 as const, family: ff },
             bodySpacing: 8, displayColors: true, boxWidth: 11, boxHeight: 11, boxPadding: 8,
             cornerRadius: 8, caretSize: 0, usePointStyle: true,
             callbacks: {

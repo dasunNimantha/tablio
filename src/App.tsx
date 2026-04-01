@@ -148,13 +148,13 @@ export default function App() {
       void loader.init().catch(() => {});
     };
 
-    if ("requestIdleCallback" in window) {
+    if (typeof window.requestIdleCallback === "function") {
       const id = window.requestIdleCallback(warmMonaco, { timeout: 1500 });
       return () => window.cancelIdleCallback(id);
     }
 
-    const id = window.setTimeout(warmMonaco, 400);
-    return () => window.clearTimeout(id);
+    const id = setTimeout(warmMonaco, 400);
+    return () => clearTimeout(id);
   }, []);
 
   useEffect(() => {

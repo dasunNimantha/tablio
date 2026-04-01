@@ -1052,6 +1052,12 @@ pub async fn pg_cancel_query(pool: &PgPool, pid: &str) -> Result<()> {
 }
 
 pub async fn pg_validate_query(pool: &PgPool, sql: &str) -> Result<Option<ValidationError>> {
+    if sql.trim().is_empty() {
+        return Ok(Some(ValidationError {
+            message: "Empty query".to_string(),
+            position: None,
+        }));
+    }
     use sqlx::Executor;
     match pool.prepare(sql).await {
         Ok(_) => Ok(None),

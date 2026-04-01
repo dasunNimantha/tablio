@@ -837,6 +837,12 @@ pub async fn my_cancel_query(pool: &MySqlPool, pid: &str) -> Result<()> {
 }
 
 pub async fn my_validate_query(pool: &MySqlPool, sql: &str) -> Result<Option<ValidationError>> {
+    if sql.trim().is_empty() {
+        return Ok(Some(ValidationError {
+            message: "Empty query".to_string(),
+            position: None,
+        }));
+    }
     use sqlx::Executor;
     match pool.prepare(sql).await {
         Ok(_) => Ok(None),

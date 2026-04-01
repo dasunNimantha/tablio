@@ -314,7 +314,7 @@ export function QueryConsole({ connectionId, database }: Props) {
       }
     });
 
-    const contentDisposable = editor.onDidChangeModelContent((e) => {
+    const contentDisposable = editor.onDidChangeModelContent((e: { isFlush: boolean; changes: { text: string }[] }) => {
       if (e.isFlush) return;
       for (const change of e.changes) {
         if (change.text.endsWith(" ") && change.text.length > 1) {
