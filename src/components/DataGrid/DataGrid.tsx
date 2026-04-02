@@ -1109,23 +1109,23 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
               Delete {selectedPkKeys.size} row{selectedPkKeys.size > 1 ? "s" : ""}
             </button>
           )}
-          {hasChanges && (
-            <>
-              <button className="btn-discard" onClick={handleDiscard}>
-                <Undo2 size={14} /> Discard
-              </button>
-              <button
-                className="btn-primary"
-                onClick={handleSave}
-                disabled={saving}
-                style={{ display: "flex", alignItems: "center", gap: 6 }}
-              >
-                {saving ? <Loader2 size={14} className="spin" /> : <Save size={14} />}
-                Save {changes.updates.size + changes.inserts.length + changes.deletedKeys.size} changes
-              </button>
-            </>
-          )}
         </div>
+        {hasChanges && (
+          <div className="grid-toolbar-changes">
+            <button className="btn-discard" onClick={handleDiscard}>
+              <Undo2 size={14} /> Discard
+            </button>
+            <button
+              className="btn-primary"
+              onClick={handleSave}
+              disabled={saving}
+              style={{ display: "flex", alignItems: "center", gap: 6 }}
+            >
+              {saving ? <Loader2 size={14} className="spin" /> : <Save size={14} />}
+              Save
+            </button>
+          </div>
+        )}
       </div>
 
       {showFilter && data && (

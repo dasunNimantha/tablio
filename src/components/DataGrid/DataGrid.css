@@ -9,8 +9,7 @@
 .grid-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0 var(--gutter) 0 var(--gutter-lg);
+  padding: 0 var(--gutter-sm) 0 var(--gutter-lg);
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   height: var(--toolbar-height);
@@ -73,7 +72,35 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  justify-content: flex-end;
+}
+
+.grid-toolbar-right::-webkit-scrollbar {
+  display: none;
+}
+
+.grid-toolbar-changes {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.grid-toolbar-changes .btn-primary:hover,
+.grid-toolbar-changes .btn-primary:active,
+.grid-toolbar-changes .btn-discard:hover,
+.grid-toolbar-changes .btn-discard:active {
+  transform: none;
+}
+
+.grid-toolbar-changes .btn-primary:hover {
+  box-shadow: 0 1px 3px var(--accent-muted);
 }
 
 .grid-error-banner {
