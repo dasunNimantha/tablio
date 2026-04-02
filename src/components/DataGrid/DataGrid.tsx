@@ -972,6 +972,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     sortable: true,
     comparator: () => 0,
     suppressHeaderMenuButton: true,
+    cellDataType: false,
     suppressKeyboardEvent: (params) => {
       if (!params.editing) {
         const key = params.event.key;

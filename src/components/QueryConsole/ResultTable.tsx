@@ -579,6 +579,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
     resizable: true,
     sortable: true,
     suppressHeaderMenuButton: true,
+    cellDataType: false,
     suppressKeyboardEvent: (params) => {
       if (!params.editing) {
         const key = params.event.key;
