@@ -148,3 +148,18 @@ Priority: optional
 Description: (none)
  (none)
 
+Package: tablio
+Version: 0.2.4
+Architecture: amd64
+Maintainer: tablio
+Installed-Size: 35891
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0
+Filename: pool/Tablio_0.2.4_amd64.deb
+Size: 17658812
+MD5sum: f5d2804c43f825f07ed89949fad0f6d8
+SHA1: 15304498bf08584a675b7a32070cb50403599df1
+SHA256: c7da7a36740f9cc3daccd478a006242777f2e915ca62b8a838e481cbb3eff6d8
+Priority: optional
+Description: (none)
+ (none)
+
