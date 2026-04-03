@@ -74,14 +74,8 @@
   gap: 6px;
   flex: 1;
   min-width: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
   justify-content: flex-end;
-}
-
-.grid-toolbar-right::-webkit-scrollbar {
-  display: none;
+  flex-wrap: nowrap;
 }
 
 .grid-toolbar-changes {
