@@ -30,6 +30,8 @@ import {
 } from "lucide-react";
 import "./Sidebar.css";
 
+const MAX_FOLDER_NAME_LENGTH = 50;
+
 interface TreeNode {
   id: string;
   label: string;
@@ -79,7 +81,12 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   const [groupContextMenu, setGroupContextMenu] = useState<{ x: number; y: number; group: string } | null>(null);
   const [dragOverGroup, setDragOverGroup] = useState<string | null>(null);
   const [draggingConnId, setDraggingConnId] = useState<string | null>(null);
-  const [emptyGroups, setEmptyGroups] = useState<Set<string>>(new Set());
+  const [emptyGroups, setEmptyGroups] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("tablio-empty-folders");
+      return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+    } catch { return new Set(); }
+  });
   const dragCounterRef = useRef<Record<string, number>>({});
   const newFolderInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -111,6 +118,12 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   }, [showTypeFilter]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem("tablio-empty-folders", JSON.stringify([...emptyGroups]));
+    } catch {}
+  }, [emptyGroups]);
+
+  useEffect(() => {
     if (creatingFolder && newFolderInputRef.current) {
       newFolderInputRef.current.focus();
     }
@@ -125,13 +138,15 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
 
   useEffect(() => {
     if (!groupContextMenu) return;
-    const handleClick = () => setGroupContextMenu(null);
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setGroupContextMenu(null);
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
   }, [groupContextMenu]);
 
   const handleCreateFolder = () => {
-    const name = newFolderName.trim();
+    const name = newFolderName.trim().slice(0, MAX_FOLDER_NAME_LENGTH);
     if (name) {
       setEmptyGroups((prev) => new Set(prev).add(name));
       setCollapsedGroups((prev) => {
@@ -145,7 +160,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   };
 
   const handleRenameGroup = async (oldName: string) => {
-    const newName = renameValue.trim();
+    const newName = renameValue.trim().slice(0, MAX_FOLDER_NAME_LENGTH);
     if (!newName || newName === oldName) {
       setRenamingGroup(null);
       return;
@@ -641,26 +656,26 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     const isLoading = loadingNodes.has(node.id);
 
     const getIconInfo = (): { icon: React.ReactNode; cls: string } => {
-      if (isLoading) return { icon: <Loader2 size={14} className="spin" />, cls: "" };
+      if (isLoading) return { icon: <Loader2 size={15} className="spin" />, cls: "" };
       switch (node.type) {
         case "connection":
-          return { icon: <Database size={14} />, cls: "icon-connection" };
+          return { icon: <Database size={15} />, cls: "icon-connection" };
         case "database":
-          return { icon: <Database size={14} />, cls: "icon-database" };
+          return { icon: <Database size={15} />, cls: "icon-database" };
         case "schema":
-          return { icon: <Layers size={14} />, cls: "icon-schema" };
+          return { icon: <Layers size={15} />, cls: "icon-schema" };
         case "table":
-          return { icon: <Table2 size={14} />, cls: "icon-table" };
+          return { icon: <Table2 size={15} />, cls: "icon-table" };
         case "view":
-          return { icon: <Eye size={14} />, cls: "icon-view" };
+          return { icon: <Eye size={15} />, cls: "icon-view" };
         case "function":
-          return { icon: <Zap size={14} />, cls: "icon-function" };
+          return { icon: <Zap size={15} />, cls: "icon-function" };
         case "table-group":
         case "view-group":
         case "function-group":
-          return { icon: isExpanded ? <FolderOpen size={14} /> : <Folder size={14} />, cls: "icon-folder" };
+          return { icon: isExpanded ? <FolderOpen size={15} /> : <Folder size={15} />, cls: "icon-folder" };
         default:
-          return { icon: <Database size={14} />, cls: "icon-database" };
+          return { icon: <Database size={15} />, cls: "icon-database" };
       }
     };
     const iconInfo = getIconInfo();
@@ -682,7 +697,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         >
           {!isLeaf && (
             <span className="tree-chevron">
-              {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
             </span>
           )}
           {isLeaf && <span className="tree-chevron-spacer" />}
@@ -1243,11 +1258,17 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         onDragOver={(e) => { e.preventDefault(); }}
         onDragEnter={(e) => {
           e.preventDefault();
+          if (e.currentTarget !== e.target && (e.target as HTMLElement).closest?.(".connection-group")) return;
           if (draggingConnId) {
             const dragged = connections.find((c) => c.id === draggingConnId);
             if (dragged?.group?.trim()) {
               setDragOverGroup("__ungrouped__");
             }
+          }
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget === e.target || !(e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget))) {
+            if (dragOverGroup === "__ungrouped__") setDragOverGroup(null);
           }
         }}
         onDrop={(e) => handleDrop(e, null)}
@@ -1316,7 +1337,8 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                   ref={newFolderInputRef}
                   className="folder-name-input"
                   value={newFolderName}
-                  onChange={(e) => setNewFolderName(e.target.value)}
+                  onChange={(e) => setNewFolderName(e.target.value.slice(0, MAX_FOLDER_NAME_LENGTH))}
+                  maxLength={MAX_FOLDER_NAME_LENGTH}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") handleCreateFolder();
                     if (e.key === "Escape") { setCreatingFolder(false); setNewFolderName(""); }
@@ -1336,9 +1358,10 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                   <div
                     key={`group:${groupName}`}
                     className={`connection-group ${groupIndex === 0 ? "connection-group-first" : ""} ${dragOverGroup === groupName ? "drag-over" : ""}`}
-                    onDragOver={(e) => { e.preventDefault(); }}
+                    onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
                     onDragEnter={(e) => {
                       e.preventDefault();
+                      e.stopPropagation();
                       const key = `group:${groupName}`;
                       dragCounterRef.current[key] = (dragCounterRef.current[key] || 0) + 1;
                       if (draggingConnId) {
@@ -1348,7 +1371,8 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                         }
                       }
                     }}
-                    onDragLeave={() => {
+                    onDragLeave={(e) => {
+                      e.stopPropagation();
                       const key = `group:${groupName}`;
                       dragCounterRef.current[key] = (dragCounterRef.current[key] || 1) - 1;
                       if (dragCounterRef.current[key] <= 0) {
@@ -1356,7 +1380,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                         if (dragOverGroup === groupName) setDragOverGroup(null);
                       }
                     }}
-                    onDrop={(e) => handleDrop(e, groupName)}
+                    onDrop={(e) => { e.stopPropagation(); handleDrop(e, groupName); }}
                   >
                     <div
                       className="connection-group-header"
@@ -1368,19 +1392,20 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                       }}
                     >
                       <span className="connection-group-chevron">
-                        {isCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+                        {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                       </span>
                       {isCollapsed ? (
-                        <Folder size={12} className="connection-group-folder-icon" />
+                        <Folder size={13} className="connection-group-folder-icon" />
                       ) : (
-                        <FolderOpen size={12} className="connection-group-folder-icon" />
+                        <FolderOpen size={13} className="connection-group-folder-icon" />
                       )}
                       {isRenaming ? (
                         <input
                           ref={renameInputRef}
                           className="folder-name-input"
                           value={renameValue}
-                          onChange={(e) => setRenameValue(e.target.value)}
+                          onChange={(e) => setRenameValue(e.target.value.slice(0, MAX_FOLDER_NAME_LENGTH))}
+                          maxLength={MAX_FOLDER_NAME_LENGTH}
                           onKeyDown={(e) => {
                             if (e.key === "Enter") handleRenameGroup(groupName);
                             if (e.key === "Escape") setRenamingGroup(null);

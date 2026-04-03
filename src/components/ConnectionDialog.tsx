@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useConnectionStore } from "../stores/connectionStore";
 import { api, ConnectionConfig } from "../lib/tauri";
-import { X, Loader2, CheckCircle, XCircle, ChevronDown } from "lucide-react";
+import { X, Loader2, CheckCircle, XCircle, ChevronDown, Folder } from "lucide-react";
 import "./ConnectionDialog.css";
+
+const MAX_FOLDER_NAME_LENGTH = 50;
 
 const COLORS = [
   "#89b4fa", "#a6e3a1", "#f9e2af", "#f38ba8",
@@ -30,7 +33,7 @@ function normalizeConnectionForm(form: ConnectionConfig): ConnectionConfig {
     host: form.db_type === "sqlite" ? "" : form.host.trim(),
     user: form.db_type === "sqlite" ? form.user : form.user.trim(),
     database: form.database.trim(),
-    group: form.group?.trim() ? form.group.trim() : null,
+    group: form.group?.trim() ? form.group.trim().slice(0, MAX_FOLDER_NAME_LENGTH) : null,
   };
 }
 
@@ -140,6 +143,137 @@ function DbTypeDropdown({
           </ul>
         )}
       </div>
+    </div>
+  );
+}
+
+function GroupInput({
+  value,
+  onChange,
+  connections,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  connections: ConnectionConfig[];
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const [dropdownStyle, setDropdownStyle] = useState<{
+    top: number;
+    left: number;
+    width: number;
+    maxHeight: number;
+  } | null>(null);
+
+  const existingGroups = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const c of connections) {
+      const g = c.group?.trim();
+      if (g && !seen.has(g.toLowerCase())) seen.set(g.toLowerCase(), g);
+    }
+    try {
+      const raw = localStorage.getItem("tablio-empty-folders");
+      if (raw) {
+        for (const g of JSON.parse(raw) as string[]) {
+          if (g && !seen.has(g.toLowerCase())) seen.set(g.toLowerCase(), g);
+        }
+      }
+    } catch {}
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+  }, [connections]);
+
+  const filtered = useMemo(() => {
+    if (!value.trim()) return existingGroups;
+    const lower = value.toLowerCase();
+    return existingGroups.filter((g) => g.toLowerCase().includes(lower));
+  }, [existingGroups, value]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const updatePosition = () => {
+      if (!inputRef.current) return;
+      const rect = inputRef.current.getBoundingClientRect();
+      const desiredWidth = Math.min(Math.max(rect.width - 56, 180), 240);
+      const left = Math.min(rect.left, window.innerWidth - desiredWidth - 8);
+      const availableBelow = Math.max(120, window.innerHeight - rect.bottom - 12);
+      setDropdownStyle({
+        top: rect.bottom + 4,
+        left: Math.max(8, left),
+        width: desiredWidth,
+        maxHeight: Math.min(180, availableBelow),
+      });
+    };
+
+    updatePosition();
+
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        ref.current?.contains(target) ||
+        dropdownRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", handleClick);
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [open]);
+
+  return (
+    <div className="form-group group-input-wrapper" ref={ref}>
+      <label>Group (optional)</label>
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value.slice(0, MAX_FOLDER_NAME_LENGTH));
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        placeholder="e.g. Production, Development"
+        autoComplete="off"
+        maxLength={MAX_FOLDER_NAME_LENGTH}
+      />
+      {open && filtered.length > 0 && dropdownStyle && createPortal(
+        <div
+          ref={dropdownRef}
+          className="group-suggestions"
+          style={{
+            position: "fixed",
+            top: dropdownStyle.top,
+            left: dropdownStyle.left,
+            width: dropdownStyle.width,
+            maxHeight: dropdownStyle.maxHeight,
+          }}
+        >
+          {filtered.map((g) => (
+            <button
+              key={g}
+              type="button"
+              className="group-suggestion-item"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onChange(g);
+                setOpen(false);
+              }}
+            >
+              <Folder size={12} />
+              <span className="group-suggestion-text">{g}</span>
+            </button>
+          ))}
+        </div>,
+        document.body
+      )}
     </div>
   );
 }
@@ -466,14 +600,11 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
             </section>
           )}
 
-          <div className="form-group">
-            <label>Group (optional)</label>
-            <input
-              value={form.group || ""}
-              onChange={(e) => updateField("group", e.target.value || null)}
-              placeholder="e.g. Production, Development"
-            />
-          </div>
+          <GroupInput
+            value={form.group || ""}
+            onChange={(v) => updateField("group", v || null)}
+            connections={connections}
+          />
 
           {testError && <div className="connection-form-error">{testError}</div>}
 

@@ -55,6 +55,7 @@
   border-radius: 0 0 var(--radius-xl) var(--radius-xl);
   position: sticky;
   bottom: 0;
+  z-index: 1;
 }
 
 .dialog-footer-right {
@@ -513,4 +514,59 @@
   padding-left: 10px;
   border-left: 2px solid var(--accent-muted);
   margin-left: 6px;
+}
+
+.group-input-wrapper {
+  position: relative;
+}
+
+.group-suggestions {
+  position: fixed;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-dropdown);
+  z-index: 1010;
+  overflow-y: auto;
+  padding: 3px;
+}
+
+.group-suggestion-item {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  min-height: 34px;
+  font-size: 13px;
+  font-weight: 400;
+  background: transparent;
+  color: var(--text-primary);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.group-suggestion-item svg {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.group-suggestion-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-suggestion-item:hover {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.group-suggestion-item:hover svg {
+  color: var(--accent);
+  opacity: 1;
 }
