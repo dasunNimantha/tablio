@@ -3,6 +3,7 @@
   "extends": [
     "config:recommended"
   ],
+  "platformAutomerge": true,
   "packageRules": [
     {
       "matchUpdateTypes": ["minor", "patch"],
