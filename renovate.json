@@ -4,7 +4,7 @@
     "config:recommended"
   ],
   "platformAutomerge": true,
-  "minimumReleaseAge": "3 days",
+  "minimumReleaseAge": "7 days",
   "packageRules": [
     {
       "matchUpdateTypes": ["minor", "patch"],
