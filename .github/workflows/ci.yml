@@ -5,6 +5,10 @@ on:
     branches: [master, main]
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-frontend:
     name: Frontend Tests
