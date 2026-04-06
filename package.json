@@ -20,7 +20,7 @@
     "ag-grid-community": "^35.1.0",
     "ag-grid-react": "^35.1.0",
     "chart.js": "^4.5.1",
-    "lucide-react": "^0.460.0",
+    "lucide-react": "^0.577.0",
     "react": "^18.3.1",
     "react-chartjs-2": "^5.3.1",
     "react-dom": "^18.3.1",
