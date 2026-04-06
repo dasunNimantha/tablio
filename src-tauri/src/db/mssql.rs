@@ -461,7 +461,7 @@ impl DatabaseDriver for MssqlDriver {
             return Ok(rows
                 .into_iter()
                 .filter_map(|r| {
-                    let name = r.get(0)?.as_str()?.to_string();
+                    let name = r.first()?.as_str()?.to_string();
                     let is_unique = matches!(r.get(1), Some(serde_json::Value::Bool(b)) if *b)
                         || matches!(r.get(1), Some(serde_json::Value::Number(n)) if n.as_i64() == Some(1));
                     let index_type = r
@@ -707,7 +707,7 @@ impl DatabaseDriver for MssqlDriver {
         let (total, data, index) = sz
             .first()
             .map(|r| {
-                let t = r.get(0).and_then(|v| v.as_i64()).unwrap_or(0);
+                let t = r.first().and_then(|v| v.as_i64()).unwrap_or(0);
                 let d = r.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
                 let i = r.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
                 (t, d, i)
@@ -757,7 +757,7 @@ impl DatabaseDriver for MssqlDriver {
                 }
             )
         } else if pk_cols.is_empty() {
-            format!("{}", bracket(&columns[0].name))
+            bracket(&columns[0].name).to_string()
         } else {
             pk_cols
                 .iter()
