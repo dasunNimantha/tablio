@@ -135,6 +135,17 @@
   background: var(--bg-hover);
 }
 
+/* Tables / views / functions only — keep folder & branch labels at base size */
+.tree-node.leaf,
+.tree-node.leaf .tree-label {
+  font-size: 15px;
+}
+
+.tree-node.tree-empty,
+.tree-node.tree-empty .tree-label {
+  font-size: 15px;
+}
+
 .tree-chevron {
   display: flex;
   align-items: center;

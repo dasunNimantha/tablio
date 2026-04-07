@@ -18,6 +18,14 @@ import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick } from "luci
 import { themes, getThemeById, applyTheme } from "./lib/themes";
 import { api } from "./lib/tauri";
 
+const SIDEBAR_WIDTH_MIN = 200;
+/** Keep at least this many pixels for the main editor / grid area. */
+const MAIN_AREA_MIN_WIDTH = 320;
+
+function maxSidebarWidth(): number {
+  return Math.max(SIDEBAR_WIDTH_MIN, window.innerWidth - MAIN_AREA_MIN_WIDTH);
+}
+
 interface CreateTableTarget {
   connectionId: string;
   connectionColor: string;
@@ -114,7 +122,7 @@ export default function App() {
     document.body.style.userSelect = "none";
 
     const onMove = (ev: MouseEvent) => {
-      const w = Math.max(200, Math.min(ev.clientX, 500));
+      const w = Math.min(Math.max(SIDEBAR_WIDTH_MIN, ev.clientX), maxSidebarWidth());
       sidebarWidthRef.current = w;
       if (sidebarElRef.current) {
         sidebarElRef.current.style.width = `${w}px`;
@@ -131,6 +139,26 @@ export default function App() {
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+  }, []);
+
+  useEffect(() => {
+    const clampToViewport = () => {
+      const cap = maxSidebarWidth();
+      setSidebarWidth((prev) => {
+        if (prev <= cap) return prev;
+        const clamped = cap;
+        sidebarWidthRef.current = clamped;
+        if (sidebarElRef.current) {
+          sidebarElRef.current.style.width = `${clamped}px`;
+          sidebarElRef.current.style.minWidth = `${clamped}px`;
+        }
+        localStorage.setItem("tablio-sidebar-width", String(clamped));
+        return clamped;
+      });
+    };
+    window.addEventListener("resize", clampToViewport);
+    clampToViewport();
+    return () => window.removeEventListener("resize", clampToViewport);
   }, []);
 
   useEffect(() => {

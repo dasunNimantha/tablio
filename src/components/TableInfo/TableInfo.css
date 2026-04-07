@@ -107,6 +107,34 @@
   color: var(--text-muted);
 }
 
+.table-info-key-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.table-info .pk-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--accent-muted);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  letter-spacing: 0.03em;
+}
+
+.table-info .fk-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 15%, transparent);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  letter-spacing: 0.03em;
+  cursor: default;
+}
+
 .info-empty {
   text-align: center;
   color: var(--text-muted);

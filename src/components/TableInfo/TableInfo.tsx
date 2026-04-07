@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, ColumnInfo, IndexInfo, ForeignKeyInfo } from "../../lib/tauri";
 import { Loader2 } from "lucide-react";
 import "./TableInfo.css";
@@ -45,6 +45,16 @@ export function TableInfo({ connectionId, database, schema, table }: Props) {
     load();
     return () => { cancelled = true; };
   }, [connectionId, database, schema, table]);
+
+  const fksByColumn = useMemo(() => {
+    const m = new Map<string, ForeignKeyInfo[]>();
+    for (const fk of foreignKeys) {
+      const list = m.get(fk.column) ?? [];
+      list.push(fk);
+      m.set(fk.column, list);
+    }
+    return m;
+  }, [foreignKeys]);
 
   if (loading) {
     return (
@@ -100,7 +110,15 @@ export function TableInfo({ connectionId, database, schema, table }: Props) {
               </tr>
             </thead>
             <tbody>
-              {columns.map((col, i) => (
+              {columns.map((col, i) => {
+                const colFks = fksByColumn.get(col.name) ?? [];
+                const fkTitle =
+                  colFks.length > 0
+                    ? colFks
+                        .map((fk) => `${fk.referenced_table}.${fk.referenced_column}`)
+                        .join(" · ")
+                    : undefined;
+                return (
                 <tr key={col.name}>
                   <td className="info-cell-muted">{i + 1}</td>
                   <td className="info-cell-name">{col.name}</td>
@@ -108,10 +126,18 @@ export function TableInfo({ connectionId, database, schema, table }: Props) {
                   <td>{col.is_nullable ? "YES" : "NO"}</td>
                   <td className="info-cell-muted">{col.default_value || "-"}</td>
                   <td>
-                    {col.is_primary_key && <span className="pk-badge">PK</span>}
+                    <span className="table-info-key-badges">
+                      {col.is_primary_key && <span className="pk-badge">PK</span>}
+                      {colFks.length > 0 && (
+                        <span className="fk-badge" title={fkTitle}>
+                          FK
+                        </span>
+                      )}
+                    </span>
                   </td>
                 </tr>
-              ))}
+              );
+              })}
             </tbody>
           </table>
         )}
