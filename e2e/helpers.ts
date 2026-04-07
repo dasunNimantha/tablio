@@ -62,6 +62,88 @@ export async function openConnectionDialog(page: Page) {
   await page.locator(".dialog").waitFor({ timeout: 3000 });
 }
 
+export async function openTableStats(page: Page, tableName: string) {
+  await openContextMenu(page, tableName);
+  await page.locator(".context-menu button", { hasText: "View Stats" }).click();
+  await page.locator(".table-stats").waitFor({ timeout: 8000 });
+}
+
+export async function openActivity(page: Page) {
+  await connectToLocalPostgres(page);
+  await page.locator(".activity-dashboard").first().waitFor({ timeout: 8000 });
+}
+
+export async function openERD(page: Page) {
+  await connectToLocalPostgres(page);
+  const db = page.locator(".tree-node .tree-label", { hasText: /^postgres$/ });
+  await db.click();
+  const schema = page.locator(".tree-node .tree-label", { hasText: /^public$/ });
+  await schema.waitFor({ timeout: 8000 });
+  await schema.click({ button: "right" });
+  await page.locator(".context-menu").waitFor({ timeout: 3000 });
+  await page.locator(".context-menu button", { hasText: "View ERD" }).click();
+  await page.locator(".erd-view").waitFor({ timeout: 8000 });
+}
+
+export async function openRoleManager(page: Page) {
+  await connectToLocalPostgres(page);
+  const conn = page.locator(".tree-label", { hasText: "Local Postgres" });
+  await conn.click({ button: "right" });
+  await page.locator(".context-menu").waitFor({ timeout: 3000 });
+  await page.locator(".context-menu button", { hasText: "Manage Roles" }).click();
+  await page.locator(".role-manager").waitFor({ timeout: 8000 });
+}
+
+export async function openQueryStats(page: Page) {
+  await connectToLocalPostgres(page);
+  const conn = page.locator(".tree-label", { hasText: "Local Postgres" });
+  await conn.click({ button: "right" });
+  await page.locator(".context-menu").waitFor({ timeout: 3000 });
+  await page.locator(".context-menu button", { hasText: "Query Statistics" }).click();
+}
+
+export async function openCreateTable(page: Page) {
+  await connectToLocalPostgres(page);
+  const db = page.locator(".tree-node .tree-label", { hasText: /^postgres$/ });
+  await db.click();
+  const schema = page.locator(".tree-node .tree-label", { hasText: /^public$/ });
+  await schema.waitFor({ timeout: 8000 });
+  await schema.click({ button: "right" });
+  await page.locator(".context-menu").waitFor({ timeout: 3000 });
+  await page.locator(".context-menu button", { hasText: "Create Table" }).click();
+  await page.locator(".create-table-dialog").waitFor({ timeout: 5000 });
+}
+
+export async function openAlterTable(page: Page, tableName: string) {
+  await openContextMenu(page, tableName);
+  await page.locator(".context-menu button", { hasText: "Alter Table" }).click();
+  await page.locator(".alter-table-dialog").waitFor({ timeout: 8000 });
+}
+
+export async function openImportDialog(page: Page, tableName: string) {
+  await openContextMenu(page, tableName);
+  await page.locator(".context-menu button", { hasText: "Import Data" }).click();
+  await page.locator(".import-dialog").waitFor({ timeout: 5000 });
+}
+
+export async function openBackupRestore(page: Page) {
+  await connectToLocalPostgres(page);
+  const db = page.locator(".tree-node .tree-label", { hasText: /^postgres$/ });
+  await db.click({ button: "right" });
+  await page.locator(".context-menu").waitFor({ timeout: 3000 });
+  await page.locator(".context-menu button", { hasText: "Backup / Restore" }).click();
+  await page.locator(".br-dialog").waitFor({ timeout: 5000 });
+}
+
+export async function openDumpRestore(page: Page) {
+  await connectToLocalPostgres(page);
+  const db = page.locator(".tree-node .tree-label", { hasText: /^postgres$/ });
+  await db.click({ button: "right" });
+  await page.locator(".context-menu").waitFor({ timeout: 3000 });
+  await page.locator(".context-menu button", { hasText: /Dump.*Restore/ }).click();
+  await page.locator(".dr-dialog").waitFor({ timeout: 5000 });
+}
+
 export async function fillConnectionForm(
   page: Page,
   fields: { name?: string; host?: string; port?: string; user?: string; password?: string; database?: string }

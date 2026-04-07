@@ -6,7 +6,7 @@ export default defineConfig({
   retries: 1,
   use: {
     baseURL: "http://localhost:1420",
-    headless: !!process.env.CI,
+    headless: true,
     viewport: { width: 1920, height: 1080 },
     screenshot: "only-on-failure",
   },
