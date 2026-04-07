@@ -10,6 +10,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'src-tauri/**'
+
   test-frontend:
     name: Frontend Tests
     runs-on: ubuntu-latest
@@ -31,6 +45,8 @@ jobs:
 
   fmt-and-clippy:
     name: Format & Clippy
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -56,6 +72,8 @@ jobs:
 
   test-postgres:
     name: Postgres ${{ matrix.pg_version }}
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -98,6 +116,8 @@ jobs:
 
   test-mysql:
     name: MySQL ${{ matrix.mysql_version }}
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -139,6 +159,8 @@ jobs:
 
   test-mariadb:
     name: MariaDB ${{ matrix.mariadb_version }}
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -180,6 +202,8 @@ jobs:
 
   test-cockroachdb:
     name: CockroachDB
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -213,6 +237,8 @@ jobs:
 
   test-tidb:
     name: TiDB
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -246,6 +272,8 @@ jobs:
 
   test-sqlite:
     name: SQLite
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -266,6 +294,8 @@ jobs:
 
   test-cassandra:
     name: Cassandra ${{ matrix.cassandra_version }}
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -304,6 +334,8 @@ jobs:
 
   test-scylladb:
     name: ScyllaDB ${{ matrix.scylla_version }}
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -342,7 +374,8 @@ jobs:
 
   build:
     name: Build
-    needs: [test-frontend, fmt-and-clippy, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite, test-cassandra, test-scylladb]
+    needs: [changes, test-frontend, fmt-and-clippy, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite, test-cassandra, test-scylladb]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
