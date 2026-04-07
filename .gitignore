@@ -5,6 +5,10 @@ src-tauri/target/
 .DS_Store
 .cursor/
 
+# Playwright
+test-results/
+playwright-report/
+
 # Frontend build output, but keep dist/aur/ and dist/flatpak/
 dist/*
 !dist/aur/

@@ -3,12 +3,20 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, X } from "lucide-react";
 import "./TitleBar.css";
 
-const appWindow = getCurrentWindow();
+const isTauri = !!(window as any).__TAURI_INTERNALS__;
+
+function getAppWindow() {
+  if (isTauri) return getCurrentWindow();
+  return null;
+}
+
+const appWindow = getAppWindow();
 
 export function TitleBar() {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
+    if (!appWindow) return;
     appWindow.isMaximized().then(setMaximized);
     const unlisten = appWindow.onResized(() => {
       appWindow.isMaximized().then(setMaximized);
@@ -19,15 +27,15 @@ export function TitleBar() {
   }, []);
 
   const handleMinimize = useCallback(() => {
-    appWindow.minimize();
+    appWindow?.minimize();
   }, []);
 
   const handleToggleMaximize = useCallback(() => {
-    appWindow.toggleMaximize();
+    appWindow?.toggleMaximize();
   }, []);
 
   const handleClose = useCallback(() => {
-    appWindow.close();
+    appWindow?.close();
   }, []);
 
   return (

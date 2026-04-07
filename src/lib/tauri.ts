@@ -57,8 +57,10 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       return undefined as T;
     case "create_table":
       return undefined as T;
-    case "list_indexes":
-      return mock.mockIndexes as T;
+    case "list_indexes": {
+      const table = (args?.table as string) || "users";
+      return mock.getTableIndexes(table) as T;
+    }
     case "list_foreign_keys": {
       const table = (args?.table as string) || "";
       return mock.getTableForeignKeys(table) as T;

@@ -180,21 +180,65 @@ const rowsMap: Record<string, (count: number) => unknown[][]> = {
   orders: generateOrderRows,
 };
 
-export const mockIndexes: IndexInfo[] = [
-  { name: "users_pkey", columns: ["id"], is_unique: true, index_type: "btree" },
-  { name: "users_email_idx", columns: ["email"], is_unique: true, index_type: "btree" },
-  { name: "users_username_idx", columns: ["username"], is_unique: true, index_type: "btree" },
-  { name: "users_created_at_idx", columns: ["created_at"], is_unique: false, index_type: "btree" },
-];
+const indexesMap: Record<string, IndexInfo[]> = {
+  users: [
+    { name: "users_pkey", columns: ["id"], is_unique: true, index_type: "btree" },
+    { name: "users_email_idx", columns: ["email"], is_unique: true, index_type: "btree" },
+    { name: "users_username_idx", columns: ["username"], is_unique: true, index_type: "btree" },
+    { name: "users_created_at_idx", columns: ["created_at"], is_unique: false, index_type: "btree" },
+  ],
+  orders: [
+    { name: "orders_pkey", columns: ["id"], is_unique: true, index_type: "btree" },
+    { name: "orders_user_id_idx", columns: ["user_id"], is_unique: false, index_type: "btree" },
+    { name: "orders_status_idx", columns: ["status"], is_unique: false, index_type: "btree" },
+    { name: "orders_created_at_idx", columns: ["created_at"], is_unique: false, index_type: "btree" },
+  ],
+  products: [
+    { name: "products_pkey", columns: ["id"], is_unique: true, index_type: "btree" },
+    { name: "products_category_id_idx", columns: ["category_id"], is_unique: false, index_type: "btree" },
+  ],
+  categories: [
+    { name: "categories_pkey", columns: ["id"], is_unique: true, index_type: "btree" },
+  ],
+  order_items: [
+    { name: "order_items_pkey", columns: ["id"], is_unique: true, index_type: "btree" },
+    { name: "order_items_order_id_idx", columns: ["order_id"], is_unique: false, index_type: "btree" },
+    { name: "order_items_product_id_idx", columns: ["product_id"], is_unique: false, index_type: "btree" },
+  ],
+  reviews: [
+    { name: "reviews_pkey", columns: ["id"], is_unique: true, index_type: "btree" },
+    { name: "reviews_user_id_idx", columns: ["user_id"], is_unique: false, index_type: "btree" },
+    { name: "reviews_product_id_idx", columns: ["product_id"], is_unique: false, index_type: "btree" },
+  ],
+};
 
-export const mockForeignKeys: ForeignKeyInfo[] = [
-  { name: "orders_user_id_fkey", column: "user_id", referenced_table: "users", referenced_column: "id", on_delete: "CASCADE", on_update: "NO ACTION" },
-];
+export const mockIndexes: IndexInfo[] = indexesMap.users;
 
-/** Returns FKs for the given table (table that owns the FK column). */
+const foreignKeysMap: Record<string, ForeignKeyInfo[]> = {
+  orders: [
+    { name: "orders_user_id_fkey", column: "user_id", referenced_table: "users", referenced_column: "id", on_delete: "CASCADE", on_update: "NO ACTION" },
+  ],
+  products: [
+    { name: "products_category_id_fkey", column: "category_id", referenced_table: "categories", referenced_column: "id", on_delete: "SET NULL", on_update: "NO ACTION" },
+  ],
+  order_items: [
+    { name: "order_items_order_id_fkey", column: "order_id", referenced_table: "orders", referenced_column: "id", on_delete: "CASCADE", on_update: "NO ACTION" },
+    { name: "order_items_product_id_fkey", column: "product_id", referenced_table: "products", referenced_column: "id", on_delete: "RESTRICT", on_update: "NO ACTION" },
+  ],
+  reviews: [
+    { name: "reviews_user_id_fkey", column: "user_id", referenced_table: "users", referenced_column: "id", on_delete: "CASCADE", on_update: "NO ACTION" },
+    { name: "reviews_product_id_fkey", column: "product_id", referenced_table: "products", referenced_column: "id", on_delete: "CASCADE", on_update: "NO ACTION" },
+  ],
+};
+
+export const mockForeignKeys: ForeignKeyInfo[] = foreignKeysMap.orders ?? [];
+
+export function getTableIndexes(table: string): IndexInfo[] {
+  return indexesMap[table] ?? indexesMap.users;
+}
+
 export function getTableForeignKeys(table: string): ForeignKeyInfo[] {
-  if (table === "orders") return mockForeignKeys;
-  return [];
+  return foreignKeysMap[table] ?? [];
 }
 
 export const mockFunctions: FunctionInfo[] = [
