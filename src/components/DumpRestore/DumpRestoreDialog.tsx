@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api, DumpRestoreRequest } from "../../lib/tauri";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { X, Loader2, AlertTriangle, CheckCircle, XCircle, Shield, Search, ChevronDown, ChevronUp } from "lucide-react";
@@ -84,7 +85,7 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
     return () => { cancelled = true; };
   }, [connections, activeConnections, sourceConnectionId, sourceDatabase]);
 
-  const scrollTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const appendLog = useCallback((line: string) => {
     setLogs((prev) => {
@@ -102,14 +103,11 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
     let unlisten: (() => void) | undefined;
     const isTauri = !!(window as any).__TAURI_INTERNALS__;
     if (isTauri) {
-      import("@tauri-apps/api/event").then(({ listen }) => {
-        if (cancelled) return;
-        listen<string>("dump-restore-log", (event) => {
-          appendLog(event.payload);
-        }).then((fn) => {
-          if (cancelled) { fn(); return; }
-          unlisten = fn;
-        });
+      listen<string>("dump-restore-log", (event) => {
+        appendLog(event.payload);
+      }).then((fn) => {
+        if (cancelled) { fn(); return; }
+        unlisten = fn;
       });
     }
     return () => { cancelled = true; unlisten?.(); };

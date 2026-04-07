@@ -281,8 +281,8 @@ export function RowDetailView({
   const editRef = useRef<HTMLTextAreaElement>(null);
   const resizeRef = useRef<{ startX: number; startW: number } | null>(null);
   const blurCommitRef = useRef(true);
-  const copyTimerRef = useRef<ReturnType<typeof setTimeout>>();
-  const blurTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const blurTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const resizeTextarea = useCallback(() => {
     if (editRef.current) {
