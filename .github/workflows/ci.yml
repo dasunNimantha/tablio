@@ -380,23 +380,31 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
       - uses: actions/setup-node@v6
         with:
           node-version: "lts/*"
           cache: "npm"
 
+      - run: npm ci
+
+      - name: Build frontend only
+        if: needs.changes.outputs.backend != 'true'
+        run: npm run build
+
+      - name: Install Linux dependencies
+        if: needs.changes.outputs.backend == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
       - uses: dtolnay/rust-toolchain@stable
+        if: needs.changes.outputs.backend == 'true'
 
       - uses: swatinem/rust-cache@v2
+        if: needs.changes.outputs.backend == 'true'
         with:
           workspaces: src-tauri
 
-      - run: npm ci
-
       - name: Build Tauri app
+        if: needs.changes.outputs.backend == 'true'
         run: npx tauri build
