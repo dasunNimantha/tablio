@@ -80,18 +80,45 @@ install_apt() {
   need_cmd curl
   need_cmd gpg
 
+  local arch
+  arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+  if [ "$arch" != "amd64" ]; then
+    info "APT repo only ships amd64 packages; falling back to AppImage on ${arch}"
+    install_appimage
+    return
+  fi
+
   sudo mkdir -p "$(dirname "$KEYRING")"
-  curl -fsSL "$APT_KEY_URL" | sudo gpg --dearmor --yes -o "$KEYRING"
+  local tmpkey
+  tmpkey="$(mktemp)"
+  if ! curl -fsSL "$APT_KEY_URL" -o "$tmpkey"; then
+    rm -f "$tmpkey"
+    err "Failed to download signing key from ${APT_KEY_URL}"
+    exit 1
+  fi
+  sudo gpg --dearmor --yes -o "$KEYRING" < "$tmpkey"
+  sudo chmod 0644 "$KEYRING"
+  rm -f "$tmpkey"
   ok "Imported signing key"
 
-  echo "deb [signed-by=${KEYRING}] ${APT_REPO_URL} stable main" \
+  echo "deb [arch=${arch} signed-by=${KEYRING}] ${APT_REPO_URL} stable main" \
     | sudo tee "$LIST" >/dev/null
   ok "Added repository"
 
-  info "Updating package index..."
-  sudo apt-get update
+  info "Updating package index (tablio repo only)..."
+  if ! sudo apt-get update \
+        -o Dir::Etc::sourcelist="$LIST" \
+        -o Dir::Etc::sourceparts="-" \
+        -o APT::Get::List-Cleanup="0"; then
+    err "apt-get update reported errors/warnings; continuing to install anyway."
+    err "If install fails, check ${APT_REPO_URL}/dists/stable/InRelease."
+  fi
+
   info "Installing Tablio..."
-  sudo apt-get install -y tablio
+  if ! sudo apt-get install -y tablio; then
+    err "apt-get install failed. Try: sudo apt-get install tablio   for details."
+    exit 1
+  fi
   ok "Tablio installed via APT"
 }
 
@@ -101,20 +128,39 @@ install_rpm() {
 
   need_cmd curl
 
-  sudo rpm --import "$RPM_KEY_URL"
+  if ! sudo rpm --import "$RPM_KEY_URL"; then
+    err "Failed to import signing key from ${RPM_KEY_URL}"
+    exit 1
+  fi
   ok "Imported signing key"
 
-  sudo curl -fsSL -o /etc/yum.repos.d/tablio.repo "$RPM_REPO_URL"
+  if ! sudo curl -fsSL -o /etc/yum.repos.d/tablio.repo "$RPM_REPO_URL"; then
+    err "Failed to download repo file from ${RPM_REPO_URL}"
+    exit 1
+  fi
   ok "Added repository"
 
   info "Installing Tablio..."
   if command -v dnf &>/dev/null; then
-    sudo dnf install -y tablio
+    if ! sudo dnf install -y --repo tablio tablio 2>/dev/null; then
+      if ! sudo dnf install -y tablio; then
+        err "dnf install failed. Try: sudo dnf install tablio   for details."
+        exit 1
+      fi
+    fi
   elif command -v zypper &>/dev/null; then
-    sudo zypper refresh
-    sudo zypper install -y tablio
+    sudo zypper --non-interactive refresh tablio \
+      || sudo zypper --non-interactive refresh \
+      || err "zypper refresh reported errors/warnings; continuing to install anyway."
+    if ! sudo zypper --non-interactive install -y tablio; then
+      err "zypper install failed. Try: sudo zypper install tablio   for details."
+      exit 1
+    fi
   else
-    sudo yum install -y tablio
+    if ! sudo yum install -y tablio; then
+      err "yum install failed. Try: sudo yum install tablio   for details."
+      exit 1
+    fi
   fi
 
   ok "Tablio installed via RPM"
