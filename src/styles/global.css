@@ -406,7 +406,7 @@ button {
   text-align: center;
 }
 
-.empty-state svg {
+.empty-state > svg {
   opacity: 0.3;
   color: var(--text-muted);
 }

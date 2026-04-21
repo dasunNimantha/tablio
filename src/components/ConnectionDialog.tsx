@@ -297,6 +297,7 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
         id: crypto.randomUUID(),
         name: `${editConfig.name} (copy)`,
         trust_server_cert: editConfig.trust_server_cert ?? false,
+        group: null,
       };
     }
     if (editConfig) {
@@ -555,12 +556,8 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
           )}
 
           {supportsTlsOptions && (
-            <section className="security-options" aria-label="Transport security">
+            <div className="security-options" aria-label="Transport security">
               <label className={`security-toggle${form.ssl ? " security-toggle--active" : ""}`}>
-                <span className="security-toggle__text">
-                  <span className="security-toggle__label">Use SSL / TLS</span>
-                  <span className="security-toggle__meta">encrypt connection</span>
-                </span>
                 <span className="security-toggle__control">
                   <input
                     className="security-toggle__input"
@@ -573,6 +570,9 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                   />
                   <span className="security-toggle__slider" aria-hidden="true" />
                 </span>
+                <span className="security-toggle__text">
+                  <span className="security-toggle__label">SSL / TLS</span>
+                </span>
               </label>
 
               <label
@@ -582,10 +582,6 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                   !form.ssl ? " security-toggle--disabled" : ""
                 }`}
               >
-                <span className="security-toggle__text">
-                  <span className="security-toggle__label">Trust server certificate</span>
-                  <span className="security-toggle__meta">self-signed only</span>
-                </span>
                 <span className="security-toggle__control">
                   <input
                     className="security-toggle__input"
@@ -596,8 +592,12 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                   />
                   <span className="security-toggle__slider" aria-hidden="true" />
                 </span>
+                <span className="security-toggle__text">
+                  <span className="security-toggle__label">Trust server certificate</span>
+                  <span className="security-toggle__meta">(self-signed)</span>
+                </span>
               </label>
-            </section>
+            </div>
           )}
 
           <GroupInput
