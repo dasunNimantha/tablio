@@ -1,0 +1,63 @@
+name: Deploy install script
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "install.sh"
+      - ".github/workflows/deploy-install-script.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deploy-install-script
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: source
+
+      - name: Checkout gh-pages branch
+        run: |
+          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          if git ls-remote --exit-code --heads "$REPO_URL" gh-pages >/dev/null 2>&1; then
+            git clone --depth 1 --branch gh-pages "$REPO_URL" gh-pages
+          else
+            mkdir -p gh-pages
+            pushd gh-pages
+            git init -b gh-pages
+            git remote add origin "$REPO_URL"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            echo "# Tablio Package Repositories" > README.md
+            touch .nojekyll
+            git add -A
+            git commit -m "Initialize gh-pages branch"
+            git push origin gh-pages
+            popd
+          fi
+
+      - name: Copy install.sh
+        run: |
+          cp source/install.sh gh-pages/install.sh
+          chmod 0644 gh-pages/install.sh
+
+      - name: Commit and push
+        run: |
+          cd gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add install.sh
+          if git diff --cached --quiet; then
+            echo "install.sh is already up to date on gh-pages"
+            exit 0
+          fi
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          git commit -m "Update install.sh from master@${SHORT_SHA}"
+          git push origin gh-pages

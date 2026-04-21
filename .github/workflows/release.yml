@@ -703,6 +703,11 @@ jobs:
           echo "RPM metadata generated successfully:"
           ls -la repodata/
 
+      - name: Sync install script to Pages
+        run: |
+          cp source/install.sh gh-pages/install.sh
+          chmod 0644 gh-pages/install.sh
+
       - name: Deploy to GitHub Pages
         run: |
           cd gh-pages

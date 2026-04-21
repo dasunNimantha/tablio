@@ -340,7 +340,7 @@
 .security-options {
   display: flex;
   align-items: center;
-  gap: 20px;
+  gap: 32px;
 }
 
 .security-toggle {
