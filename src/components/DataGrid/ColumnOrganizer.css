@@ -66,9 +66,85 @@
   color: var(--accent);
 }
 
+.col-organizer-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.col-organizer-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border) 92%, transparent);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.col-organizer-search:focus-within {
+  background: color-mix(in srgb, var(--bg-tertiary) 88%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--border)),
+    0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.col-organizer-search-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.col-organizer-search-input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  font-size: 13px;
+  color: var(--text-primary);
+  font-family: inherit;
+  padding: 0;
+  height: 34px;
+  min-width: 0;
+}
+
+.col-organizer-search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.col-organizer-search-clear {
+  width: 20px !important;
+  height: 20px !important;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.col-organizer-search-clear:hover {
+  color: var(--text-primary);
+}
+
+.col-organizer-search-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .col-organizer-list {
   overflow-y: auto;
   padding: 4px;
+}
+
+.col-organizer-empty {
+  padding: 16px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .col-organizer-item {
@@ -148,12 +224,25 @@
   font-size: 14px;
 }
 
+.col-organizer-tags {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
 .col-organizer-badge {
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 9px;
+  font-weight: 500;
   color: var(--accent);
   background: var(--accent-muted);
   padding: 1px 5px;
-  border-radius: var(--radius-xs);
+  border-radius: 3px;
+  letter-spacing: 0.03em;
   flex-shrink: 0;
+}
+
+.col-organizer-badge--fk {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 15%, transparent);
 }

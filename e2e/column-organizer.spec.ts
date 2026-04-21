@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { openTable } from "./helpers";
+import { navigateToTable, openTable } from "./helpers";
 
 test.describe("Column organizer", () => {
   test.beforeEach(async ({ page }) => {
@@ -30,6 +30,17 @@ test.describe("Column organizer", () => {
   test("PK columns have locked eye icon", async ({ page }) => {
     const pkItem = page.locator(".col-organizer-item.col-organizer-pk").first();
     await expect(pkItem.locator(".col-organizer-eye-locked")).toBeVisible();
+  });
+
+  test("FK columns show FK badge", async ({ page }) => {
+    await page.goto("/");
+    const tableNode = await navigateToTable(page, "orders");
+    await tableNode.click();
+    await page.locator(".grid-table-name", { hasText: "public.orders" }).waitFor({ timeout: 8000 });
+    await page.locator(".col-organizer-wrapper > button").click();
+    await page.locator(".col-organizer-dropdown").waitFor();
+    const fkItem = page.locator(".col-organizer-item", { hasText: "user_id" });
+    await expect(fkItem.locator(".col-organizer-badge--fk")).toHaveText("FK");
   });
 
   test("unchecking a non-PK column hides it and updates button text", async ({ page }) => {
@@ -93,5 +104,41 @@ test.describe("Column organizer", () => {
     await nonPkItems.nth(1).locator(".col-organizer-eye").click();
     const btn = page.locator(".col-organizer-wrapper > button");
     await expect(btn).toHaveClass(/active-filter/);
+  });
+
+  test("search input is present and auto-focused", async ({ page }) => {
+    const input = page.locator(".col-organizer-search-input");
+    await expect(input).toBeVisible();
+    await expect(input).toBeFocused();
+  });
+
+  test("search filters columns by name", async ({ page }) => {
+    const allBefore = await page.locator(".col-organizer-item").count();
+    const input = page.locator(".col-organizer-search-input");
+    const firstName = await page.locator(".col-organizer-item .col-organizer-name").first().textContent();
+    await input.fill(firstName!);
+    const allAfter = await page.locator(".col-organizer-item").count();
+    expect(allAfter).toBeLessThan(allBefore);
+    expect(allAfter).toBeGreaterThanOrEqual(1);
+  });
+
+  test("search disables drag handles", async ({ page }) => {
+    const input = page.locator(".col-organizer-search-input");
+    await input.fill("a");
+    const nonPkItem = page.locator(".col-organizer-item:not(.col-organizer-pk)").first();
+    if (await nonPkItem.isVisible()) {
+      await expect(nonPkItem).toHaveAttribute("draggable", "false");
+    }
+  });
+
+  test("clearing search restores all columns", async ({ page }) => {
+    const allBefore = await page.locator(".col-organizer-item").count();
+    const input = page.locator(".col-organizer-search-input");
+    await input.fill("xyz_no_match");
+    const filtered = await page.locator(".col-organizer-item").count();
+    expect(filtered).toBeLessThan(allBefore);
+    await input.fill("");
+    const allAfter = await page.locator(".col-organizer-item").count();
+    expect(allAfter).toBe(allBefore);
   });
 });

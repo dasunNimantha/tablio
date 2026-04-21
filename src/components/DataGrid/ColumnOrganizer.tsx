@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { Columns3, Eye, EyeOff, GripVertical, RotateCcw } from "lucide-react";
+import { Columns3, Eye, EyeOff, GripVertical, RotateCcw, Search, X } from "lucide-react";
 import type { ColumnInfo } from "../../lib/tauri";
 import "./ColumnOrganizer.css";
 
@@ -12,6 +12,7 @@ interface Props {
   columns: ColumnInfo[];
   settings: ColumnSettings;
   onChange: (settings: ColumnSettings) => void;
+  foreignKeyColumns?: ReadonlySet<string>;
 }
 
 function getStorageKey(connectionId: string, database: string, schema: string, table: string) {
@@ -89,7 +90,7 @@ export function applyColumnSettings(
   return { visibleIndices: ordered };
 }
 
-export function ColumnOrganizer({ columns, settings, onChange }: Props) {
+export function ColumnOrganizer({ columns, settings, onChange, foreignKeyColumns }: Props) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -97,9 +98,15 @@ export function ColumnOrganizer({ columns, settings, onChange }: Props) {
   const scrollTimerRef = useRef<number | null>(null);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+  const [search, setSearch] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setSearch("");
+      return;
+    }
+    requestAnimationFrame(() => searchRef.current?.focus());
     const handleClick = (e: MouseEvent) => {
       if (draggingRef.current) return;
       if (ref.current && !ref.current.contains(e.target as Node)) {
@@ -242,6 +249,11 @@ export function ColumnOrganizer({ columns, settings, onChange }: Props) {
 
   const nonPkNames = new Set(columns.filter((c) => !c.is_primary_key).map((c) => c.name));
   const hiddenCount = Array.from(settings.hidden).filter((n) => nonPkNames.has(n)).length;
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredPkColumns = pkColumns.filter((col) => !normalizedSearch || col.name.toLowerCase().includes(normalizedSearch));
+  const filteredNonPkOrder = nonPkOrder.filter((name) => !normalizedSearch || name.toLowerCase().includes(normalizedSearch));
+  const visibleColumnCount = filteredPkColumns.length + filteredNonPkOrder.length;
+  const isSearching = !!normalizedSearch;
 
   return (
     <div className="col-organizer-wrapper" ref={ref}>
@@ -273,16 +285,54 @@ export function ColumnOrganizer({ columns, settings, onChange }: Props) {
               </button>
             </div>
           </div>
+          <div className="col-organizer-search-row">
+            <div className="col-organizer-search">
+              <Search size={13} className="col-organizer-search-icon" />
+              <input
+                ref={searchRef}
+                className="col-organizer-search-input"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search columns..."
+              />
+              {search && (
+                <button
+                  type="button"
+                  className="btn-icon col-organizer-search-clear"
+                  onClick={() => setSearch("")}
+                  title="Clear search"
+                  aria-label="Clear search"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+            {normalizedSearch && (
+              <span className="col-organizer-search-count">
+                {visibleColumnCount} match{visibleColumnCount === 1 ? "" : "es"}
+              </span>
+            )}
+          </div>
           <div className="col-organizer-list" ref={listRef} onDragOver={handleListDragOver}>
-            {pkColumns.map((col) => (
+            {visibleColumnCount === 0 ? (
+              <div className="col-organizer-empty">No matching columns</div>
+            ) : (
+              <>
+            {filteredPkColumns.map((col) => (
               <div key={col.name} className="col-organizer-item col-organizer-pk">
-                <span className="col-organizer-grip-spacer" />
+                {!isSearching && <span className="col-organizer-grip-spacer" />}
                 <Eye size={13} className="col-organizer-eye-locked" />
                 <span className="col-organizer-name">{col.name}</span>
-                <span className="col-organizer-badge">PK</span>
+                <span className="col-organizer-tags">
+                  <span className="col-organizer-badge">PK</span>
+                  {foreignKeyColumns?.has(col.name) && (
+                    <span className="col-organizer-badge col-organizer-badge--fk">FK</span>
+                  )}
+                </span>
               </div>
             ))}
-            {nonPkOrder.map((name, idx) => {
+            {filteredNonPkOrder.map((name) => {
+              const idx = nonPkOrder.indexOf(name);
               const isHidden = settings.hidden.has(name);
               const isDragging = dragIdx === idx;
               const isDragOver = dragOverIdx === idx && dragIdx !== idx;
@@ -296,15 +346,17 @@ export function ColumnOrganizer({ columns, settings, onChange }: Props) {
                     isDragOver && "col-organizer-dragover",
                     isHidden && "col-organizer-hidden",
                   ].filter(Boolean).join(" ")}
-                  draggable
-                  onDragStart={(e) => handleDragStart(e, idx)}
-                  onDragOver={(e) => handleDragOver(e, idx)}
-                  onDrop={() => handleDrop(idx)}
-                  onDragEnd={handleDragEnd}
+                  draggable={!isSearching}
+                  onDragStart={isSearching ? undefined : (e) => handleDragStart(e, idx)}
+                  onDragOver={isSearching ? undefined : (e) => handleDragOver(e, idx)}
+                  onDrop={isSearching ? undefined : () => handleDrop(idx)}
+                  onDragEnd={isSearching ? undefined : handleDragEnd}
                 >
-                  <span className="col-organizer-grip">
-                    <GripVertical size={12} />
-                  </span>
+                  {!isSearching && (
+                    <span className="col-organizer-grip">
+                      <GripVertical size={12} />
+                    </span>
+                  )}
                   <button
                     className="btn-icon col-organizer-eye"
                     onClick={() => toggleVisibility(name)}
@@ -313,9 +365,16 @@ export function ColumnOrganizer({ columns, settings, onChange }: Props) {
                     {isHidden ? <EyeOff size={13} /> : <Eye size={13} />}
                   </button>
                   <span className="col-organizer-name">{name}</span>
+                  {foreignKeyColumns?.has(name) && (
+                    <span className="col-organizer-tags">
+                      <span className="col-organizer-badge col-organizer-badge--fk">FK</span>
+                    </span>
+                  )}
                 </div>
               );
             })}
+              </>
+            )}
           </div>
         </div>
       )}

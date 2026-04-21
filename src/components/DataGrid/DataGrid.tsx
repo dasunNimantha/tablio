@@ -802,12 +802,16 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     const sortModel = gridApiRef.current.getColumnState()
       .filter((c) => c.sort)
       .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
-    if (sortModel.length === 0) {
-      setSort(null);
-    } else {
-      const first = sortModel[0];
-      setSort({ column: first.colId, direction: first.sort as "asc" | "desc" });
-    }
+    const next: SortSpec | null = sortModel.length === 0
+      ? null
+      : { column: sortModel[0].colId, direction: sortModel[0].sort as "asc" | "desc" };
+    setSort((prev) => {
+      const same =
+        (prev === null && next === null) ||
+        (prev !== null && next !== null && prev.column === next.column && prev.direction === next.direction);
+      if (!same) setFilterLoading(true);
+      return next;
+    });
     setPage(0);
   }, []);
 
@@ -1068,6 +1072,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
               columns={data.columns}
               settings={colSettings}
               onChange={handleColSettingsChange}
+              foreignKeyColumns={new Set(fkMap.keys())}
             />
           )}
           <button
