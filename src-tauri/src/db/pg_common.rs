@@ -810,6 +810,7 @@ pub async fn pg_create_table(
     Ok(())
 }
 
+#[allow(clippy::collapsible_match)]
 pub async fn pg_alter_table(
     pool: &PgPool,
     _database: &str,

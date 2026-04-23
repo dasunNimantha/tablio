@@ -587,6 +587,7 @@ pub async fn my_create_table(
     Ok(())
 }
 
+#[allow(clippy::collapsible_match)]
 pub async fn my_alter_table(
     pool: &MySqlPool,
     database: &str,

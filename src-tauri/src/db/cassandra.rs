@@ -638,6 +638,7 @@ impl DatabaseDriver for CassandraDriver {
         Ok(())
     }
 
+    #[allow(clippy::collapsible_match)]
     async fn alter_table(
         &self,
         database: &str,
