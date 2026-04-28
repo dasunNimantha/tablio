@@ -889,7 +889,10 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           className={`tree-node ${isLeaf ? "leaf" : ""} ${isDefaultPartition ? "tree-node-default-partition" : ""}`}
           style={{ paddingLeft: depth * 12 + 6 }}
           onClick={() => {
-            if (isLeaf) {
+            // Partitioned parent tables are still tables — opening their data
+            // tab on a single click matches a regular table; expansion happens
+            // via the chevron (or double-click on a non-leaf branch type).
+            if (baseLeaf) {
               handleDoubleClick(node);
             } else {
               toggleExpand(node);
@@ -899,7 +902,13 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           onContextMenu={(e) => handleContextMenu(e, node)}
         >
           {!isLeaf && (
-            <span className="tree-chevron">
+            <span
+              className="tree-chevron"
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleExpand(node);
+              }}
+            >
               {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
             </span>
           )}
