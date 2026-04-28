@@ -121,7 +121,14 @@ impl DatabaseDriver for CockroachdbDriver {
     }
     async fn list_tables(&self, database: &str, schema: &str) -> Result<Vec<TableInfo>> {
         let pool = self.get_pool(database).await?;
-        pg_list_tables(&pool, database, schema).await
+        // CockroachDB exposes a pg_class shim but does NOT implement
+        // `pg_total_relation_size` or the `pg_partitioned_table` /
+        // `pg_get_expr(relpartbound, ...)` catalog calls that the enriched
+        // Postgres listing depends on. Use the basic variant so we get
+        // names and row-count estimates without erroring out on every
+        // missing function. CockroachDB's own zone-based partitioning is
+        // not surfaced as separate pg_class rows anyway.
+        pg_list_tables_basic(&pool, database, schema).await
     }
     async fn list_indexes(
         &self,
@@ -369,13 +376,23 @@ impl DatabaseDriver for CockroachdbDriver {
         table: &str,
     ) -> Result<TableStats> {
         let pool = self.get_pool(database).await?;
-        let sql = "SELECT c.relname AS table_name,
-                   GREATEST(c.reltuples, 0)::bigint AS row_count,
-                   pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size,
-                   pg_size_pretty(pg_indexes_size(c.oid)) AS index_size,
-                   pg_size_pretty(pg_relation_size(c.oid)) AS data_size
-                   FROM pg_class c
-                   JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
+        // CockroachDB doesn't implement `pg_size_pretty`,
+        // `pg_total_relation_size`, `pg_relation_size`, or `pg_indexes_size`,
+        // so we can't compute storage costs the Postgres way. We still
+        // resolve the table via the pg_class shim (so unknown tables
+        // surface as a clean "not found"), pull `reltuples` for an
+        // estimated row count, and report sizes as "N/A" — the same
+        // sentinel the Cassandra driver uses.
+        //
+        // CockroachDB exposes per-range storage data via
+        // `crdb_internal.ranges_no_leases`, but mapping a logical table
+        // back to its ranges is non-trivial and the result wouldn't map
+        // cleanly to PG's data/index/total breakdown. Sentinel strings
+        // are the honest answer here.
+        let sql = "SELECT c.relname AS table_name, \
+                   GREATEST(c.reltuples, 0)::bigint AS row_count \
+                   FROM pg_class c \
+                   JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1 \
                    WHERE c.relname = $2 AND c.relkind = 'r'";
         let row = sqlx::query(sql)
             .bind(schema)
@@ -387,9 +404,9 @@ impl DatabaseDriver for CockroachdbDriver {
         Ok(TableStats {
             table_name: row.get("table_name"),
             row_count: row.get("row_count"),
-            total_size: row.get("total_size"),
-            index_size: row.get("index_size"),
-            data_size: row.get("data_size"),
+            total_size: "N/A".to_string(),
+            index_size: "N/A".to_string(),
+            data_size: "N/A".to_string(),
             last_vacuum: None,
             last_analyze: None,
             dead_tuples: None,

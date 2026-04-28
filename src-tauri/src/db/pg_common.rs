@@ -374,11 +374,36 @@ pub async fn pg_list_tables(
     _database: &str,
     schema: &str,
 ) -> Result<Vec<TableInfo>> {
+    // Enriched-with-partitions/storage variant for real PostgreSQL.
+    pg_list_tables_inner(pool, schema, true).await
+}
+
+/// Basic table listing without the PostgreSQL-only catalog enrichment.
+///
+/// Drivers such as CockroachDB share the `pg_class` shim but do **not**
+/// implement `pg_total_relation_size`, `pg_partitioned_table`, or
+/// `pg_get_expr(relpartbound, ...)` — calling them produces
+/// `unknown function: pg_total_relation_size()` and breaks the entire
+/// query. This entry point returns just `name`, `schema`, `table_type`,
+/// and `row_count_estimate`; callers must accept that the partition and
+/// storage fields on `TableInfo` will be `None`.
+pub async fn pg_list_tables_basic(
+    pool: &PgPool,
+    _database: &str,
+    schema: &str,
+) -> Result<Vec<TableInfo>> {
+    pg_list_tables_inner(pool, schema, false).await
+}
+
+async fn pg_list_tables_inner(pool: &PgPool, schema: &str, enrich: bool) -> Result<Vec<TableInfo>> {
     // We pull table_type from information_schema (which is friendly and
-    // distinguishes BASE TABLE / VIEW), then enrich with partition metadata
-    // from pg_class / pg_partitioned_table / pg_inherits.
+    // distinguishes BASE TABLE / VIEW), then optionally enrich with
+    // partition metadata from pg_class / pg_partitioned_table / pg_inherits
+    // and a storage-size column. The enrichment is gated on `enrich`
+    // because CockroachDB's pg_class shim doesn't ship the size functions
+    // or the partition catalogs.
     //
-    // Notes:
+    // Notes (enriched mode):
     //  - relkind 'p' => partitioned parent. partstrat in pg_partitioned_table
     //    is 'r' (range), 'l' (list), 'h' (hash).
     //  - relispartition = true on partition children. We resolve the parent
@@ -388,6 +413,44 @@ pub async fn pg_list_tables(
     //    or "DEFAULT" for the default partition.
     //  - pg_total_relation_size includes indexes + toast; for partitioned
     //    parents that's the sum across children.
+    if !enrich {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                t.table_name,
+                t.table_type,
+                COALESCE(c.reltuples::bigint, 0) AS row_estimate
+            FROM information_schema.tables t
+            LEFT JOIN pg_namespace n
+                   ON n.nspname = t.table_schema
+            LEFT JOIN pg_class c
+                   ON c.relname = t.table_name
+                  AND c.relnamespace = n.oid
+                  AND c.relkind IN ('r','v','m','f','p')
+            WHERE t.table_schema = $1
+            ORDER BY t.table_name
+            "#,
+        )
+        .bind(schema)
+        .fetch_all(pool)
+        .await?;
+
+        return Ok(rows
+            .iter()
+            .map(|r| TableInfo {
+                name: r.get("table_name"),
+                schema: schema.to_string(),
+                table_type: r.get("table_type"),
+                row_count_estimate: r.try_get("row_estimate").ok(),
+                parent_table: None,
+                partition_strategy: None,
+                partition_bound: None,
+                is_default_partition: None,
+                total_bytes: None,
+            })
+            .collect());
+    }
+
     let rows = sqlx::query(
         r#"
         SELECT
