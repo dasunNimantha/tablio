@@ -1404,11 +1404,16 @@ async fn crdb_get_table_stats() {
     let stats = driver.get_table_stats(&db, SCHEMA, &tbl).await.unwrap();
     assert_eq!(stats.table_name, tbl);
     // Some CockroachDB versions return reltuples=0 until ANALYZE/auto-stats
-    // catches up; we only assert the field is non-negative and the size
-    // labels are populated to keep the test robust across versions.
+    // catches up; we only assert the field is non-negative.
     assert!(stats.row_count >= 0);
-    assert!(!stats.total_size.is_empty(), "total_size should be set");
-    assert!(!stats.data_size.is_empty(), "data_size should be set");
+    // CockroachDB's pg_class shim does not implement pg_size_pretty /
+    // pg_total_relation_size, so the driver intentionally reports sizes
+    // as the sentinel "N/A". Pin that contract — if a future driver
+    // version starts computing real sizes, this test should be updated
+    // deliberately rather than silently start returning real bytes.
+    assert_eq!(stats.total_size, "N/A");
+    assert_eq!(stats.data_size, "N/A");
+    assert_eq!(stats.index_size, "N/A");
 
     driver
         .drop_object(&db, SCHEMA, &tbl, "TABLE")
