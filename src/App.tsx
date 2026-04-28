@@ -17,6 +17,7 @@ import { useTabStore } from "./stores/tabStore";
 import { loader } from "@monaco-editor/react";
 import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick } from "lucide-react";
 import { themes, getThemeById, applyTheme } from "./lib/themes";
+import { syncMonacoTheme } from "./lib/monacoTheme";
 import { api } from "./lib/tauri";
 
 const SIDEBAR_WIDTH_MIN = 200;
@@ -174,7 +175,17 @@ export default function App() {
 
   useEffect(() => {
     const warmMonaco = () => {
-      void loader.init().catch(() => {});
+      void loader
+        .init()
+        .then((monaco) => {
+          // Register tablio-dark-0 / tablio-light-0 up-front so the first
+          // <Editor> paint doesn't fall back to Monaco's default white "vs"
+          // theme while beforeMount has not yet run.
+          try {
+            syncMonacoTheme(monaco, 0);
+          } catch {}
+        })
+        .catch(() => {});
     };
 
     if (typeof window.requestIdleCallback === "function") {

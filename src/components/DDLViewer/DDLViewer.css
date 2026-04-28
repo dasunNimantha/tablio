@@ -25,6 +25,8 @@
 .ddl-editor-wrapper {
   flex: 1;
   overflow: hidden;
+  /* Prevent a white flash before Monaco mounts and applies our custom theme. */
+  background: var(--bg-primary);
 }
 
 /* Match QueryConsole: one rounded hover surface (Monaco adds a square outer frame) */

@@ -55,6 +55,8 @@
   zoom: calc(1 / var(--app-zoom, 1));
   width: calc(100% * var(--app-zoom, 1));
   height: calc(100% * var(--app-zoom, 1));
+  /* Prevent a white flash before Monaco mounts and applies our custom theme. */
+  background: var(--bg-primary);
 }
 
 /* Monaco suggest widget styling */

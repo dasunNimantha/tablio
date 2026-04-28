@@ -79,7 +79,7 @@
 
 .activity-query {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-secondary);
   max-width: 360px;
   overflow: hidden;
@@ -88,7 +88,7 @@
 }
 
 .activity-state {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   padding: 2px 8px;
   border-radius: var(--radius-lg);
@@ -380,7 +380,7 @@
 
 /* Sessions */
 .session-active-badge {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--success);
   background: rgba(61, 214, 140, 0.10);
@@ -398,7 +398,7 @@
 }
 
 .lock-granted-badge {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   padding: 2px 8px;
   border-radius: var(--radius-lg);
@@ -416,7 +416,7 @@
 }
 
 .lock-waiting-badge {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--warning);
   background: rgba(245, 183, 49, 0.10);
@@ -428,7 +428,7 @@
 }
 
 .lock-granted-count {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--success);
   background: rgba(61, 214, 140, 0.10);
@@ -438,13 +438,13 @@
 
 .lock-mode {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
 .lock-relation {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--accent);
 }
 
@@ -462,6 +462,67 @@
 
 .sortable-th:hover {
   color: var(--text-primary);
+}
+
+/* ── Shared dashboard table (Sessions / Locks / Config) ──────────────
+   Both DashboardSessions and DashboardLocks render
+   `<table className="info-table">` but no rule below `.info-table` ever
+   styled the table itself — it was inheriting browser defaults, which
+   made it shrink to its content width and gave the State / Granted
+   badge cells zero horizontal padding so the badges abutted neighboring
+   cells. */
+.info-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: auto;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.info-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-secondary);
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.info-table tbody td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  vertical-align: middle;
+  line-height: 1.4;
+}
+
+.info-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+.info-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Numeric / secondary columns. Mono font + dim color, used for PID,
+   Duration, client address, etc. */
+.info-cell-muted {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Action / icon trailing column should stay compact. */
+.info-table tbody td:last-child .btn-icon {
+  display: inline-flex;
 }
 
 @media (max-width: 980px) {
@@ -551,7 +612,7 @@
 }
 
 .config-category-count {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   background: var(--bg-hover);
   padding: 1px 6px;
@@ -581,7 +642,7 @@
 }
 
 .config-context-badge {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   background: var(--bg-hover);
   padding: 1px 6px;
