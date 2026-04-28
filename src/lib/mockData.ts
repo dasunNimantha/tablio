@@ -73,14 +73,19 @@ export const mockSchemas: SchemaInfo[] = [
 ];
 
 export const mockTables: TableInfo[] = [
-  { name: "users", schema: "public", table_type: "BASE TABLE", row_count_estimate: 15420 },
-  { name: "orders", schema: "public", table_type: "BASE TABLE", row_count_estimate: 184320 },
-  { name: "products", schema: "public", table_type: "BASE TABLE", row_count_estimate: 2560 },
-  { name: "categories", schema: "public", table_type: "BASE TABLE", row_count_estimate: 48 },
-  { name: "order_items", schema: "public", table_type: "BASE TABLE", row_count_estimate: 523100 },
-  { name: "reviews", schema: "public", table_type: "BASE TABLE", row_count_estimate: 67800 },
+  { name: "users", schema: "public", table_type: "BASE TABLE", row_count_estimate: 15420, total_bytes: 344064 },
+  { name: "products", schema: "public", table_type: "BASE TABLE", row_count_estimate: 2560, total_bytes: 131072 },
+  { name: "categories", schema: "public", table_type: "BASE TABLE", row_count_estimate: 48, total_bytes: 16384 },
+  { name: "order_items", schema: "public", table_type: "BASE TABLE", row_count_estimate: 523100, total_bytes: 41943040 },
+  { name: "reviews", schema: "public", table_type: "BASE TABLE", row_count_estimate: 67800, total_bytes: 8388608 },
   { name: "active_users_view", schema: "public", table_type: "VIEW", row_count_estimate: null },
   { name: "order_summary_view", schema: "public", table_type: "VIEW", row_count_estimate: null },
+  // Partitioned: orders by RANGE(created_at)
+  { name: "orders", schema: "public", table_type: "BASE TABLE", row_count_estimate: 184320, partition_strategy: "range" },
+  { name: "orders_2025_q4", schema: "public", table_type: "BASE TABLE", row_count_estimate: 60100, total_bytes: 5242880, parent_table: "public.orders", partition_bound: "2025-10-01 \u2192 2026-01-01", is_default_partition: false },
+  { name: "orders_2026_q1", schema: "public", table_type: "BASE TABLE", row_count_estimate: 58400, total_bytes: 4980736, parent_table: "public.orders", partition_bound: "2026-01-01 \u2192 2026-04-01", is_default_partition: false },
+  { name: "orders_2026_q2", schema: "public", table_type: "BASE TABLE", row_count_estimate: 65820, total_bytes: 6291456, parent_table: "public.orders", partition_bound: "2026-04-01 \u2192 2026-07-01", is_default_partition: false },
+  { name: "orders_default", schema: "public", table_type: "BASE TABLE", row_count_estimate: 0, total_bytes: 98304, parent_table: "public.orders", partition_bound: null, is_default_partition: true },
 ];
 
 const usersColumns: ColumnInfo[] = [

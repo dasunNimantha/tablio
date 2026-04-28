@@ -8,7 +8,7 @@ test.describe("Data grid — toolbar", () => {
   });
 
   test("toolbar shows schema.table name", async ({ page }) => {
-    await expect(page.locator(".grid-table-name")).toContainText("public.users");
+    await expect(page.locator(".tv-name")).toContainText("public.users");
   });
 
   test("filter button toggles filter bar", async ({ page }) => {
@@ -20,7 +20,7 @@ test.describe("Data grid — toolbar", () => {
 
   test("refresh button reloads data without error", async ({ page }) => {
     await page.locator(".btn-ghost[title='Refresh now']").click();
-    await expect(page.locator(".grid-table-name")).toBeVisible();
+    await expect(page.locator(".tv-name")).toBeVisible();
     await expect(page.locator(".grid-error")).not.toBeVisible();
   });
 

@@ -1,0 +1,416 @@
+.pv {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+.pv-loading,
+.pv-error,
+.pv-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-muted);
+  padding: 32px;
+}
+
+.pv-error {
+  color: var(--error);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+/* ---------- Header ---------- */
+.pv-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.pv-header-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.pv-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pv-header-count {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.pv-header-stats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.pv-header-stats strong {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.pv-header-sep {
+  opacity: 0.4;
+}
+
+/* ---------- Chips ---------- */
+.pv-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  flex-shrink: 0;
+  line-height: 1;
+}
+.pv-chip-strategy-range { background: rgba(91, 155, 213, 0.18); color: #8ab8e0; }
+.pv-chip-strategy-list  { background: rgba(196, 123, 176, 0.18); color: #d4a4c5; }
+.pv-chip-strategy-hash  { background: rgba(232, 168, 56, 0.18); color: #e6c285; }
+.pv-chip-default {
+  background: rgba(232, 168, 56, 0.14);
+  color: #e6c285;
+  text-transform: uppercase;
+}
+.pv-chip-inline {
+  margin-left: 6px;
+  font-size: 9px;
+  height: 14px;
+  padding: 0 5px;
+}
+
+/* ---------- Warnings strip ---------- */
+.pv-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, #e6a546 7%, transparent);
+}
+
+.pv-warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #e6a546;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.pv-warning code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  background: rgba(232, 168, 56, 0.1);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.pv-warning strong {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Toolbar ---------- */
+.pv-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+
+.pv-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 1 280px;
+  height: 30px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 10px;
+  color: var(--text-muted);
+}
+
+.pv-search:focus-within {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.pv-search input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  min-width: 0;
+  padding: 0;
+  height: 100%;
+}
+
+.pv-search-clear {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  padding: 0;
+}
+.pv-search-clear:hover { color: var(--text-primary); }
+
+.pv-toolbar-info {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* ---------- Table ---------- */
+.pv-table-wrapper {
+  flex: 1;
+  overflow: auto;
+}
+
+.pv-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  /* Fixed layout plus <colgroup> keeps header/body alignment stable
+   * while still letting the table use the full available width. */
+  table-layout: fixed;
+}
+
+.pv-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  padding: 8px 12px;
+  user-select: none;
+  z-index: 1;
+}
+
+.pv-th-sortable {
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pv-th-sortable:hover {
+  color: var(--text-primary);
+}
+
+/* Inline-flex wrapper around the label + sort icon. Keeping the icon in
+ * a flex sibling lets us flip the visual order via flex-direction for
+ * right-aligned numeric columns, so the label's right edge lines up
+ * with the values' right edge instead of being pushed left by the
+ * trailing sort icon. */
+.pv-th-content {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 4px;
+}
+
+.pv-th-num {
+  text-align: right;
+}
+
+.pv-th-num .pv-th-content {
+  flex-direction: row-reverse;
+  justify-content: flex-start;
+}
+
+.pv-th-share .pv-th-content {
+  justify-content: flex-start;
+}
+
+/* Explicit column widths keep headings and values visually connected.
+ * These are applied via <colgroup>, so the header and body share the
+ * exact same sizing model. */
+.pv-col-name { width: 28%; }
+.pv-col-bound { width: 26%; }
+.pv-col-rows { width: 12%; }
+.pv-col-size { width: 12%; }
+.pv-col-share { width: 22%; }
+
+.pv-sort-icon-muted {
+  opacity: 0.4;
+}
+
+.pv-row {
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  transition: background 0.1s ease;
+}
+
+.pv-row:hover {
+  background: var(--bg-hover);
+  cursor: pointer;
+}
+
+.pv-row-warning {
+  background: rgba(232, 168, 56, 0.04);
+}
+
+.pv-row-warning:hover {
+  background: rgba(232, 168, 56, 0.09);
+}
+
+.pv-table td {
+  padding: 7px 12px;
+  vertical-align: middle;
+}
+
+/* Header/body alignment: the same columns get the same horizontal
+ * alignment rules. Without these explicit nth-child rules, the sort
+ * icon wrappers and flex cells can make labels and values appear offset
+ * even though the table columns themselves are sized correctly. */
+.pv-table th:nth-child(3),
+.pv-table th:nth-child(4),
+.pv-table td:nth-child(3),
+.pv-table td:nth-child(4) {
+  text-align: right;
+}
+
+.pv-table th:nth-child(5),
+.pv-table td:nth-child(5) {
+  text-align: left;
+}
+
+.pv-td-name {
+  font-weight: 500;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* The bare name text inside the flex row -- needs to ellipsize on
+ * narrow columns instead of forcing the cell wider than the fixed
+ * column width. */
+.pv-td-name > span:first-of-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.pv-td-name-icon {
+  color: #c47bb0;
+  flex-shrink: 0;
+}
+
+.pv-td-bound code {
+  font-family: var(--font-mono, ui-monospace, "SFMono-Regular", Menlo, monospace);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 1px 6px;
+  border-radius: 3px;
+  /* Long range bounds (FROM (...) TO (...)) wrap inside the chip
+   * rather than being clipped or pushing the column wider. */
+  white-space: normal;
+  word-break: break-word;
+  display: inline-block;
+  max-width: 100%;
+}
+
+.pv-td-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.pv-td-share {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pv-share-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.05));
+  border-radius: 3px;
+  overflow: hidden;
+  min-width: 60px;
+}
+
+.pv-share-fill {
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    rgba(91, 155, 213, 0.5),
+    rgba(91, 155, 213, 0.85)
+  );
+  border-radius: 3px;
+}
+
+.pv-row-warning .pv-share-fill {
+  background: linear-gradient(
+    90deg,
+    rgba(232, 168, 56, 0.5),
+    rgba(232, 168, 56, 0.85)
+  );
+}
+
+.pv-share-text {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  font-size: 11px;
+  width: 38px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.pv-empty-row {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.pv-match-count {
+  font-variant-numeric: tabular-nums;
+}

@@ -28,7 +28,7 @@ test.describe("Export menu", () => {
   test("clicking outside closes dropdown", async ({ page }) => {
     await page.locator(".export-menu-wrapper .btn-ghost").click();
     await expect(page.locator(".export-menu-dropdown")).toBeVisible();
-    await page.locator(".grid-table-name").click();
+    await page.locator(".tv-name").click();
     await expect(page.locator(".export-menu-dropdown")).not.toBeVisible();
   });
 });

@@ -27,21 +27,163 @@ import {
   Check,
   X,
   Layers,
+  AlertTriangle,
+  GitBranch,
 } from "lucide-react";
 import "./Sidebar.css";
 
 const MAX_FOLDER_NAME_LENGTH = 50;
+/** When the largest partition is >= this multiple of the median, we badge
+ *  the parent as skewed. Picked conservatively so that small fixtures with
+ *  natural variance (e.g. one ~3x partition) don't false-positive. */
+const PARTITION_SKEW_RATIO = 5;
+
+/** Buckets a flat TableInfo[] into top-level rows + a parent->children map.
+ *  A row is "top-level" when it has no `parent_table` *or* its parent isn't
+ *  in the same schema (which we treat as orphan and surface at top). */
+const groupTablesByParent = (tables: TableInfo[], schema: string) => {
+  const childrenByParent: Map<string, TableInfo[]> = new Map();
+  const topLevel: TableInfo[] = [];
+  for (const t of tables) {
+    const parentKey = t.parent_table ?? null;
+    const parentInSameSchema = parentKey?.startsWith(`${schema}.`) ?? false;
+    if (parentKey && parentInSameSchema) {
+      const arr = childrenByParent.get(parentKey) ?? [];
+      arr.push(t);
+      childrenByParent.set(parentKey, arr);
+    } else {
+      topLevel.push(t);
+    }
+  }
+  return { topLevel, childrenByParent };
+};
+
+/** Returns true if (max non-empty partition size / median non-empty size)
+ *  exceeds PARTITION_SKEW_RATIO. Ignores empty partitions so a brand-new
+ *  partition coming online doesn't trigger the warning. */
+const detectSizeSkew = (children: TableInfo[]): boolean => {
+  const sizes = children
+    .map((c) => c.total_bytes ?? 0)
+    .filter((s) => s > 0)
+    .sort((a, b) => a - b);
+  if (sizes.length < 3) return false;
+  const median = sizes[Math.floor(sizes.length / 2)];
+  const max = sizes[sizes.length - 1];
+  return median > 0 && max / median >= PARTITION_SKEW_RATIO;
+};
+
+/** Recursively build a TreeNode for a single TableInfo. If the table is a
+ *  partitioned parent, also eagerly build a synthetic "Partitions"
+ *  collection containing all of its direct children (and, recursively,
+ *  their own Partitions collections for sub-partitioning). The pre-built
+ *  subtree gets attached so the user just expands the chevron and sees it
+ *  immediately — no extra round-trip to the backend. */
+const buildTableNode = (
+  table: TableInfo,
+  parentBaseId: string,
+  connectionId: string,
+  connectionColor: string,
+  database: string | undefined,
+  schema: string | undefined,
+  childrenByParent: Map<string, TableInfo[]>,
+): TreeNode => {
+  const qualified = `${schema}.${table.name}`;
+  const directChildren = childrenByParent.get(qualified) ?? [];
+  const isPartitionedParent = !!table.partition_strategy && directChildren.length > 0;
+  const tableId = `${parentBaseId}:${table.name}`;
+
+  let partitionGroupChildren: TreeNode[] | undefined;
+  if (isPartitionedParent) {
+    const baseId = `${tableId}:partitions`;
+    partitionGroupChildren = directChildren.map((child) =>
+      buildTableNode(
+        child,
+        baseId,
+        connectionId,
+        connectionColor,
+        database,
+        schema,
+        childrenByParent,
+      ),
+    );
+  }
+
+  const defaultChild = directChildren.find((p) => p.is_default_partition);
+  return {
+    id: tableId,
+    label: table.name,
+    type: "table",
+    connectionId,
+    connectionColor,
+    database,
+    schema,
+    tableName: table.name,
+    tableType: table.table_type,
+    partitionStrategy: table.partition_strategy ?? null,
+    partitionBound: table.partition_bound ?? null,
+    isDefaultPartition: !!table.is_default_partition,
+    rowCountEstimate: table.row_count_estimate,
+    totalBytes: table.total_bytes ?? null,
+    preloadedChildren: partitionGroupChildren
+      ? [
+          {
+            id: `${tableId}:partitions`,
+            label: "Partitions",
+            type: "partition-group",
+            connectionId,
+            connectionColor,
+            database,
+            schema,
+            tableName: table.name,
+            preloadedChildren: partitionGroupChildren,
+          },
+        ]
+      : undefined,
+    hasSkewWarning: isPartitionedParent ? detectSizeSkew(directChildren) : false,
+    hasDefaultPartitionRows:
+      isPartitionedParent && !!defaultChild && (defaultChild.row_count_estimate ?? 0) > 0,
+  };
+};
 
 interface TreeNode {
   id: string;
   label: string;
-  type: "connection" | "database" | "schema" | "table-group" | "view-group" | "function-group" | "table" | "view" | "function";
+  type:
+    | "connection"
+    | "database"
+    | "schema"
+    | "table-group"
+    | "view-group"
+    | "function-group"
+    | "partition-group"
+    | "table"
+    | "view"
+    | "function";
   connectionId: string;
   connectionColor: string;
   database?: string;
   schema?: string;
   tableName?: string;
   tableType?: string;
+  /** Partition strategy when this node represents a partitioned parent. */
+  partitionStrategy?: "range" | "list" | "hash" | null;
+  /** Human-readable bound when this node is a partition child. */
+  partitionBound?: string | null;
+  /** True when this is the DEFAULT partition. */
+  isDefaultPartition?: boolean;
+  /** Estimated row count for tables / partitions. */
+  rowCountEstimate?: number | null;
+  /** Disk size including indexes/toast (bytes) for tables / partitions. */
+  totalBytes?: number | null;
+  /** Set on partitioned-parent nodes: the partition children, used to build
+      the synthetic Partitions sub-collection on expand. */
+  partitionChildren?: TableInfo[];
+  /** Set on partition-group nodes: pre-built children to render. */
+  preloadedChildren?: TreeNode[];
+  /** True if a partitioned parent shows skewed sizes across its partitions. */
+  hasSkewWarning?: boolean;
+  /** True if the DEFAULT partition under this parent has rows in it. */
+  hasDefaultPartitionRows?: boolean;
 }
 
 interface ContextMenuState {
@@ -376,16 +518,31 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
             node.schema!
           );
           const isTableGroup = node.type === "table-group";
-          children = tables
-            .filter((t) =>
-              isTableGroup
-                ? t.table_type === "BASE TABLE"
-                : t.table_type === "VIEW"
-            )
-            .map((t) => ({
+          const filtered = tables.filter((t) =>
+            isTableGroup ? t.table_type === "BASE TABLE" : t.table_type === "VIEW"
+          );
+
+          if (isTableGroup) {
+            // Partition children are hidden from the flat Tables list and
+            // surface only inside their parent's "Partitions" sub-collection.
+            const { topLevel, childrenByParent } = groupTablesByParent(filtered, node.schema!);
+            const baseId = `${node.connectionId}:${node.database}:${node.schema}`;
+            children = topLevel.map((t) =>
+              buildTableNode(
+                t,
+                baseId,
+                node.connectionId,
+                node.connectionColor,
+                node.database,
+                node.schema,
+                childrenByParent,
+              )
+            );
+          } else {
+            children = filtered.map((t) => ({
               id: `${node.connectionId}:${node.database}:${node.schema}:${t.name}`,
               label: t.name,
-              type: isTableGroup ? ("table" as const) : ("view" as const),
+              type: "view" as const,
               connectionId: node.connectionId,
               connectionColor: node.connectionColor,
               database: node.database,
@@ -393,6 +550,15 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
               tableName: t.name,
               tableType: t.table_type,
             }));
+          }
+        } else if (
+          (node.type === "partition-group" || node.type === "table") &&
+          node.preloadedChildren
+        ) {
+          // Partition tree was pre-built recursively at table-group expand
+          // time (see buildTableNode). Hand the children straight back —
+          // no extra backend call.
+          children = node.preloadedChildren;
         }
 
         setChildrenMap((prev) => ({ ...prev, [nodeId]: children }));
@@ -522,17 +688,26 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     openTab(tab);
   };
 
-  const handleViewStructure = (node: TreeNode) => {
-    const tabId = `structure:${node.connectionId}:${node.database}:${node.schema}:${node.tableName}`;
+  /**
+   * Opens the unified per-table tab and focuses a specific sub-tab inside
+   * the TableView. Used by both right-click "Open Inspector" (subTab =
+   * "columns") and the partition strategy chip (subTab = "partitions").
+   * If the table tab is already open, it activates and switches sub-tab
+   * in place — no duplicate tabs.
+   */
+  const openTableTabAt = (node: TreeNode, subTab: string) => {
+    if (!node.tableName) return;
+    const tabId = `table:${node.connectionId}:${node.database}:${node.schema}:${node.tableName}`;
     const tab: TabInfo = {
       id: tabId,
-      type: "structure",
-      title: `Structure: ${node.tableName}`,
+      type: "table",
+      title: node.tableName,
       connectionId: node.connectionId,
       connectionColor: node.connectionColor,
       database: node.database!,
       schema: node.schema!,
       table: node.tableName,
+      subTab,
     };
     openTab(tab);
   };
@@ -596,17 +771,21 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     });
   };
 
-  const handleViewStats = (node: TreeNode) => {
-    const tabId = `stats:${node.connectionId}:${node.database}:${node.schema}:${node.tableName}`;
+  const handleOpenPartitions = (node: TreeNode) => {
+    if (!node.tableName) return;
+    // Partitions are now a sub-tab of the unified table view, so this
+    // routes through the same single tab as Data/Columns/Indexes/etc.
+    const tabId = `table:${node.connectionId}:${node.database}:${node.schema}:${node.tableName}`;
     const tab: TabInfo = {
       id: tabId,
-      type: "stats",
-      title: `Stats: ${node.tableName}`,
+      type: "table",
+      title: node.tableName,
       connectionId: node.connectionId,
       connectionColor: node.connectionColor,
       database: node.database!,
       schema: node.schema!,
       table: node.tableName,
+      subTab: "schema:partitions",
     };
     openTab(tab);
   };
@@ -647,8 +826,15 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   };
 
   const renderNode = (node: TreeNode, depth: number) => {
-    const children = childrenMap[node.id];
-    const isLeaf = node.type === "table" || node.type === "view" || node.type === "function";
+    // A node is expandable when it ships preloadedChildren (partitioned
+    // parent / partition-group) or when it's a non-leaf branch type.
+    const isPartitionedParent = node.type === "table" && !!node.preloadedChildren;
+    const baseLeaf =
+      node.type === "table" || node.type === "view" || node.type === "function";
+    const isLeaf = baseLeaf && !isPartitionedParent;
+    const children = isPartitionedParent
+      ? node.preloadedChildren!
+      : childrenMap[node.id];
     const q = searchQuery.trim().toLowerCase();
     const selfMatches = hasActiveFilter && q && node.label.toLowerCase().includes(q);
     const descendantMatches = hasActiveFilter && !selfMatches && children?.some((c) => nodeMatchesFilter(c, q));
@@ -670,6 +856,8 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           return { icon: <Eye size={15} />, cls: "icon-view" };
         case "function":
           return { icon: <Zap size={15} />, cls: "icon-function" };
+        case "partition-group":
+          return { icon: <GitBranch size={15} />, cls: "icon-partition-group" };
         case "table-group":
         case "view-group":
         case "function-group":
@@ -680,10 +868,25 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     };
     const iconInfo = getIconInfo();
 
+    // Sidebar shows only the lightweight summary: a strategy chip on the
+    // partitioned parent, a "default" chip and italic on default partitions,
+    // a warning icon when the parent has problems, and a count on the
+    // Partitions sub-collection. Row count and size are intentionally omitted
+    // because the row count is a stale planner estimate that confuses users
+    // when it disagrees with a live COUNT(*); both metrics live in the
+    // Schema page and the Partitions tab where they can be presented
+    // accurately and with the context that they're estimates.
+    const isDefaultPartition = node.type === "table" && !!node.isDefaultPartition;
+    const showStrategyChip = isPartitionedParent && !!node.partitionStrategy;
+    const showWarning = node.hasDefaultPartitionRows || node.hasSkewWarning;
+
+    const partitionGroupCount =
+      node.type === "partition-group" ? children?.length ?? 0 : null;
+
     return (
       <div key={node.id}>
         <div
-          className={`tree-node ${isLeaf ? "leaf" : ""}`}
+          className={`tree-node ${isLeaf ? "leaf" : ""} ${isDefaultPartition ? "tree-node-default-partition" : ""}`}
           style={{ paddingLeft: depth * 12 + 6 }}
           onClick={() => {
             if (isLeaf) {
@@ -705,6 +908,38 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
             {iconInfo.icon}
           </span>
           <span className="tree-label">{node.label}</span>
+          {showStrategyChip && (
+            <button
+              className={`tree-chip tree-chip-partition-${node.partitionStrategy} tree-chip-clickable`}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleOpenPartitions(node);
+              }}
+              title="Open Partitions view"
+            >
+              {node.partitionStrategy}
+            </button>
+          )}
+          {isDefaultPartition && (
+            <span className="tree-chip tree-chip-default" title="Default partition">
+              default
+            </span>
+          )}
+          {partitionGroupCount != null && partitionGroupCount > 0 && (
+            <span className="tree-meta">{partitionGroupCount}</span>
+          )}
+          {showWarning && (
+            <span
+              className="tree-warning"
+              title={
+                node.hasDefaultPartitionRows
+                  ? "Default partition has rows — likely a bound mismatch"
+                  : "Partition sizes are skewed"
+              }
+            >
+              <AlertTriangle size={12} />
+            </span>
+          )}
           {node.type === "database" && (
             <button
               className="btn-icon tree-action"
@@ -764,8 +999,8 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         },
       });
       items.push({
-        label: "View Structure",
-        action: () => handleViewStructure(node),
+        label: "View Schema",
+        action: () => openTableTabAt(node, "schema"),
       });
       items.push({
         label: "View DDL",
@@ -779,10 +1014,6 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         items.push({
           label: "Alter Table",
           action: () => onAlterTable?.(node.connectionId, node.connectionColor, node.database!, node.schema!, node.tableName!),
-        });
-        items.push({
-          label: "View Stats",
-          action: () => handleViewStats(node),
         });
         items.push({
           label: "Import Data",
@@ -1064,7 +1295,9 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       const textMatch = !q || node.label.toLowerCase().includes(q);
       if (textMatch && (node.type === "table" || node.type === "view" || node.type === "function")) return true;
       if (textMatch && !q && node.type !== "table" && node.type !== "view" && node.type !== "function") return true;
-      const children = childrenMap[node.id];
+      // preloadedChildren is populated synchronously for partition trees;
+      // childrenMap for everything else that's been expanded at least once.
+      const children = node.preloadedChildren ?? childrenMap[node.id];
       if (children) {
         return children.some((child) => nodeMatchesFilter(child, q));
       }

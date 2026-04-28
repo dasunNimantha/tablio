@@ -1,14 +1,36 @@
 import { useTabStore } from "../../stores/tabStore";
 import { useShallow } from "zustand/react/shallow";
-import { DataGrid } from "../DataGrid/DataGrid";
 import { QueryConsole } from "../QueryConsole/QueryConsole";
 import { DDLViewer } from "../DDLViewer/DDLViewer";
-import { TableInfo } from "../TableInfo/TableInfo";
 import { ActivityDashboard } from "../Activity/ActivityDashboard";
 import { TableStats } from "../TableStats/TableStats";
 import { RoleManager } from "../RoleManager/RoleManager";
 import { ERDView } from "../ERD/ERDView";
 import { QueryStats } from "../QueryStats/QueryStats";
+import { TableView, TableSubTab } from "../TableView/TableView";
+
+// Map legacy tab types onto the integrated TableView so stale tabs from
+// before the Data/Schema mode refactor still land somewhere sensible.
+function legacySubTab(type: string): TableSubTab | undefined {
+  switch (type) {
+    case "inspector":
+    case "structure":
+      return "schema";
+    case "partitions":
+      return "schema:partitions";
+    case "stats":
+      return "schema:stats";
+    default:
+      return undefined;
+  }
+}
+
+const TABLE_VIEW_TYPES = new Set([
+  "table",
+  "inspector",
+  "structure",
+  "partitions",
+]);
 
 export function TabContent() {
   const { tabs, activeTabId } = useTabStore(useShallow((s) => ({ tabs: s.tabs, activeTabId: s.activeTabId })));
@@ -27,12 +49,19 @@ export function TabContent() {
             height: "100%",
           }}
         >
-          {tab.type === "table" && (
-            <DataGrid
+          {TABLE_VIEW_TYPES.has(tab.type) && (
+            <TableView
+              tabId={tab.id}
               connectionId={tab.connectionId}
+              connectionColor={tab.connectionColor}
               database={tab.database}
               schema={tab.schema}
               table={tab.table!}
+              initialSubTab={
+                (tab.subTab as TableSubTab | undefined) ??
+                legacySubTab(tab.type) ??
+                "data"
+              }
             />
           )}
           {tab.type === "query" && (
@@ -50,18 +79,12 @@ export function TabContent() {
               objectType={tab.objectType || "TABLE"}
             />
           )}
-          {tab.type === "structure" && (
-            <TableInfo
-              connectionId={tab.connectionId}
-              database={tab.database}
-              schema={tab.schema}
-              table={tab.table!}
-            />
-          )}
           {tab.type === "activity" && (
             <ActivityDashboard connectionId={tab.connectionId} />
           )}
           {tab.type === "stats" && (
+            // Standalone Stats tab is legacy — new code routes Stats
+            // through the TableView sub-tab. Kept for back-compat.
             <TableStats
               connectionId={tab.connectionId}
               database={tab.database}

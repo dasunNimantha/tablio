@@ -141,6 +141,15 @@ impl DatabaseDriver for CockroachdbDriver {
         let pool = self.get_pool(database).await?;
         pg_list_foreign_keys(&pool, database, schema, table).await
     }
+    async fn list_referenced_by(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ReferencingTableInfo>> {
+        let pool = self.get_pool(database).await?;
+        pg_list_referenced_by(&pool, database, schema, table).await
+    }
     async fn list_functions(&self, database: &str, schema: &str) -> Result<Vec<FunctionInfo>> {
         let pool = self.get_pool(database).await?;
         pg_list_functions(&pool, database, schema).await

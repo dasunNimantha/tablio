@@ -54,12 +54,32 @@ impl ConnectionConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TableInfo {
     pub name: String,
     pub schema: String,
     pub table_type: String,
     pub row_count_estimate: Option<i64>,
+    /// Schema-qualified parent table name when this row is a partition child.
+    #[serde(default)]
+    pub parent_table: Option<String>,
+    /// Partition strategy of this table when it is a partitioned parent.
+    /// One of: "range", "list", "hash". Null for plain tables and partition children.
+    #[serde(default)]
+    pub partition_strategy: Option<String>,
+    /// Human-readable partition bound for partition children, e.g.
+    ///   RANGE: "2026-01-01 -> 2026-04-01"
+    ///   LIST:  "us, ca, mx"
+    ///   HASH:  "MOD 4 REM 0"
+    ///   DEFAULT partition is signalled separately via is_default_partition.
+    #[serde(default)]
+    pub partition_bound: Option<String>,
+    /// True when this table is the DEFAULT partition for its parent.
+    #[serde(default)]
+    pub is_default_partition: Option<bool>,
+    /// Size on disk including indexes/toast (pg_total_relation_size). Bytes.
+    #[serde(default)]
+    pub total_bytes: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,6 +434,22 @@ pub struct TriggerInfo {
     pub table_name: String,
     pub event: String,
     pub timing: String,
+}
+
+/// Describes a foreign-key constraint that points *into* the table being
+/// inspected — i.e. another table holds an FK that references this one.
+/// Used by the Inspector "References" sub-tab so users can answer
+/// "what depends on this table?" without scanning every other schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReferencingTableInfo {
+    pub constraint_name: String,
+    pub referencing_schema: String,
+    pub referencing_table: String,
+    pub referencing_column: String,
+    /// Column in the inspected table that's being referenced.
+    pub referenced_column: String,
+    pub on_delete: String,
+    pub on_update: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

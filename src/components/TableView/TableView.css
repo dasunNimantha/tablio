@@ -1,0 +1,423 @@
+.tv {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-primary);
+}
+
+/* ------------------------------------------------------------------ */
+/* Header (table identity + counts)                                    */
+/* ------------------------------------------------------------------ */
+
+.tv-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 18px;
+  height: 48px;
+  min-height: 48px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.tv-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.tv-header-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 0 0 auto;
+}
+
+.tv-name {
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 650;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tv-name-schema {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.tv-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.tv-pill-range {
+  color: #10b981;
+  background: color-mix(in srgb, #10b981 15%, transparent);
+  border-color: color-mix(in srgb, #10b981 35%, transparent);
+}
+
+.tv-pill-list {
+  color: #3b82f6;
+  background: color-mix(in srgb, #3b82f6 15%, transparent);
+  border-color: color-mix(in srgb, #3b82f6 35%, transparent);
+}
+
+.tv-pill-hash {
+  color: #a855f7;
+  background: color-mix(in srgb, #a855f7 15%, transparent);
+  border-color: color-mix(in srgb, #a855f7 35%, transparent);
+}
+
+.tv-header-spacer {
+  flex: 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Mode switch (Data / Schema)                                         */
+/* ------------------------------------------------------------------ */
+
+.tv-mode-switch {
+  display: inline-flex;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 2px;
+  gap: 2px;
+}
+
+.tv-mode-switch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 14px;
+  height: 26px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: calc(var(--radius-md) - 2px);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, box-shadow 0.12s;
+}
+
+.tv-mode-switch-btn:hover {
+  color: var(--text-primary);
+}
+
+.tv-mode-switch-btn.active {
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+/* ------------------------------------------------------------------ */
+/* Body / panel container                                              */
+/* ------------------------------------------------------------------ */
+
+.tv-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px var(--gutter-lg);
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tv-banner-error {
+  color: var(--error);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+}
+
+.tv-body {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.tv-panel {
+  position: absolute;
+  inset: 0;
+  flex-direction: column;
+}
+
+.tv-panel-scroll {
+  overflow: auto;
+}
+
+.tv-panel-loader {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 12px;
+  color: var(--text-muted);
+  padding: 40px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Panel tables (shared across Columns/Constraints/Indexes/...)        */
+/* ------------------------------------------------------------------ */
+
+.tv-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.tv-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.tv-table th {
+  background: var(--bg-secondary);
+  padding: 0 14px;
+  height: 38px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.045em;
+}
+
+.tv-table td {
+  padding: 0 14px;
+  height: 38px;
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.tv-table tbody tr:hover td {
+  background: var(--bg-hover);
+}
+
+.tv-cell-name {
+  font-weight: 500;
+  font-family: var(--font-mono);
+}
+
+.tv-cell-type {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+.tv-cell-muted {
+  color: var(--text-muted);
+}
+
+.tv-cell-empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 28px !important;
+  font-size: 14px;
+}
+
+.tv-cell-link {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--accent);
+  cursor: pointer;
+  text-align: left;
+}
+
+.tv-cell-link:hover {
+  text-decoration: underline;
+}
+
+.tv-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tv-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  border-radius: var(--radius-xs);
+}
+
+.tv-badge-pk {
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.tv-badge-fk {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 15%, transparent);
+}
+
+.tv-badge-auto {
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+}
+
+.tv-badge-constraint {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 10.5px;
+}
+
+.tv-badge-c-primary-key {
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.tv-badge-c-unique {
+  color: #10b981;
+  background: color-mix(in srgb, #10b981 15%, transparent);
+}
+
+.tv-badge-c-foreign-key {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 15%, transparent);
+}
+
+.tv-badge-c-not-null {
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+}
+
+.tv-note {
+  padding: 12px var(--gutter-lg);
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ------------------------------------------------------------------ */
+/* Schema page (sub-tab strip + active panel)                          */
+/* ------------------------------------------------------------------ */
+
+.tv-schema {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  background: var(--bg-primary);
+}
+
+.tv-schema-strip {
+  display: flex;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 0 14px;
+  gap: 2px;
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.tv-schema-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 14px;
+  height: 38px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+
+.tv-schema-tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.tv-schema-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.tv-schema-tab-icon {
+  display: inline-flex;
+  align-items: center;
+}
+
+.tv-schema-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 17px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border-radius: 9px;
+}
+
+.tv-schema-tab.active .tv-schema-tab-count {
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.tv-schema-body {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.tv-schema-panel {
+  position: absolute;
+  inset: 0;
+  flex-direction: column;
+}
+
+.tv-schema-panel-scroll {
+  overflow: auto;
+}
+
+/* PartitionsView and TableStats default to height:100% which works
+   correctly inside .tv-schema-panel since we use position:absolute
+   with full inset. Just make sure their background doesn't fight
+   with the schema body. */
+.tv-schema-panel .pv,
+.tv-schema-panel .table-stats {
+  background: var(--bg-primary);
+}

@@ -438,6 +438,307 @@ async fn pg_get_table_stats() {
 }
 
 // ---------------------------------------------------------------------------
+// get_table_stats — partitioned tables
+//
+// PostgreSQL partitioned parents (relkind='p') have no storage of their own
+// and don't appear in pg_stat_user_tables; the stats query has to walk
+// pg_partition_tree() to aggregate over the leaf partitions. These tests
+// pin that contract.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pg_get_table_stats_partitioned_parent_aggregates_leaves() {
+    let driver = pg_driver!();
+    let parent = unique_table("pg_part_parent");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {0}.\"{1}\" (id INT NOT NULL, bucket INT NOT NULL, \
+                 PRIMARY KEY (bucket, id)) PARTITION BY RANGE (bucket)",
+                SCHEMA, parent
+            ),
+        )
+        .await
+        .unwrap();
+
+    // Three leaves spanning bucket 0..30. Insert different row counts so
+    // the test catches single-leaf-only regressions.
+    for (idx, (lo, hi, count)) in [(0, 10, 3), (10, 20, 5), (20, 30, 7)].iter().enumerate() {
+        driver
+            .execute_query(
+                DB,
+                &format!(
+                    "CREATE TABLE {0}.\"{1}_p{2}\" PARTITION OF {0}.\"{1}\" \
+                     FOR VALUES FROM ({3}) TO ({4})",
+                    SCHEMA, parent, idx, lo, hi
+                ),
+            )
+            .await
+            .unwrap();
+        driver
+            .execute_query(
+                DB,
+                &format!(
+                    "INSERT INTO {0}.\"{1}_p{2}\" (id, bucket) \
+                     SELECT g, {3} + (g % {4}) FROM generate_series(1, {5}) g",
+                    SCHEMA,
+                    parent,
+                    idx,
+                    lo,
+                    hi - lo,
+                    count
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    driver
+        .execute_query(DB, &format!("ANALYZE {}.\"{}\"", SCHEMA, parent))
+        .await
+        .unwrap();
+
+    let stats = driver
+        .get_table_stats(DB, SCHEMA, &parent)
+        .await
+        .expect("get_table_stats on partitioned parent should succeed, not 'not found'");
+
+    assert_eq!(stats.table_name, parent);
+    // 3 + 5 + 7 = 15 rows distributed across the three leaves. We use >=
+    // because reltuples is statistical (rounds up after ANALYZE).
+    assert!(
+        stats.row_count >= 15,
+        "partitioned row_count should aggregate leaves; got {}",
+        stats.row_count
+    );
+    assert!(!stats.total_size.is_empty());
+    assert!(!stats.data_size.is_empty());
+    assert_ne!(
+        stats.total_size, "0 bytes",
+        "total_size for a partitioned table with rows must not be 0",
+    );
+
+    driver
+        .drop_object(DB, SCHEMA, &parent, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pg_get_table_stats_partitioned_parent_no_leaves_returns_zero_not_error() {
+    let driver = pg_driver!();
+    let parent = unique_table("pg_part_empty");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {0}.\"{1}\" (id INT NOT NULL, bucket INT NOT NULL, \
+                 PRIMARY KEY (bucket, id)) PARTITION BY RANGE (bucket)",
+                SCHEMA, parent
+            ),
+        )
+        .await
+        .unwrap();
+
+    let stats = driver
+        .get_table_stats(DB, SCHEMA, &parent)
+        .await
+        .expect("partitioned parent with zero leaves should still resolve");
+
+    assert_eq!(stats.table_name, parent);
+    assert_eq!(stats.row_count, 0);
+    // pg_size_pretty(0) renders as "0 bytes" (or similar). Just ensure the
+    // string is populated rather than crashing on a NULL.
+    assert!(!stats.total_size.is_empty());
+
+    driver
+        .drop_object(DB, SCHEMA, &parent, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pg_get_table_stats_subpartitioned_walks_full_tree() {
+    let driver = pg_driver!();
+    let parent = unique_table("pg_part_nested");
+
+    // parent ──hash──► hash leaf ──range──► range leaves
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {0}.\"{1}\" (id INT NOT NULL, h INT NOT NULL, b INT NOT NULL, \
+                 PRIMARY KEY (h, b, id)) PARTITION BY HASH (h)",
+                SCHEMA, parent
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {0}.\"{1}_h0\" PARTITION OF {0}.\"{1}\" \
+                 FOR VALUES WITH (modulus 2, remainder 0) PARTITION BY RANGE (b)",
+                SCHEMA, parent
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {0}.\"{1}_h1\" PARTITION OF {0}.\"{1}\" \
+                 FOR VALUES WITH (modulus 2, remainder 1)",
+                SCHEMA, parent
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {0}.\"{1}_h0_b0\" PARTITION OF {0}.\"{1}_h0\" \
+                 FOR VALUES FROM (0) TO (100)",
+                SCHEMA, parent
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "INSERT INTO {0}.\"{1}\" (id, h, b) \
+                 SELECT g, g, g FROM generate_series(1, 8) g",
+                SCHEMA, parent
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(DB, &format!("ANALYZE {}.\"{}\"", SCHEMA, parent))
+        .await
+        .unwrap();
+
+    let stats = driver
+        .get_table_stats(DB, SCHEMA, &parent)
+        .await
+        .expect("nested partitioned parent should resolve via pg_partition_tree");
+
+    assert_eq!(stats.table_name, parent);
+    // Some rows go to the hash leaf with a range sub-leaf, some go directly
+    // into the range-less hash leaf. Both kinds must contribute.
+    assert!(
+        stats.row_count >= 8,
+        "sub-partitioned row_count must include rows reached through range sub-parents; got {}",
+        stats.row_count
+    );
+
+    driver
+        .drop_object(DB, SCHEMA, &parent, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pg_get_table_stats_materialized_view_resolves() {
+    let driver = pg_driver!();
+    let mv = unique_table("pg_mv_stats");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE MATERIALIZED VIEW {}.\"{}\" AS \
+                 SELECT g AS n FROM generate_series(1, 10) g",
+                SCHEMA, mv
+            ),
+        )
+        .await
+        .unwrap();
+
+    let stats = driver
+        .get_table_stats(DB, SCHEMA, &mv)
+        .await
+        .expect("materialized views are accepted by get_table_stats now (relkind 'm')");
+
+    assert_eq!(stats.table_name, mv);
+    // Materialized views aren't tracked in pg_stat_user_tables, so vacuum
+    // / analyze / live / dead should be NULL or zero -- but the storage
+    // figures must come back populated via pg_relation_size.
+    assert!(!stats.total_size.is_empty());
+    assert!(!stats.data_size.is_empty());
+
+    driver
+        .drop_object(DB, SCHEMA, &mv, "MATERIALIZED VIEW")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pg_get_table_stats_unknown_table_returns_not_found() {
+    let driver = pg_driver!();
+    let bogus = unique_table("pg_does_not_exist");
+
+    let err = driver
+        .get_table_stats(DB, SCHEMA, &bogus)
+        .await
+        .expect_err("missing table must error rather than silently returning zeros");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("not found") || msg.contains(&bogus),
+        "error should reference the missing table; got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn pg_get_table_stats_rejects_indexes_and_sequences() {
+    // The relkind filter is IN ('r','p','m'). Indexes ('i'), sequences
+    // ('S'), foreign tables ('f'), and toast tables must all be rejected
+    // with a "not found" rather than crashing the query that joins
+    // pg_stat_user_tables / pg_total_relation_size.
+    let driver = pg_driver!();
+    let owner = unique_table("pg_seq_owner");
+    let seq = format!("{}_seq", owner);
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {0}.\"{1}\" (id SERIAL PRIMARY KEY)",
+                SCHEMA, owner
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(DB, &format!("CREATE SEQUENCE {}.\"{}\"", SCHEMA, seq))
+        .await
+        .unwrap();
+
+    let result = driver.get_table_stats(DB, SCHEMA, &seq).await;
+    assert!(
+        result.is_err(),
+        "sequences (relkind 'S') must be rejected by get_table_stats"
+    );
+
+    driver
+        .execute_query(DB, &format!("DROP SEQUENCE {}.\"{}\" CASCADE", SCHEMA, seq))
+        .await
+        .ok();
+    driver
+        .drop_object(DB, SCHEMA, &owner, "TABLE")
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
 // fetch_rows
 // ---------------------------------------------------------------------------
 

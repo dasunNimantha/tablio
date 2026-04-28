@@ -45,6 +45,10 @@
   flex-direction: column;
   gap: 6px;
   transition: border-color 0.15s;
+  /* Prevent any single value (e.g. a long timestamp string returned
+     by Postgres) from blowing out of the card width. */
+  min-width: 0;
+  overflow: hidden;
 }
 
 .table-stats-card:hover {
@@ -64,6 +68,19 @@
   font-weight: 600;
   font-family: var(--font-mono);
   color: var(--text-primary);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Time stats use a slightly smaller, lower-weight style so the relative
+   label ("3h ago") sits comfortably alongside the numeric stats and
+   never demands as much horizontal room as the raw timestamp. */
+.table-stats-value-time {
+  font-size: 16px;
+  font-weight: 500;
+  font-family: var(--font-sans, inherit);
 }
 
 /* Charts */

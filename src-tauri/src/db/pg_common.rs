@@ -374,14 +374,62 @@ pub async fn pg_list_tables(
     _database: &str,
     schema: &str,
 ) -> Result<Vec<TableInfo>> {
+    // We pull table_type from information_schema (which is friendly and
+    // distinguishes BASE TABLE / VIEW), then enrich with partition metadata
+    // from pg_class / pg_partitioned_table / pg_inherits.
+    //
+    // Notes:
+    //  - relkind 'p' => partitioned parent. partstrat in pg_partitioned_table
+    //    is 'r' (range), 'l' (list), 'h' (hash).
+    //  - relispartition = true on partition children. We resolve the parent
+    //    via pg_inherits and format the bound via pg_get_expr(relpartbound).
+    //  - pg_get_expr returns either "FOR VALUES FROM (...) TO (...)",
+    //    "FOR VALUES IN (...)", "FOR VALUES WITH (modulus N, remainder R)",
+    //    or "DEFAULT" for the default partition.
+    //  - pg_total_relation_size includes indexes + toast; for partitioned
+    //    parents that's the sum across children.
     let rows = sqlx::query(
-        "SELECT DISTINCT ON (t.table_name) t.table_name, t.table_type, \
-                COALESCE(c.reltuples::bigint, 0) as row_estimate \
-         FROM information_schema.tables t \
-         LEFT JOIN pg_class c ON c.relname = t.table_name AND c.relkind IN ('r', 'v', 'm', 'f', 'p') \
-         LEFT JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = t.table_schema \
-         WHERE t.table_schema = $1 \
-         ORDER BY t.table_name",
+        r#"
+        SELECT
+            t.table_name,
+            t.table_type,
+            COALESCE(c.reltuples::bigint, 0)                         AS row_estimate,
+            CASE WHEN c.oid IS NULL THEN NULL
+                 ELSE pg_total_relation_size(c.oid)::bigint
+            END                                                       AS total_bytes,
+            CASE pt.partstrat
+                 WHEN 'r' THEN 'range'
+                 WHEN 'l' THEN 'list'
+                 WHEN 'h' THEN 'hash'
+                 ELSE NULL
+            END                                                       AS partition_strategy,
+            parent_ns.nspname || '.' || parent_c.relname              AS parent_table,
+            CASE WHEN c.relispartition
+                 THEN pg_get_expr(c.relpartbound, c.oid)
+                 ELSE NULL
+            END                                                       AS partition_bound_raw,
+            CASE WHEN c.relispartition
+                 THEN pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT'
+                 ELSE NULL
+            END                                                       AS is_default_partition
+        FROM information_schema.tables t
+        LEFT JOIN pg_namespace n
+               ON n.nspname = t.table_schema
+        LEFT JOIN pg_class c
+               ON c.relname = t.table_name
+              AND c.relnamespace = n.oid
+              AND c.relkind IN ('r','v','m','f','p')
+        LEFT JOIN pg_partitioned_table pt
+               ON pt.partrelid = c.oid
+        LEFT JOIN pg_inherits inh
+               ON inh.inhrelid = c.oid
+        LEFT JOIN pg_class parent_c
+               ON parent_c.oid = inh.inhparent
+        LEFT JOIN pg_namespace parent_ns
+               ON parent_ns.oid = parent_c.relnamespace
+        WHERE t.table_schema = $1
+        ORDER BY t.table_name
+        "#,
     )
     .bind(schema)
     .fetch_all(pool)
@@ -389,13 +437,142 @@ pub async fn pg_list_tables(
 
     Ok(rows
         .iter()
-        .map(|r| TableInfo {
-            name: r.get("table_name"),
-            schema: schema.to_string(),
-            table_type: r.get("table_type"),
-            row_count_estimate: r.try_get("row_estimate").ok(),
+        .map(|r| {
+            let raw_bound: Option<String> = r.try_get("partition_bound_raw").ok();
+            let is_default = matches!(
+                r.try_get::<Option<bool>, _>("is_default_partition")
+                    .ok()
+                    .flatten(),
+                Some(true)
+            );
+            let bound_pretty = raw_bound.as_ref().and_then(|b| format_partition_bound(b));
+            TableInfo {
+                name: r.get("table_name"),
+                schema: schema.to_string(),
+                table_type: r.get("table_type"),
+                row_count_estimate: r.try_get("row_estimate").ok(),
+                parent_table: r
+                    .try_get::<Option<String>, _>("parent_table")
+                    .ok()
+                    .flatten(),
+                partition_strategy: r
+                    .try_get::<Option<String>, _>("partition_strategy")
+                    .ok()
+                    .flatten(),
+                partition_bound: bound_pretty,
+                is_default_partition: if raw_bound.is_some() {
+                    Some(is_default)
+                } else {
+                    None
+                },
+                total_bytes: r.try_get::<Option<i64>, _>("total_bytes").ok().flatten(),
+            }
         })
         .collect())
+}
+
+/// Compresses Postgres `pg_get_expr(relpartbound, …)` output into a short
+/// label suitable for the sidebar tree. Returns None for the default
+/// partition (caller already flags that separately).
+///
+/// Inputs we expect from Postgres:
+///   - "FOR VALUES FROM ('2026-01-01 00:00:00+00') TO ('2026-04-01 00:00:00+00')"
+///   - "FOR VALUES IN ('us', 'ca', 'mx')"
+///   - "FOR VALUES WITH (modulus 4, remainder 0)"
+///   - "DEFAULT"
+fn format_partition_bound(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("default") {
+        return None;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("FOR VALUES FROM (") {
+        // "(start) TO (end)"
+        if let Some((start, after)) = rest.split_once(") TO (") {
+            if let Some(end) = after.strip_suffix(')') {
+                let lo = strip_quotes(start.trim());
+                let hi = strip_quotes(end.trim());
+                return Some(format!(
+                    "{} \u{2192} {}",
+                    compact_timestamp(lo),
+                    compact_timestamp(hi)
+                ));
+            }
+        }
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("FOR VALUES IN (") {
+        if let Some(inner) = rest.strip_suffix(')') {
+            // Strip surrounding quotes per item, keep comma+space separation.
+            let parts: Vec<String> = inner
+                .split(',')
+                .map(|p| strip_quotes(p.trim()).to_string())
+                .collect();
+            return Some(parts.join(", "));
+        }
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("FOR VALUES WITH (") {
+        if let Some(inner) = rest.strip_suffix(')') {
+            // "modulus 4, remainder 0" -> "MOD 4 REM 0"
+            let mut modulus: Option<&str> = None;
+            let mut remainder: Option<&str> = None;
+            for part in inner.split(',') {
+                let part = part.trim();
+                if let Some(n) = part.strip_prefix("modulus ") {
+                    modulus = Some(n);
+                } else if let Some(n) = part.strip_prefix("remainder ") {
+                    remainder = Some(n);
+                }
+            }
+            if let (Some(m), Some(r)) = (modulus, remainder) {
+                return Some(format!("MOD {m} REM {r}"));
+            }
+        }
+    }
+
+    Some(trimmed.to_string())
+}
+
+fn strip_quotes(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// Compresses a Postgres timestamp literal for sidebar display:
+///   "2025-10-01 00:00:00+00" -> "2025-10-01"            (date-only midnight UTC)
+///   "2025-10-01 00:00:00"    -> "2025-10-01"            (date-only midnight)
+///   "2025-10-01 12:30:45+00" -> "2025-10-01 12:30:45"   (drop "+00" only)
+///   "2025-10-01 12:30:45.123-05" -> "2025-10-01 12:30:45.123-05"  (passthrough)
+/// Falls back to the original string for anything that doesn't look like a
+/// date/timestamp.
+fn compact_timestamp(s: &str) -> String {
+    // Strip a trailing "+00" / "+0000" / "+00:00" UTC offset to reduce noise;
+    // keep non-UTC offsets so the user can still see the timezone.
+    let s = s.trim();
+    let no_tz = s
+        .strip_suffix("+00:00")
+        .or_else(|| s.strip_suffix("+0000"))
+        .or_else(|| s.strip_suffix("+00"))
+        .unwrap_or(s);
+
+    // If the time portion is exactly midnight, collapse to date-only.
+    if let Some((date, time)) = no_tz.split_once(' ') {
+        // Accept 00:00:00 or 00:00:00.000 etc. — anything that's all zeros
+        // and separators after "00:00:00".
+        let time = time.trim();
+        let is_midnight = time == "00:00:00"
+            || time.starts_with("00:00:00.") && time[9..].chars().all(|c| c == '0');
+        if is_midnight {
+            return date.to_string();
+        }
+    }
+
+    no_tz.to_string()
 }
 
 pub async fn pg_list_indexes(
@@ -471,6 +648,77 @@ pub async fn pg_list_foreign_keys(
             referenced_column: r.get("foreign_column"),
             on_delete: r.get("delete_rule"),
             on_update: r.get("update_rule"),
+        })
+        .collect())
+}
+
+/// Returns the FKs that point INTO `(schema, table)` from elsewhere in the
+/// database — i.e. the inverse of pg_list_foreign_keys. Used by the
+/// Inspector "References" sub-tab to answer "what depends on this table?".
+pub async fn pg_list_referenced_by(
+    pool: &PgPool,
+    _database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ReferencingTableInfo>> {
+    // We go through pg_constraint directly because information_schema.
+    // constraint_column_usage doesn't expose the referencing table cleanly
+    // when an FK points across schemas (the join through table_constraints
+    // refers to the *referencing* table, not the referenced one).
+    let sql = r#"
+        SELECT
+            con.conname                                               AS constraint_name,
+            ref_ns.nspname                                            AS referencing_schema,
+            ref_class.relname                                         AS referencing_table,
+            ref_att.attname                                           AS referencing_column,
+            target_att.attname                                        AS referenced_column,
+            CASE con.confdeltype
+                 WHEN 'a' THEN 'NO ACTION'
+                 WHEN 'r' THEN 'RESTRICT'
+                 WHEN 'c' THEN 'CASCADE'
+                 WHEN 'n' THEN 'SET NULL'
+                 WHEN 'd' THEN 'SET DEFAULT'
+                 ELSE con.confdeltype::text
+            END                                                       AS on_delete,
+            CASE con.confupdtype
+                 WHEN 'a' THEN 'NO ACTION'
+                 WHEN 'r' THEN 'RESTRICT'
+                 WHEN 'c' THEN 'CASCADE'
+                 WHEN 'n' THEN 'SET NULL'
+                 WHEN 'd' THEN 'SET DEFAULT'
+                 ELSE con.confupdtype::text
+            END                                                       AS on_update
+        FROM pg_constraint con
+        JOIN pg_class      ref_class  ON ref_class.oid  = con.conrelid
+        JOIN pg_namespace  ref_ns     ON ref_ns.oid     = ref_class.relnamespace
+        JOIN pg_class      tgt_class  ON tgt_class.oid  = con.confrelid
+        JOIN pg_namespace  tgt_ns     ON tgt_ns.oid     = tgt_class.relnamespace
+        JOIN unnest(con.conkey)  WITH ORDINALITY AS ck(attnum, ord) ON true
+        JOIN unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord) ON ck.ord = fk.ord
+        JOIN pg_attribute  ref_att    ON ref_att.attrelid = ref_class.oid AND ref_att.attnum = ck.attnum
+        JOIN pg_attribute  target_att ON target_att.attrelid = tgt_class.oid AND target_att.attnum = fk.attnum
+        WHERE con.contype = 'f'
+          AND tgt_ns.nspname = $1
+          AND tgt_class.relname = $2
+        ORDER BY referencing_schema, referencing_table, constraint_name, ck.ord
+    "#;
+
+    let rows = sqlx::query(sql)
+        .bind(schema)
+        .bind(table)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| ReferencingTableInfo {
+            constraint_name: r.get("constraint_name"),
+            referencing_schema: r.get("referencing_schema"),
+            referencing_table: r.get("referencing_table"),
+            referencing_column: r.get("referencing_column"),
+            referenced_column: r.get("referenced_column"),
+            on_delete: r.get("on_delete"),
+            on_update: r.get("on_update"),
         })
         .collect())
 }

@@ -211,6 +211,7 @@ impl DatabaseDriver for CassandraDriver {
                     schema: database.to_string(),
                     table_type: "TABLE".to_string(),
                     row_count_estimate: None,
+                    ..Default::default()
                 });
             }
         }

@@ -16,10 +16,19 @@ test.describe("Tab bar", () => {
   test("clicking a tab activates it", async ({ page }) => {
     const usersNode = await navigateToTable(page, "users");
     await usersNode.click();
-    await page.locator(".grid-table-name").waitFor({ timeout: 5000 });
+    await page.locator(".tv-name").waitFor({ timeout: 5000 });
 
-    const ordersNode = page.locator(".tree-node.leaf .tree-label", { hasText: "orders" });
-    await ordersNode.click();
+    // `orders` is now a partitioned parent (non-leaf branch) so a
+    // single-click would only toggle expand. Open via "Open Table"
+    // from the context menu so the test works for both leaf tables
+    // and partitioned parents.
+    const ordersNode = page
+      .locator(".tree-node:has(.icon-table) .tree-label", { hasText: "orders" })
+      .first();
+    await ordersNode.click({ button: "right" });
+    await page
+      .locator(".context-menu button", { hasText: "Open Table" })
+      .click();
     await expect(page.locator(".tab-bar .tab.active .tab-title")).toContainText("orders");
 
     const usersTab = page.locator(".tab-bar .tab .tab-title", { hasText: "users" }).locator("..");
@@ -30,7 +39,7 @@ test.describe("Tab bar", () => {
   test("close button removes the tab", async ({ page }) => {
     const tableNode = await navigateToTable(page, "users");
     await tableNode.click();
-    await page.locator(".grid-table-name").waitFor({ timeout: 5000 });
+    await page.locator(".tv-name").waitFor({ timeout: 5000 });
 
     const tabCount = await page.locator(".tab-bar .tab").count();
     const usersTab = page.locator(".tab-bar .tab").filter({ hasText: "users" });
@@ -48,7 +57,7 @@ test.describe("Tab bar", () => {
   test("tab shows connection color dot", async ({ page }) => {
     const tableNode = await navigateToTable(page, "users");
     await tableNode.click();
-    await page.locator(".grid-table-name").waitFor({ timeout: 5000 });
+    await page.locator(".tv-name").waitFor({ timeout: 5000 });
     const activeTab = page.locator(".tab-bar .tab.active");
     await expect(activeTab.locator(".tab-color-dot")).toBeVisible();
   });
@@ -56,7 +65,7 @@ test.describe("Tab bar", () => {
   test("tab shows icon", async ({ page }) => {
     const tableNode = await navigateToTable(page, "users");
     await tableNode.click();
-    await page.locator(".grid-table-name").waitFor({ timeout: 5000 });
+    await page.locator(".tv-name").waitFor({ timeout: 5000 });
     await expect(page.locator(".tab-bar .tab.active .tab-icon")).toBeVisible();
   });
 });
@@ -66,9 +75,16 @@ test.describe("Tab bar — context menu", () => {
     await page.goto("/");
     const usersNode = await navigateToTable(page, "users");
     await usersNode.click();
-    await page.locator(".grid-table-name").waitFor({ timeout: 5000 });
-    const ordersNode = page.locator(".tree-node.leaf .tree-label", { hasText: "orders" });
-    await ordersNode.click();
+    await page.locator(".tv-name").waitFor({ timeout: 5000 });
+    // Open `orders` (a partitioned parent) via context menu so the
+    // helper works for both leaf tables and partitioned parents.
+    const ordersNode = page
+      .locator(".tree-node:has(.icon-table) .tree-label", { hasText: "orders" })
+      .first();
+    await ordersNode.click({ button: "right" });
+    await page
+      .locator(".context-menu button", { hasText: "Open Table" })
+      .click();
     await expect(page.locator(".tab-bar .tab")).toHaveCount(3);
   });
 

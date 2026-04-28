@@ -177,9 +177,91 @@
 .tree-icon.icon-view { color: #9b87c4; }
 .tree-icon.icon-function { color: #e8a838; }
 .tree-icon.icon-folder { color: #8b9dc3; }
+.tree-icon.icon-partition-group { color: #c47bb0; }
+
+/* Partition strategy chip on partitioned-parent tables. */
+.tree-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  margin-left: 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  flex-shrink: 0;
+  line-height: 1;
+}
+.tree-chip-partition-range { background: rgba(91, 155, 213, 0.18); color: #8ab8e0; }
+.tree-chip-partition-list  { background: rgba(196, 123, 176, 0.18); color: #d4a4c5; }
+.tree-chip-partition-hash  { background: rgba(232, 168, 56, 0.18); color: #e6c285; }
+.tree-chip-default {
+  background: rgba(232, 168, 56, 0.14);
+  color: #e6c285;
+  text-transform: lowercase;
+  letter-spacing: 0;
+}
+
+/* Strategy chip on partitioned parents is clickable: opens the dedicated
+   Partitions tab (the "details panel" replacement for the cramped sidebar). */
+.tree-chip-clickable {
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  transition: filter 0.1s ease;
+}
+.tree-chip-clickable:hover {
+  filter: brightness(1.25);
+}
+
+/* Inline metadata after the label: partition bound, row counts, sizes,
+   partition-group counts. Truncated visually so a long bound doesn't
+   push the chevron etc. off-screen. */
+.tree-meta {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The bound is the only row element that's allowed to shrink heavily —
+   long timestamp ranges should ellipsize (with the full value in the
+   tooltip) before the table name does. */
+.tree-meta-bound {
+  font-family: var(--font-mono, ui-monospace, "SFMono-Regular", Menlo, monospace);
+  opacity: 0.85;
+  max-width: 220px;
+  flex-shrink: 4;
+}
+/* Warning badge for non-empty default partitions / size skew on parent. */
+.tree-warning {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  color: #e6a546;
+  flex-shrink: 0;
+}
+
+/* When the default partition has rows, give the row a subtle accent so it's
+   noticeable without being alarming. */
+.tree-node-default-partition .tree-label {
+  font-style: italic;
+}
 
 .tree-label {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 60px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

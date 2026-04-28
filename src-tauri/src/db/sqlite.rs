@@ -168,6 +168,7 @@ impl DatabaseDriver for SqliteDriver {
                         "VIEW".to_string()
                     },
                     row_count_estimate: None,
+                    ..Default::default()
                 }
             })
             .collect())

@@ -141,6 +141,15 @@ impl DatabaseDriver for PostgresDriver {
         let pool = self.get_pool(database).await?;
         pg_list_foreign_keys(&pool, database, schema, table).await
     }
+    async fn list_referenced_by(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ReferencingTableInfo>> {
+        let pool = self.get_pool(database).await?;
+        pg_list_referenced_by(&pool, database, schema, table).await
+    }
     async fn list_functions(&self, database: &str, schema: &str) -> Result<Vec<FunctionInfo>> {
         let pool = self.get_pool(database).await?;
         pg_list_functions(&pool, database, schema).await
@@ -345,28 +354,61 @@ impl DatabaseDriver for PostgresDriver {
         table: &str,
     ) -> Result<TableStats> {
         let pool = self.get_pool(database).await?;
-        let sql = "SELECT c.relname AS table_name,
-                   GREATEST(c.reltuples, 0)::bigint AS row_count,
-                   pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size,
-                   pg_size_pretty(pg_indexes_size(c.oid)) AS index_size,
-                   pg_size_pretty(pg_relation_size(c.oid)) AS data_size,
-                   s.last_vacuum::text AS last_vacuum,
-                   s.last_analyze::text AS last_analyze,
-                   s.n_dead_tup AS dead_tuples,
-                   s.n_live_tup AS live_tuples
-                   FROM pg_class c
-                   JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
-                   LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
-                   WHERE c.relname = $2 AND c.relkind = 'r'";
-        let row = sqlx::query(sql)
-            .bind(schema)
-            .bind(table)
-            .fetch_optional(&pool)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Table {}.{} not found", schema, table))?;
+
+        // Resolve the target's oid + relkind. Accept ordinary tables ('r'),
+        // partitioned parents ('p'), and materialized views ('m'). For
+        // partitioned parents the parent itself has no storage, no live
+        // tuples, and no pg_stat_user_tables row -- everything must be
+        // aggregated across leaf partitions via pg_partition_tree.
+        let target = sqlx::query(
+            "SELECT c.oid::bigint AS oid, c.relkind::text AS relkind, c.relname AS relname
+             FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1
+             WHERE c.relname = $2 AND c.relkind IN ('r', 'p', 'm')",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_optional(&pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Table {}.{} not found", schema, table))?;
+
+        let oid: i64 = target.get("oid");
+        let relkind: String = target.get("relkind");
+        let relname: String = target.get("relname");
+
+        // For a regular/materialized relation, the "leaf set" is just the
+        // table itself. For a partitioned parent, we walk pg_partition_tree
+        // and keep only leaves (relkind = 'r'); intermediate partitioned
+        // sub-parents are skipped because they also have no storage.
+        let leaves_sql = if relkind == "p" {
+            "SELECT pt.relid::oid AS oid
+             FROM pg_partition_tree($1::oid) pt
+             JOIN pg_class c ON c.oid = pt.relid
+             WHERE c.relkind = 'r'"
+        } else {
+            "SELECT $1::oid AS oid"
+        };
+
+        let agg_sql = format!(
+            "WITH leaves AS ({leaves_sql})
+             SELECT
+               COALESCE(SUM(GREATEST(c.reltuples, 0))::bigint, 0)        AS row_count,
+               pg_size_pretty(COALESCE(SUM(pg_total_relation_size(c.oid)), 0)) AS total_size,
+               pg_size_pretty(COALESCE(SUM(pg_indexes_size(c.oid)), 0))         AS index_size,
+               pg_size_pretty(COALESCE(SUM(pg_relation_size(c.oid)), 0))        AS data_size,
+               MAX(s.last_vacuum)::text                                  AS last_vacuum,
+               MAX(s.last_analyze)::text                                 AS last_analyze,
+               COALESCE(SUM(s.n_dead_tup), 0)::bigint                    AS dead_tuples,
+               COALESCE(SUM(s.n_live_tup), 0)::bigint                    AS live_tuples
+             FROM leaves l
+             JOIN pg_class c ON c.oid = l.oid
+             LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid"
+        );
+
+        let row = sqlx::query(&agg_sql).bind(oid).fetch_one(&pool).await?;
 
         Ok(TableStats {
-            table_name: row.get("table_name"),
+            table_name: relname,
             row_count: row.get("row_count"),
             total_size: row.get("total_size"),
             index_size: row.get("index_size"),

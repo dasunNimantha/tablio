@@ -335,6 +335,7 @@ impl DatabaseDriver for MssqlDriver {
                     schema: schema.to_string(),
                     table_type: "BASE TABLE".to_string(),
                     row_count_estimate: row_count,
+                    ..Default::default()
                 });
             }
         }

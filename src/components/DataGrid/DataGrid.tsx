@@ -122,6 +122,7 @@ interface Props {
   database: string;
   schema: string;
   table: string;
+  hideTitle?: boolean;
 }
 
 interface PendingChanges {
@@ -148,7 +149,7 @@ const REFRESH_OPTIONS = [
   { label: "5m", value: 300 },
 ];
 
-export function DataGrid({ connectionId, database, schema, table }: Props) {
+export function DataGrid({ connectionId, database, schema, table, hideTitle = false }: Props) {
   const addToast = useToastStore((s) => s.addToast);
   const openTab = useTabStore((s) => s.openTab);
   const connections = useConnectionStore((s) => s.connections);
@@ -211,9 +212,13 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
 
   const fetchGenRef = useRef(0);
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (opts?: { silent?: boolean }) => {
     const gen = ++fetchGenRef.current;
-    setLoading(true);
+    // Periodic auto-refresh passes { silent: true } so the loading
+    // bar / data dimming don't flicker on every interval tick. The
+    // newly fetched rows still swap in atomically when the request
+    // resolves.
+    if (!opts?.silent) setLoading(true);
     setError(null);
     try {
       const result = await api.fetchRows({
@@ -302,7 +307,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
   useEffect(() => {
     if (refreshInterval <= 0 || hasChanges) return;
     const id = setInterval(() => {
-      fetchData();
+      fetchData({ silent: true });
     }, refreshInterval * 1000);
     return () => clearInterval(id);
   }, [refreshInterval, fetchData, hasChanges]);
@@ -1002,7 +1007,7 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
     return (
       <div className="grid-error">
         <p>{error}</p>
-        <button className="btn-secondary" onClick={fetchData}>
+        <button className="btn-secondary" onClick={() => fetchData()}>
           Retry
         </button>
       </div>
@@ -1013,15 +1018,17 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
 
   return (
     <div className="data-grid-container">
-      <div className="grid-toolbar">
-        <div className="grid-toolbar-left">
-          <span
-            className="grid-table-name"
-            title={`${database}.${schema}.${table}`}
-          >
-            {schema}.{table}
-          </span>
-        </div>
+      <div className={`grid-toolbar ${hideTitle ? "grid-toolbar-no-title" : ""}`}>
+        {!hideTitle && (
+          <div className="grid-toolbar-left">
+            <span
+              className="grid-table-name"
+              title={`${database}.${schema}.${table}`}
+            >
+              {schema}.{table}
+            </span>
+          </div>
+        )}
         <div className="grid-toolbar-right">
           <button
             className={`btn-ghost ${showFilter || activeFilter ? "active-filter" : ""}`}
@@ -1192,8 +1199,14 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         </div>
       )}
 
-      <div className="grid-table-wrapper ag-grid-wrapper">
-        {filterLoading && <div className="grid-filter-loading-bar" />}
+      <div
+        className={`grid-table-wrapper ag-grid-wrapper${
+          loading && data ? " grid-table-wrapper-stale" : ""
+        }`}
+      >
+        {(filterLoading || (loading && data)) && (
+          <div className="grid-filter-loading-bar" />
+        )}
         <AgGridReact
           theme={gridTheme}
           modules={[AllCommunityModule]}
@@ -1223,7 +1236,11 @@ export function DataGrid({ connectionId, database, schema, table }: Props) {
         <div className="grid-pagination-info">
           {data.total_rows.toLocaleString()} rows
           {totalPages > 1 && (
-            <span className="grid-pagination-range">
+            <span
+              className={`grid-pagination-range${
+                loading && data ? " grid-pagination-range-stale" : ""
+              }`}
+            >
               {" · "}Showing {page * PAGE_SIZE + 1} -{" "}
               {Math.min((page + 1) * PAGE_SIZE, data.total_rows)}
             </span>

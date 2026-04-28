@@ -19,6 +19,15 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+.grid-toolbar-no-title {
+  padding-left: var(--gutter);
+  background: var(--bg-primary);
+}
+
+.grid-toolbar-no-title .grid-toolbar-right {
+  margin-left: auto;
+}
+
 .grid-toolbar .btn-ghost,
 .grid-toolbar .btn-primary,
 .grid-toolbar .btn-discard {
@@ -112,6 +121,23 @@
   flex: 1;
   overflow: auto;
   position: relative;
+}
+
+/* Applied while a refetch is in flight (page change, sort, refresh,
+   filter). Lightly fades the previous page's data so it's clear the
+   visible rows are stale until the new query lands. */
+.grid-table-wrapper-stale {
+  opacity: 0.55;
+  transition: opacity 0.12s ease;
+  pointer-events: none;
+}
+
+/* Pagination range ("Showing 51 - 100") gets the same stale treatment
+   so the user knows the numbers refer to the page being loaded, not
+   the rows currently visible. */
+.grid-pagination-range-stale {
+  opacity: 0.5;
+  font-style: italic;
 }
 
 .grid-filter-loading-bar {

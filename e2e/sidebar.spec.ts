@@ -24,11 +24,19 @@ test.describe("Sidebar — search and type filter", () => {
   });
 
   test("clearing search shows all nodes again", async ({ page }) => {
+    // `orders` is now a partitioned parent (non-leaf branch in the
+    // tree), so we can't gate visibility on `.tree-node.leaf`. Match
+    // by the table icon instead — that catches both leaf tables and
+    // partitioned parents.
+    const ordersRow = page.locator(
+      ".tree-node:has(.icon-table) .tree-label",
+      { hasText: "orders" }
+    );
     const searchInput = page.locator(".tree-search input");
     await searchInput.fill("users");
-    await expect(page.locator(".tree-node.leaf .tree-label", { hasText: "orders" })).not.toBeVisible();
+    await expect(ordersRow.first()).not.toBeVisible();
     await searchInput.fill("");
-    await expect(page.locator(".tree-node.leaf .tree-label", { hasText: "orders" })).toBeVisible();
+    await expect(ordersRow.first()).toBeVisible();
   });
 
   test("type filter popover opens and closes", async ({ page }) => {
@@ -50,6 +58,16 @@ test.describe("Sidebar — search and type filter", () => {
     await page.locator(".tree-type-filter-item", { hasText: "Tables" }).locator("input").uncheck();
     await expect(page.locator(".tree-node.leaf .tree-label", { hasText: "users" })).not.toBeVisible();
     await expect(page.locator(".tree-filter-btn")).toHaveClass(/tree-filter-active/);
+  });
+
+  test("table nodes do NOT render row count or size in the sidebar", async ({ page }) => {
+    // The sidebar previously rendered "~58 · 64 KB" next to every
+    // table. We removed that because the row count is a stale planner
+    // estimate that confuses users when it disagrees with a live
+    // COUNT(*). The data still reaches the node (it powers the
+    // partition warning icons), but the visible chip is gone.
+    await expect(page.locator(".tree-node .tree-meta-stats")).toHaveCount(0);
+    await expect(page.locator(".tree-node .tree-meta-sep")).toHaveCount(0);
   });
 });
 
@@ -189,7 +207,7 @@ test.describe("Sidebar — table context menu", () => {
     await expect(menu).toBeVisible();
     await expect(menu.locator("button", { hasText: "Open Table" })).toBeVisible();
     await expect(menu.locator("button", { hasText: /^Query$/ })).toBeVisible();
-    await expect(menu.locator("button", { hasText: "View Structure" })).toBeVisible();
+    await expect(menu.locator("button", { hasText: "View Schema" })).toBeVisible();
     await expect(menu.locator("button", { hasText: "View DDL" })).toBeVisible();
   });
 
@@ -197,7 +215,7 @@ test.describe("Sidebar — table context menu", () => {
     const tableNode = await navigateToTable(page, "users");
     await tableNode.click({ button: "right" });
     await page.locator(".context-menu button", { hasText: "Open Table" }).click();
-    await expect(page.locator(".grid-table-name")).toContainText("users", { timeout: 5000 });
+    await expect(page.locator(".tv-name")).toContainText("users", { timeout: 5000 });
   });
 
   test("Query from context menu opens query console", async ({ page }) => {
@@ -207,11 +225,14 @@ test.describe("Sidebar — table context menu", () => {
     await expect(page.locator(".query-console")).toBeVisible({ timeout: 5000 });
   });
 
-  test("View Structure from context menu opens table info", async ({ page }) => {
+  test("View Schema from context menu opens TableView in Schema mode", async ({ page }) => {
     const tableNode = await navigateToTable(page, "orders");
     await tableNode.click({ button: "right" });
-    await page.locator(".context-menu button", { hasText: "View Structure" }).click();
-    await expect(page.locator(".table-info")).toBeVisible({ timeout: 5000 });
+    await page.locator(".context-menu button", { hasText: "View Schema" }).click();
+    await expect(page.locator(".tv-schema-strip")).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator(".tv-mode-switch-btn", { hasText: "Schema" })
+    ).toHaveClass(/active/);
   });
 
   test("View DDL from context menu opens DDL viewer", async ({ page }) => {

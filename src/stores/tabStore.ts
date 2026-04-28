@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type TabType = "table" | "query" | "ddl" | "structure" | "activity" | "stats" | "roles" | "chart" | "erd" | "querystats";
+export type TabType = "table" | "query" | "ddl" | "structure" | "inspector" | "activity" | "stats" | "roles" | "chart" | "erd" | "querystats" | "partitions";
 
 export interface TabInfo {
   id: string;
@@ -12,6 +12,9 @@ export interface TabInfo {
   schema: string;
   table?: string;
   objectType?: string;
+  /** Active sub-tab inside a TableView ("data" | "columns" | ...).
+   *  Persisted so the user comes back to the same panel they left. */
+  subTab?: string;
 }
 
 const STORAGE_KEY = "tablio-open-tabs";
@@ -49,6 +52,7 @@ interface TabState {
   closeOtherTabs: (id: string) => void;
   closeAllTabs: () => void;
   setActiveTab: (id: string) => void;
+  setTabSubTab: (id: string, subTab: string) => void;
   reorderTabs: (fromIndex: number, toIndex: number) => void;
   pruneStaleConnections: (validConnectionIds: Set<string>) => void;
 }
@@ -62,6 +66,18 @@ export const useTabStore = create<TabState>((set, get) => ({
   openTab: (tab) => {
     const existing = get().tabs.find((t) => t.id === tab.id);
     if (existing) {
+      // If the caller is asking us to focus an existing tab AND switch to a
+      // specific sub-tab (e.g. right-click "Open Inspector" on a tab whose
+      // Data view is already open), we update subTab so the existing tab
+      // jumps to the requested panel instead of staying where it was.
+      if (tab.subTab && tab.subTab !== existing.subTab) {
+        const newTabs = get().tabs.map((t) =>
+          t.id === tab.id ? { ...t, subTab: tab.subTab } : t
+        );
+        set({ tabs: newTabs, activeTabId: tab.id });
+        persistTabs(newTabs, tab.id);
+        return;
+      }
       set({ activeTabId: tab.id });
       persistTabs(get().tabs, tab.id);
       return;
@@ -103,6 +119,16 @@ export const useTabStore = create<TabState>((set, get) => ({
   setActiveTab: (id) => {
     set({ activeTabId: id });
     persistTabs(get().tabs, id);
+  },
+
+  setTabSubTab: (id, subTab) => {
+    set((s) => {
+      const newTabs = s.tabs.map((t) =>
+        t.id === id ? { ...t, subTab } : t
+      );
+      persistTabs(newTabs, s.activeTabId);
+      return { tabs: newTabs };
+    });
   },
 
   reorderTabs: (fromIndex, toIndex) => {

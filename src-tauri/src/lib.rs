@@ -36,6 +36,7 @@ pub fn run() {
             list_columns,
             list_indexes,
             list_foreign_keys,
+            list_referenced_by,
             list_functions,
             list_triggers,
             get_table_stats,

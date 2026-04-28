@@ -34,10 +34,26 @@ test.describe("Column organizer", () => {
 
   test("FK columns show FK badge", async ({ page }) => {
     await page.goto("/");
+    // `orders` is a partitioned parent; open via context menu so we
+    // get the tab regardless of leaf vs branch state.
     const tableNode = await navigateToTable(page, "orders");
-    await tableNode.click();
-    await page.locator(".grid-table-name", { hasText: "public.orders" }).waitFor({ timeout: 8000 });
-    await page.locator(".col-organizer-wrapper > button").click();
+    await tableNode.click({ button: "right" });
+    await page
+      .locator(".context-menu button", { hasText: "Open Table" })
+      .click();
+    await page.locator(".tv-name", { hasText: "public.orders" }).waitFor({ timeout: 8000 });
+    // beforeEach opens `users` first; opening `orders` adds a second
+    // tab and keeps the old DataGrid mounted in the background, which
+    // means there are TWO `.col-organizer-wrapper` elements in the
+    // DOM. We target the visible one so we click the active tab's
+    // button, not the hidden previous-tab copy. Also wait on data —
+    // the organizer is gated on `data` being non-null.
+    const orgBtn = page
+      .locator(".col-organizer-wrapper > button")
+      .filter({ has: page.locator("svg") })
+      .last();
+    await orgBtn.waitFor({ state: "visible", timeout: 10000 });
+    await orgBtn.click();
     await page.locator(".col-organizer-dropdown").waitFor();
     const fkItem = page.locator(".col-organizer-item", { hasText: "user_id" });
     await expect(fkItem.locator(".col-organizer-badge--fk")).toHaveText("FK");

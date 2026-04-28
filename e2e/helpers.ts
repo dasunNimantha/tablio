@@ -21,15 +21,26 @@ export async function navigateToTable(page: Page, tableName: string) {
   await tables.waitFor({ timeout: 8000 });
   await tables.click();
 
-  const tableNode = page.locator(".tree-node.leaf .tree-label", { hasText: tableName });
+  // Match both leaf tables AND partitioned parents (which render as
+  // non-leaf branches because they have child partitions to expand
+  // into). The `.icon-table` icon is the discriminator that lets us
+  // exclude folder/group nodes that share the same tree-label text.
+  const tableNode = page
+    .locator(".tree-node:has(.icon-table) .tree-label", { hasText: tableName })
+    .first();
   await tableNode.waitFor({ timeout: 8000 });
   return tableNode;
 }
 
 export async function openTable(page: Page, tableName: string) {
   const tableNode = await navigateToTable(page, tableName);
-  await tableNode.click();
-  await page.locator(".grid-table-name").waitFor({ timeout: 8000 });
+  // Open via context menu so this works uniformly for leaf tables
+  // (single-click opens) and partitioned parents (single-click only
+  // toggles expand; needs an explicit "Open Table" action).
+  await tableNode.click({ button: "right" });
+  await page.locator(".context-menu").waitFor({ timeout: 3000 });
+  await page.locator(".context-menu button", { hasText: "Open Table" }).click();
+  await page.locator(".tv-name", { hasText: tableName }).waitFor({ timeout: 10000 });
 }
 
 export async function openContextMenu(page: Page, tableName: string) {
@@ -38,10 +49,14 @@ export async function openContextMenu(page: Page, tableName: string) {
   await page.locator(".context-menu").waitFor({ timeout: 3000 });
 }
 
+/** Opens the unified Schema view via the "View Schema" context-menu
+ *  item (formerly "View Structure" + "View Stats"). The new TableView
+ *  exposes Data and Schema modes; this helper lands on Schema mode and
+ *  waits for its sub-tab strip to render. */
 export async function openStructureView(page: Page, tableName: string) {
   await openContextMenu(page, tableName);
-  await page.locator(".context-menu button", { hasText: "View Structure" }).click();
-  await page.locator(".table-info").waitFor({ timeout: 5000 });
+  await page.locator(".context-menu button", { hasText: "View Schema" }).click();
+  await page.locator(".tv-schema-strip").waitFor({ timeout: 8000 });
 }
 
 export async function openDDL(page: Page, tableName: string) {
@@ -62,10 +77,47 @@ export async function openConnectionDialog(page: Page) {
   await page.locator(".dialog").waitFor({ timeout: 3000 });
 }
 
+/** Opens the Schema view and switches to the Statistics sub-tab. The
+ *  former "View Stats" menu item was folded into the unified Schema
+ *  mode; the Statistics panel still renders the same `.table-stats`
+ *  layout, just nested inside the schema tab strip. */
 export async function openTableStats(page: Page, tableName: string) {
-  await openContextMenu(page, tableName);
-  await page.locator(".context-menu button", { hasText: "View Stats" }).click();
+  await openStructureView(page, tableName);
+  await page.locator(".tv-schema-tab", { hasText: "Statistics" }).click();
   await page.locator(".table-stats").waitFor({ timeout: 8000 });
+}
+
+/** Opens the Schema view of a partitioned table and switches to the
+ *  Partitions sub-tab. Partitioned parents are rendered as non-leaf
+ *  branches in the sidebar (so the user can drill into their leaf
+ *  partitions), which means the standard `navigateToTable` selector
+ *  (which requires `.leaf`) does not match. We walk the tree manually
+ *  here and right-click the parent to reach "View Schema". */
+export async function openPartitionsView(page: Page, tableName: string) {
+  await connectToLocalPostgres(page);
+
+  const db = page.locator(".tree-node .tree-label", { hasText: /^postgres$/ });
+  await db.click();
+  const schema = page.locator(".tree-node .tree-label", { hasText: /^public$/ });
+  await schema.waitFor({ timeout: 8000 });
+  await schema.click();
+  const tables = page.locator(".tree-node .tree-label", { hasText: /^Tables$/ });
+  await tables.waitFor({ timeout: 8000 });
+  await tables.click();
+
+  // Match the partitioned parent specifically — same `.tree-label`
+  // text as a leaf, but the row is NOT marked `.leaf` because it has
+  // child partitions to expand into.
+  const parent = page
+    .locator(".tree-node:not(.leaf) .tree-label", { hasText: tableName })
+    .first();
+  await parent.waitFor({ timeout: 8000 });
+  await parent.click({ button: "right" });
+  await page.locator(".context-menu").waitFor({ timeout: 3000 });
+  await page.locator(".context-menu button", { hasText: "View Schema" }).click();
+  await page.locator(".tv-schema-strip").waitFor({ timeout: 8000 });
+  await page.locator(".tv-schema-tab", { hasText: "Partitions" }).click();
+  await page.locator(".pv-table").waitFor({ timeout: 8000 });
 }
 
 export async function openActivity(page: Page) {

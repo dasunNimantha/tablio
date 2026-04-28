@@ -244,6 +244,7 @@ pub async fn my_list_tables(
             schema: database.to_string(),
             table_type: r.get("TABLE_TYPE"),
             row_count_estimate: r.try_get::<i64, _>("TABLE_ROWS").ok(),
+            ..Default::default()
         })
         .collect())
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, TableStats as TableStatsType } from "../../lib/tauri";
 import { Loader2 } from "lucide-react";
+import { formatRelativeTime } from "../../lib/timeFormat";
 import "./TableStats.css";
 
 interface Props {
@@ -8,6 +9,9 @@ interface Props {
   database: string;
   schema: string;
   table: string;
+  /** When rendered inside another container that already shows the
+   *  table identity (e.g. SchemaPage), suppress the internal toolbar. */
+  embedded?: boolean;
 }
 
 function parseSize(s: string): number {
@@ -50,6 +54,7 @@ export function TableStats({
   database,
   schema,
   table,
+  embedded = false,
 }: Props) {
   const [stats, setStats] = useState<TableStatsType | null>(null);
   const [loading, setLoading] = useState(true);
@@ -110,11 +115,13 @@ export function TableStats({
 
   return (
     <div className="table-stats">
-      <div className="table-stats-toolbar">
-        <span className="table-stats-name">
-          {schema}.{table}
-        </span>
-      </div>
+      {!embedded && (
+        <div className="table-stats-toolbar">
+          <span className="table-stats-name">
+            {schema}.{table}
+          </span>
+        </div>
+      )}
       <div className="table-stats-body">
         <div className="table-stats-grid">
           <div className="table-stats-card">
@@ -127,11 +134,21 @@ export function TableStats({
           </div>
           <div className="table-stats-card">
             <span className="table-stats-label">Last Vacuum</span>
-            <span className="table-stats-value">{stats.last_vacuum ?? "—"}</span>
+            <span
+              className="table-stats-value table-stats-value-time"
+              title={stats.last_vacuum ?? undefined}
+            >
+              {formatRelativeTime(stats.last_vacuum) ?? "—"}
+            </span>
           </div>
           <div className="table-stats-card">
             <span className="table-stats-label">Last Analyze</span>
-            <span className="table-stats-value">{stats.last_analyze ?? "—"}</span>
+            <span
+              className="table-stats-value table-stats-value-time"
+              title={stats.last_analyze ?? undefined}
+            >
+              {formatRelativeTime(stats.last_analyze) ?? "—"}
+            </span>
           </div>
         </div>
 

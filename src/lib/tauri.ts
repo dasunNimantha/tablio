@@ -87,6 +87,8 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       return mock.mockFunctions as T;
     case "list_triggers":
       return [] as T;
+    case "list_referenced_by":
+      return [] as T;
     case "get_table_stats":
       return mock.mockTableStats as T;
     case "import_data":
@@ -166,6 +168,16 @@ export interface TableInfo {
   schema: string;
   table_type: string;
   row_count_estimate: number | null;
+  /** Schema-qualified parent name when this row is a partition child. */
+  parent_table?: string | null;
+  /** "range" | "list" | "hash" — set on partitioned parents. */
+  partition_strategy?: "range" | "list" | "hash" | null;
+  /** Human-readable partition bound for partition children. */
+  partition_bound?: string | null;
+  /** True when this is the DEFAULT partition for its parent. */
+  is_default_partition?: boolean | null;
+  /** Size on disk including indexes/toast (pg_total_relation_size), bytes. */
+  total_bytes?: number | null;
 }
 
 export interface ColumnInfo {
@@ -301,6 +313,16 @@ export interface ForeignKeyInfo {
   name: string;
   column: string;
   referenced_table: string;
+  referenced_column: string;
+  on_delete: string;
+  on_update: string;
+}
+
+export interface ReferencingTableInfo {
+  constraint_name: string;
+  referencing_schema: string;
+  referencing_table: string;
+  referencing_column: string;
   referenced_column: string;
   on_delete: string;
   on_update: string;
@@ -628,6 +650,14 @@ export const api = {
     table: string
   ): Promise<ForeignKeyInfo[]> =>
     invoke("list_foreign_keys", { connectionId, database, schema, table }),
+
+  listReferencedBy: (
+    connectionId: string,
+    database: string,
+    schema: string,
+    table: string
+  ): Promise<ReferencingTableInfo[]> =>
+    invoke("list_referenced_by", { connectionId, database, schema, table }),
 
   dropObject: (request: DropObjectRequest): Promise<void> =>
     invoke("drop_object", { request }),

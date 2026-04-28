@@ -100,17 +100,17 @@ test.describe("Data grid", () => {
   });
 
   test("opens table tab with table name in toolbar", async ({ page }) => {
-    await expect(page.locator(".grid-table-name")).toContainText("users", { timeout: 5000 });
+    await expect(page.locator(".tv-name")).toContainText("users", { timeout: 5000 });
   });
 
   test("shows column headers", async ({ page }) => {
-    await expect(page.locator(".grid-table-name")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".tv-name")).toBeVisible({ timeout: 5000 });
     await expect(page.locator("text=email")).toBeVisible({ timeout: 5000 });
     await expect(page.locator("text=username")).toBeVisible({ timeout: 5000 });
   });
 
   test("shows row data", async ({ page }) => {
-    await expect(page.locator(".grid-table-name")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".tv-name")).toBeVisible({ timeout: 5000 });
     await expect(page.locator("text=alice_johnson@example.com").first()).toBeVisible({ timeout: 5000 });
   });
 
@@ -120,39 +120,48 @@ test.describe("Data grid", () => {
   });
 });
 
-test.describe("Table structure", () => {
+test.describe("Table structure (now Schema mode of TableView)", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/");
     const tableNode = await navigateToTable(page, "orders");
     await tableNode.click({ button: "right" });
 
-    const viewStructure = page.locator(".context-menu button", { hasText: "View Structure" });
-    await viewStructure.waitFor({ timeout: 3000 });
-    await viewStructure.click();
+    // The "View Structure" + "View Stats" menu items were folded into
+    // a single "View Schema" entry that opens TableView in Schema mode.
+    const viewSchema = page.locator(".context-menu button", { hasText: "View Schema" });
+    await viewSchema.waitFor({ timeout: 3000 });
+    await viewSchema.click();
+    await page.locator(".tv-schema-strip").waitFor({ timeout: 8000 });
   });
 
-  test("shows Columns, Indexes, Foreign Keys tabs", async ({ page }) => {
-    await expect(page.locator(".table-info-tab", { hasText: "Columns" })).toBeVisible({ timeout: 5000 });
-    await expect(page.locator(".table-info-tab", { hasText: "Indexes" })).toBeVisible();
-    await expect(page.locator(".table-info-tab", { hasText: "Foreign Keys" })).toBeVisible();
+  test("shows Columns, Indexes, Foreign Keys schema sub-tabs", async ({ page }) => {
+    await expect(
+      page.locator(".tv-schema-tab", { hasText: "Columns" })
+    ).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator(".tv-schema-tab", { hasText: "Indexes" })
+    ).toBeVisible();
+    await expect(
+      page.locator(".tv-schema-tab", { hasText: "Foreign Keys" })
+    ).toBeVisible();
   });
 
   test("shows FK badge on foreign key columns", async ({ page }) => {
-    await expect(page.locator(".table-info .fk-badge")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".tv-badge-fk").first()).toBeVisible({ timeout: 5000 });
   });
 
   test("shows PK badge on primary key columns", async ({ page }) => {
-    await expect(page.locator(".table-info .pk-badge")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".tv-badge-pk").first()).toBeVisible({ timeout: 5000 });
   });
 
   test("indexes tab shows table-specific indexes", async ({ page }) => {
-    await page.locator(".table-info-tab", { hasText: "Indexes" }).click();
+    await page.locator(".tv-schema-tab", { hasText: "Indexes" }).click();
     await expect(page.locator("text=orders_pkey")).toBeVisible({ timeout: 5000 });
     await expect(page.locator("text=orders_user_id_idx")).toBeVisible();
   });
 
   test("foreign keys tab shows FK details", async ({ page }) => {
-    await page.locator(".table-info-tab", { hasText: "Foreign Keys" }).click();
+    await page.locator(".tv-schema-tab", { hasText: "Foreign Keys" }).click();
     await expect(page.locator("text=orders_user_id_fkey")).toBeVisible({ timeout: 5000 });
     await expect(page.locator("text=users.id")).toBeVisible();
   });

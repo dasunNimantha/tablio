@@ -38,6 +38,17 @@ pub trait DatabaseDriver: Send + Sync {
         schema: &str,
         table: &str,
     ) -> Result<Vec<ForeignKeyInfo>>;
+    /// Returns the FKs from other tables that point at this one. Default
+    /// returns an empty Vec so backends without a meaningful FK catalog
+    /// (or those that haven't implemented it yet) opt in incrementally.
+    async fn list_referenced_by(
+        &self,
+        _database: &str,
+        _schema: &str,
+        _table: &str,
+    ) -> Result<Vec<ReferencingTableInfo>> {
+        Ok(Vec::new())
+    }
     async fn list_functions(&self, database: &str, schema: &str) -> Result<Vec<FunctionInfo>>;
     async fn list_triggers(
         &self,

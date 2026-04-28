@@ -1,6 +1,6 @@
 import { useTabStore } from "../../stores/tabStore";
 import { useShallow } from "zustand/react/shallow";
-import { X, Table2, Terminal, Code, Columns3, Activity, BarChart3, Shield, TrendingUp } from "lucide-react";
+import { X, Table2, Terminal, Code, Activity, BarChart3, Shield, TrendingUp } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import "./Tabs.css";
 
@@ -71,12 +71,16 @@ export function TabBar() {
               style={{ background: tab.connectionColor }}
             />
             <span className="tab-icon">
-              {tab.type === "table" ? (
+              {tab.type === "table" ||
+              tab.type === "structure" ||
+              tab.type === "inspector" ||
+              tab.type === "partitions" ? (
+                // All per-table tab variants render TableView, so they
+                // share the same icon — fewer visual variants in the
+                // tab bar makes scanning across many tabs easier.
                 <Table2 size={12} />
               ) : tab.type === "ddl" ? (
                 <Code size={12} />
-              ) : tab.type === "structure" ? (
-                <Columns3 size={12} />
               ) : tab.type === "activity" ? (
                 <Activity size={12} />
               ) : tab.type === "stats" ? (

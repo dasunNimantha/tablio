@@ -143,6 +143,24 @@ pub async fn list_foreign_keys(
 }
 
 #[tauri::command]
+pub async fn list_referenced_by(
+    pool: State<'_, Arc<PoolManager>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Vec<ReferencingTableInfo>, String> {
+    let driver = pool
+        .get_driver(&connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    driver
+        .list_referenced_by(&database, &schema, &table)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn alter_table(
     pool: State<'_, Arc<PoolManager>>,
     request: AlterTableRequest,
