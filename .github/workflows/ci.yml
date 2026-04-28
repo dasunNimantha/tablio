@@ -448,3 +448,44 @@ jobs:
       - name: Build Tauri app
         if: needs.changes.outputs.backend == 'true'
         run: npx tauri build
+
+  # Aggregator job exposed to branch protection / rulesets as the single
+  # required status check. It runs unconditionally (`if: always()`) so a
+  # PR that fails or cancels any upstream job cannot satisfy required
+  # checks by leaving downstream jobs in the "skipped" state — which
+  # GitHub treats as a pass and which previously let red PRs merge.
+  ci-required:
+    name: CI Required
+    needs:
+      - changes
+      - test-frontend
+      - test-e2e
+      - fmt-and-clippy
+      - test-postgres
+      - test-mysql
+      - test-mariadb
+      - test-cockroachdb
+      - test-tidb
+      - test-sqlite
+      - test-cassandra
+      - test-scylladb
+      - build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify upstream jobs
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          set -euo pipefail
+          echo "Upstream job results:"
+          echo "$NEEDS_JSON" | jq -r 'to_entries[] | "  \(.key): \(.value.result)"'
+          # Allowed terminal states. `skipped` is permitted because many
+          # jobs are gated on the `changes` filter (frontend-only PRs
+          # legitimately skip the backend matrix, etc.). `failure` and
+          # `cancelled` always fail this gate.
+          if echo "$NEEDS_JSON" | jq -e 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled")' >/dev/null; then
+            echo "::error::One or more required jobs failed or were cancelled"
+            exit 1
+          fi
+          echo "All required jobs succeeded or were intentionally skipped."
