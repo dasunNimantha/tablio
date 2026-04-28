@@ -1,8 +1,23 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useConnectionStore } from "../stores/connectionStore";
 import { api, ConnectionConfig, SshAuthMethod } from "../lib/tauri";
-import { X, Loader2, CheckCircle, XCircle, ChevronDown, Folder, Key, Lock } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle,
+  ChevronDown,
+  Database,
+  Folder,
+  Key,
+  Loader2,
+  Lock,
+  Server,
+  Shield,
+  SlidersHorizontal,
+  UserRound,
+  X,
+  XCircle,
+} from "lucide-react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import "./ConnectionDialog.css";
 
@@ -36,6 +51,212 @@ type ValidationField =
   | "ssh_password"
   | "ssh_key_path";
 type ValidationErrors = Partial<Record<ValidationField, string>>;
+
+type DialogSectionId =
+  | "general"
+  | "connection"
+  | "authentication"
+  | "security"
+  | "ssh"
+  | "advanced";
+
+interface DialogSection {
+  id: DialogSectionId;
+  label: string;
+  description: string;
+  icon: ReactNode;
+}
+
+const SECTION_FIELDS: Record<DialogSectionId, ValidationField[]> = {
+  general: ["name"],
+  connection: ["host", "port", "database"],
+  authentication: ["user"],
+  security: [],
+  ssh: ["ssh_host", "ssh_port", "ssh_user", "ssh_password", "ssh_key_path"],
+  advanced: [],
+};
+
+function getConnectionDialogSections(
+  isSqlite: boolean,
+  supportsTlsOptions: boolean,
+): DialogSection[] {
+  const sections: DialogSection[] = [
+    {
+      id: "general",
+      label: "General",
+      description: "Name, type, folder and colour",
+      icon: <Database size={16} />,
+    },
+    {
+      id: "connection",
+      label: "Connection",
+      description: isSqlite ? "Local database file" : "Host, port and database",
+      icon: <Server size={16} />,
+    },
+  ];
+
+  if (!isSqlite) {
+    sections.push(
+      {
+        id: "authentication",
+        label: "Authentication",
+        description: "User credentials and future auth methods",
+        icon: <UserRound size={16} />,
+      },
+      {
+        id: "security",
+        label: "Security",
+        description: supportsTlsOptions ? "TLS and certificates" : "Driver-managed transport",
+        icon: <Shield size={16} />,
+      },
+      {
+        id: "ssh",
+        label: "SSH Tunnel",
+        description: "Bastion host and SSH auth",
+        icon: <Key size={16} />,
+      },
+    );
+  }
+
+  sections.push({
+    id: "advanced",
+    label: "Advanced",
+    description: "Parameters and driver options",
+    icon: <SlidersHorizontal size={16} />,
+  });
+
+  return sections;
+}
+
+function getSectionErrorCount(
+  sectionId: DialogSectionId,
+  errors: ValidationErrors,
+): number {
+  return SECTION_FIELDS[sectionId].filter((field) => !!errors[field]).length;
+}
+
+function getFirstInvalidSection(
+  errors: ValidationErrors,
+  sections: DialogSection[],
+): DialogSectionId | null {
+  return sections.find((section) => getSectionErrorCount(section.id, errors) > 0)?.id ?? null;
+}
+
+function FormField({
+  label,
+  error,
+  children,
+  className = "",
+  style,
+  description,
+}: {
+  label: string;
+  error?: string;
+  children: ReactNode;
+  className?: string;
+  style?: CSSProperties;
+  description?: string;
+}) {
+  return (
+    <div
+      className={`form-group${className ? ` ${className}` : ""}${error ? " form-group--error" : ""}`}
+      style={style}
+    >
+      <label>{label}</label>
+      {description && <div className="form-field-description">{description}</div>}
+      {children}
+      {error && <div className="field-error">{error}</div>}
+    </div>
+  );
+}
+
+function SectionCard({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="connection-section-card" aria-label={title}>
+      <div className="connection-section-heading">
+        <h3>{title}</h3>
+        <p>{description}</p>
+      </div>
+      <div className="connection-section-fields">{children}</div>
+    </section>
+  );
+}
+
+function ConnectionDialogNav({
+  sections,
+  activeSection,
+  errors,
+  showErrors,
+  onSelect,
+}: {
+  sections: DialogSection[];
+  activeSection: DialogSectionId;
+  errors: ValidationErrors;
+  showErrors: boolean;
+  onSelect: (sectionId: DialogSectionId) => void;
+}) {
+  return (
+    <nav className="connection-dialog-nav" aria-label="Connection settings sections">
+      {sections.map((section) => {
+        const errorCount = showErrors ? getSectionErrorCount(section.id, errors) : 0;
+        return (
+          <button
+            key={section.id}
+            type="button"
+            className={`connection-nav-item${
+              activeSection === section.id ? " connection-nav-item--active" : ""
+            }${errorCount > 0 ? " connection-nav-item--error" : ""}`}
+            onClick={() => onSelect(section.id)}
+            data-section={section.id}
+          >
+            <span className="connection-nav-item__icon">{section.icon}</span>
+            <span className="connection-nav-item__text">
+              <span className="connection-nav-item__label">{section.label}</span>
+              <span className="connection-nav-item__description">{section.description}</span>
+            </span>
+            {errorCount > 0 && (
+              <span className="connection-nav-item__error" title={`${errorCount} validation error${errorCount === 1 ? "" : "s"}`}>
+                <AlertCircle size={13} />
+                {errorCount}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+function ColorPicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="color-picker">
+      {COLORS.map((c) => (
+        <button
+          key={c}
+          type="button"
+          className={`color-dot ${value === c ? "active" : ""}`}
+          style={{ background: c }}
+          onClick={() => onChange(c)}
+          aria-label={`Use colour ${c}`}
+        />
+      ))}
+    </div>
+  );
+}
 
 export function normalizeConnectionForm(form: ConnectionConfig): ConnectionConfig {
   const sshEnabled = !!form.ssh_enabled;
@@ -600,13 +821,27 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
   const [saving, setSaving] = useState(false);
   const [showValidation, setShowValidation] = useState(false);
   const [touched, setTouched] = useState<Partial<Record<ValidationField, boolean>>>({});
+  const [activeSection, setActiveSection] = useState<DialogSectionId>("general");
   const testingRef = useRef(false);
 
   const isSqlite = form.db_type === "sqlite";
+  const supportsTlsOptions = !isSqlite && form.db_type !== "cassandra";
+  const dialogSections = useMemo(
+    () => getConnectionDialogSections(isSqlite, supportsTlsOptions),
+    [isSqlite, supportsTlsOptions],
+  );
   const validationErrors = useMemo(
     () => validateConnectionForm(form, connections),
     [form, connections],
   );
+  const activeSectionMeta =
+    dialogSections.find((section) => section.id === activeSection) ?? dialogSections[0];
+
+  useEffect(() => {
+    if (!dialogSections.some((section) => section.id === activeSection)) {
+      setActiveSection(dialogSections[0].id);
+    }
+  }, [activeSection, dialogSections]);
 
   const touchField = (field: ValidationField) => {
     setTouched((prev) => (prev[field] ? prev : { ...prev, [field]: true }));
@@ -627,6 +862,8 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
     setShowValidation(true);
     const nextErrors = validateConnectionForm(normalized, connections);
     if (Object.keys(nextErrors).length > 0) {
+      const firstInvalidSection = getFirstInvalidSection(nextErrors, dialogSections);
+      if (firstInvalidSection) setActiveSection(firstInvalidSection);
       setTestResult(null);
       setTestError("Please fix the highlighted fields.");
       return null;
@@ -648,7 +885,6 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
   };
 
   const [testing, setTesting] = useState(false);
-  const supportsTlsOptions = !isSqlite && form.db_type !== "cassandra";
 
   const handleTest = async () => {
     if (testingRef.current) return;
@@ -690,7 +926,7 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
 
   return (
     <div className="dialog-overlay">
-      <div className="dialog">
+      <div className="dialog connection-dialog">
         <div className="dialog-header">
           <h2>{isEdit ? "Edit Connection" : "New Connection"}</h2>
           <button className="btn-icon" onClick={onClose}>
@@ -698,199 +934,231 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
           </button>
         </div>
 
-        <div className="dialog-body">
-          <div className="form-row">
-            <DbTypeDropdown
-              value={form.db_type}
-              onChange={handleDbTypeChange}
-              className="form-group--db-type"
-            />
-            <div className={`form-group flex-1${getFieldError("name") ? " form-group--error" : ""}`}>
-              <label>Connection Name</label>
-              <input
-                value={form.name}
-                onChange={(e) => updateField("name", e.target.value)}
-                onBlur={() => touchField("name")}
-                placeholder="My Database"
-                aria-invalid={!!getFieldError("name")}
-              />
-              {getFieldError("name") && <div className="field-error">{getFieldError("name")}</div>}
-            </div>
-          </div>
-
-          {isSqlite ? (
-            <div className="form-row">
-              <div className={`form-group flex-1${getFieldError("database") ? " form-group--error" : ""}`}>
-                <label>Database File Path</label>
-                <input
-                  value={form.database}
-                  onChange={(e) => updateField("database", e.target.value)}
-                  onBlur={() => touchField("database")}
-                  placeholder="/path/to/database.db"
-                  aria-invalid={!!getFieldError("database")}
-                />
-                {getFieldError("database") && (
-                  <div className="field-error">{getFieldError("database")}</div>
-                )}
-              </div>
-              <div className="form-group form-group--color">
-                <label>Color</label>
-                <div className="color-picker">
-                  {COLORS.map((c) => (
-                    <button
-                      key={c}
-                      className={`color-dot ${form.color === c ? "active" : ""}`}
-                      style={{ background: c }}
-                      onClick={() => setForm((f) => ({ ...f, color: c }))}
-                    />
-                  ))}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="form-row">
-                <div className={`form-group flex-1${getFieldError("host") ? " form-group--error" : ""}`}>
-                  <label>Host</label>
-                  <input
-                    value={form.host}
-                    onChange={(e) => updateField("host", e.target.value)}
-                    onBlur={() => touchField("host")}
-                    placeholder="localhost"
-                    aria-invalid={!!getFieldError("host")}
-                  />
-                  {getFieldError("host") && <div className="field-error">{getFieldError("host")}</div>}
-                </div>
-                <div className={`form-group${getFieldError("port") ? " form-group--error" : ""}`} style={{ width: 100 }}>
-                  <label>Port</label>
-                  <input
-                    type="number"
-                    value={form.port}
-                    onChange={(e) => updateField("port", parseInt(e.target.value, 10) || 0)}
-                    onBlur={() => touchField("port")}
-                    min={1}
-                    max={65535}
-                    aria-invalid={!!getFieldError("port")}
-                  />
-                  {getFieldError("port") && <div className="field-error">{getFieldError("port")}</div>}
-                </div>
-              </div>
-
-              <div className="form-row">
-                <div className={`form-group flex-1${getFieldError("user") ? " form-group--error" : ""}`}>
-                  <label>Username</label>
-                  <input
-                    value={form.user}
-                    onChange={(e) => updateField("user", e.target.value)}
-                    onBlur={() => touchField("user")}
-                    placeholder="postgres"
-                    aria-invalid={!!getFieldError("user")}
-                  />
-                  {getFieldError("user") && <div className="field-error">{getFieldError("user")}</div>}
-                </div>
-                <div className="form-group flex-1">
-                  <label>Password</label>
-                  <input
-                    type="password"
-                    value={form.password}
-                    onChange={(e) => updateField("password", e.target.value)}
-                  />
-                </div>
-              </div>
-
-              <div className="form-row">
-                <div className={`form-group flex-1${getFieldError("database") ? " form-group--error" : ""}`}>
-                  <label>{form.db_type === "cassandra" ? "Keyspace (optional)" : "Database (optional)"}</label>
-                  <input
-                    value={form.database}
-                    onChange={(e) => updateField("database", e.target.value)}
-                    onBlur={() => touchField("database")}
-                    placeholder={form.db_type === "cassandra" ? "my_keyspace" : "mydb"}
-                    aria-invalid={!!getFieldError("database")}
-                  />
-                  {getFieldError("database") && (
-                    <div className="field-error">{getFieldError("database")}</div>
-                  )}
-                </div>
-                <div className="form-group form-group--color">
-                  <label>Color</label>
-                  <div className="color-picker">
-                    {COLORS.map((c) => (
-                      <button
-                        key={c}
-                        className={`color-dot ${form.color === c ? "active" : ""}`}
-                        style={{ background: c }}
-                        onClick={() => setForm((f) => ({ ...f, color: c }))}
-                      />
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
-
-          {supportsTlsOptions && (
-            <div className="security-options" aria-label="Transport security">
-              <label className={`security-toggle${form.ssl ? " security-toggle--active" : ""}`}>
-                <span className="security-toggle__control">
-                  <input
-                    className="security-toggle__input"
-                    type="checkbox"
-                    checked={form.ssl}
-                    onChange={(e) => {
-                      updateField("ssl", e.target.checked);
-                      if (!e.target.checked) updateField("trust_server_cert", false);
-                    }}
-                  />
-                  <span className="security-toggle__slider" aria-hidden="true" />
-                </span>
-                <span className="security-toggle__text">
-                  <span className="security-toggle__label">SSL / TLS</span>
-                </span>
-              </label>
-
-              <label
-                className={`security-toggle security-toggle--nested${
-                  form.trust_server_cert ? " security-toggle--active" : ""
-                }${
-                  !form.ssl ? " security-toggle--disabled" : ""
-                }`}
-              >
-                <span className="security-toggle__control">
-                  <input
-                    className="security-toggle__input"
-                    type="checkbox"
-                    checked={form.trust_server_cert ?? false}
-                    disabled={!form.ssl}
-                    onChange={(e) => updateField("trust_server_cert", e.target.checked)}
-                  />
-                  <span className="security-toggle__slider" aria-hidden="true" />
-                </span>
-                <span className="security-toggle__text">
-                  <span className="security-toggle__label">Trust server certificate</span>
-                  <span className="security-toggle__meta">(self-signed)</span>
-                </span>
-              </label>
-            </div>
-          )}
-
-          {!isSqlite && (
-            <SshTunnelSection
-              form={form}
-              updateField={updateField}
-              touchField={touchField}
-              getFieldError={getFieldError}
-            />
-          )}
-
-          <GroupInput
-            value={form.group || ""}
-            onChange={(v) => updateField("group", v || null)}
-            connections={connections}
+        <div className="dialog-body connection-dialog-body">
+          <ConnectionDialogNav
+            sections={dialogSections}
+            activeSection={activeSection}
+            errors={validationErrors}
+            showErrors={showValidation}
+            onSelect={setActiveSection}
           />
 
-          {testError && <div className="connection-form-error">{testError}</div>}
+          <div className="connection-dialog-content">
+            <SectionCard
+              title={activeSectionMeta.label}
+              description={activeSectionMeta.description}
+            >
+              {activeSection === "general" && (
+                <>
+                  <div className="form-row">
+                    <DbTypeDropdown
+                      value={form.db_type}
+                      onChange={handleDbTypeChange}
+                      className="form-group--db-type"
+                    />
+                    <FormField
+                      label="Connection Name"
+                      error={getFieldError("name")}
+                      className="flex-1"
+                    >
+                      <input
+                        value={form.name}
+                        onChange={(e) => updateField("name", e.target.value)}
+                        onBlur={() => touchField("name")}
+                        placeholder="My Database"
+                        aria-invalid={!!getFieldError("name")}
+                      />
+                    </FormField>
+                  </div>
 
+                  <div className="form-row">
+                    <div className="flex-1">
+                      <GroupInput
+                        value={form.group || ""}
+                        onChange={(v) => updateField("group", v || null)}
+                        connections={connections}
+                      />
+                    </div>
+                    <FormField label="Color" className="form-group--color">
+                      <ColorPicker
+                        value={form.color}
+                        onChange={(color) => setForm((f) => ({ ...f, color }))}
+                      />
+                    </FormField>
+                  </div>
+                </>
+              )}
+
+              {activeSection === "connection" && (
+                isSqlite ? (
+                  <FormField
+                    label="Database File Path"
+                    error={getFieldError("database")}
+                    description="SQLite connections use a local database file instead of a network host."
+                  >
+                    <input
+                      value={form.database}
+                      onChange={(e) => updateField("database", e.target.value)}
+                      onBlur={() => touchField("database")}
+                      placeholder="/path/to/database.db"
+                      aria-invalid={!!getFieldError("database")}
+                    />
+                  </FormField>
+                ) : (
+                  <>
+                    <div className="form-row">
+                      <FormField
+                        label="Host"
+                        error={getFieldError("host")}
+                        className="flex-1"
+                      >
+                        <input
+                          value={form.host}
+                          onChange={(e) => updateField("host", e.target.value)}
+                          onBlur={() => touchField("host")}
+                          placeholder="localhost"
+                          aria-invalid={!!getFieldError("host")}
+                        />
+                      </FormField>
+                      <FormField
+                        label="Port"
+                        error={getFieldError("port")}
+                        style={{ width: 112 }}
+                      >
+                        <input
+                          type="number"
+                          value={form.port}
+                          onChange={(e) => updateField("port", parseInt(e.target.value, 10) || 0)}
+                          onBlur={() => touchField("port")}
+                          min={1}
+                          max={65535}
+                          aria-invalid={!!getFieldError("port")}
+                        />
+                      </FormField>
+                    </div>
+
+                    <FormField
+                      label={form.db_type === "cassandra" ? "Keyspace (optional)" : "Database (optional)"}
+                      error={getFieldError("database")}
+                    >
+                      <input
+                        value={form.database}
+                        onChange={(e) => updateField("database", e.target.value)}
+                        onBlur={() => touchField("database")}
+                        placeholder={form.db_type === "cassandra" ? "my_keyspace" : "mydb"}
+                        aria-invalid={!!getFieldError("database")}
+                      />
+                    </FormField>
+                  </>
+                )
+              )}
+
+              {activeSection === "authentication" && !isSqlite && (
+                <>
+                  <div className="auth-method-card auth-method-card--active">
+                    <Lock size={16} />
+                    <div>
+                      <strong>Password</strong>
+                      <span>Built-in username/password authentication. More methods can be added here.</span>
+                    </div>
+                  </div>
+
+                  <div className="form-row">
+                    <FormField
+                      label="Username"
+                      error={getFieldError("user")}
+                      className="flex-1"
+                    >
+                      <input
+                        value={form.user}
+                        onChange={(e) => updateField("user", e.target.value)}
+                        onBlur={() => touchField("user")}
+                        placeholder="postgres"
+                        aria-invalid={!!getFieldError("user")}
+                      />
+                    </FormField>
+                    <FormField label="Password" className="flex-1">
+                      <input
+                        type="password"
+                        value={form.password}
+                        onChange={(e) => updateField("password", e.target.value)}
+                      />
+                    </FormField>
+                  </div>
+                </>
+              )}
+
+              {activeSection === "security" && !isSqlite && (
+                supportsTlsOptions ? (
+                  <div className="security-options" aria-label="Transport security">
+                    <label className={`security-toggle${form.ssl ? " security-toggle--active" : ""}`}>
+                      <span className="security-toggle__control">
+                        <input
+                          className="security-toggle__input"
+                          type="checkbox"
+                          checked={form.ssl}
+                          onChange={(e) => {
+                            updateField("ssl", e.target.checked);
+                            if (!e.target.checked) updateField("trust_server_cert", false);
+                          }}
+                        />
+                        <span className="security-toggle__slider" aria-hidden="true" />
+                      </span>
+                      <span className="security-toggle__text">
+                        <span className="security-toggle__label">SSL / TLS</span>
+                      </span>
+                    </label>
+
+                    <label
+                      className={`security-toggle security-toggle--nested${
+                        form.trust_server_cert ? " security-toggle--active" : ""
+                      }${
+                        !form.ssl ? " security-toggle--disabled" : ""
+                      }`}
+                    >
+                      <span className="security-toggle__control">
+                        <input
+                          className="security-toggle__input"
+                          type="checkbox"
+                          checked={form.trust_server_cert ?? false}
+                          disabled={!form.ssl}
+                          onChange={(e) => updateField("trust_server_cert", e.target.checked)}
+                        />
+                        <span className="security-toggle__slider" aria-hidden="true" />
+                      </span>
+                      <span className="security-toggle__text">
+                        <span className="security-toggle__label">Trust server certificate</span>
+                        <span className="security-toggle__meta">(self-signed)</span>
+                      </span>
+                    </label>
+                  </div>
+                ) : (
+                  <div className="connection-section-note">
+                    TLS options are not exposed for Cassandra / ScyllaDB yet. This section is reserved
+                    for future driver-specific transport settings.
+                  </div>
+                )
+              )}
+
+              {activeSection === "ssh" && !isSqlite && (
+                <SshTunnelSection
+                  form={form}
+                  updateField={updateField}
+                  touchField={touchField}
+                  getFieldError={getFieldError}
+                />
+              )}
+
+              {activeSection === "advanced" && (
+                <div className="connection-section-note">
+                  Connection parameters and driver-specific options will live here. Keeping this section
+                  separate makes it easier to add future settings without crowding the basic connection flow.
+                </div>
+              )}
+            </SectionCard>
+
+            {testError && <div className="connection-form-error">{testError}</div>}
+          </div>
         </div>
 
         <div className="dialog-footer">
