@@ -33,6 +33,8 @@ async fn create_driver() -> CassandraDriver {
         ssh_user: String::new(),
         ssh_password: String::new(),
         ssh_key_path: String::new(),
+        ssh_auth_method: SshAuthMethod::default(),
+        ssh_prompt_passphrase: false,
     };
     CassandraDriver::connect(&config).await.unwrap()
 }

@@ -504,6 +504,73 @@
   margin-left: 6px;
 }
 
+/* SSH Tunnel section in the Register Server dialog. Sits below the SSL
+   block and matches the surrounding form-row / security-toggle styles. */
+.ssh-tunnel-section {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.ssh-tunnel-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-left: 36px;
+  /* Align with the toggle's text column above. */
+}
+
+.ssh-auth-toggle {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  width: fit-content;
+}
+
+.ssh-auth-toggle__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.ssh-auth-toggle__btn:hover {
+  color: var(--text-primary);
+}
+
+.ssh-auth-toggle__btn--active {
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.ssh-file-picker {
+  display: flex;
+  gap: 6px;
+}
+
+.ssh-file-picker > input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ssh-file-picker__browse {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .group-input-wrapper {
   position: relative;
 }

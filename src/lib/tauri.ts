@@ -153,7 +153,16 @@ export interface ConnectionConfig {
   ssh_user?: string;
   ssh_password?: string;
   ssh_key_path?: string;
+  ssh_auth_method?: SshAuthMethod;
+  /**
+   * When true and `ssh_auth_method === "identityfile"`, the UI prompts for
+   * the key passphrase at connect time instead of persisting it. The stored
+   * `ssh_password` stays empty and a transient one is injected for the call.
+   */
+  ssh_prompt_passphrase?: boolean;
 }
+
+export type SshAuthMethod = "password" | "identityfile";
 
 export interface DatabaseInfo {
   name: string;

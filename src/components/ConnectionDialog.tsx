@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useConnectionStore } from "../stores/connectionStore";
-import { api, ConnectionConfig } from "../lib/tauri";
-import { X, Loader2, CheckCircle, XCircle, ChevronDown, Folder } from "lucide-react";
+import { api, ConnectionConfig, SshAuthMethod } from "../lib/tauri";
+import { X, Loader2, CheckCircle, XCircle, ChevronDown, Folder, Key, Lock } from "lucide-react";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import "./ConnectionDialog.css";
 
 const MAX_FOLDER_NAME_LENGTH = 50;
@@ -23,10 +24,25 @@ const DB_TYPES = [
   { value: "mssql" as const, label: "Microsoft SQL Server", short: "MS", defaultPort: 1433, accent: "#7aa2f7" },
 ];
 
-type ValidationField = "name" | "host" | "port" | "user" | "database";
+type ValidationField =
+  | "name"
+  | "host"
+  | "port"
+  | "user"
+  | "database"
+  | "ssh_host"
+  | "ssh_port"
+  | "ssh_user"
+  | "ssh_password"
+  | "ssh_key_path";
 type ValidationErrors = Partial<Record<ValidationField, string>>;
 
-function normalizeConnectionForm(form: ConnectionConfig): ConnectionConfig {
+export function normalizeConnectionForm(form: ConnectionConfig): ConnectionConfig {
+  const sshEnabled = !!form.ssh_enabled;
+  const sshAuth = form.ssh_auth_method ?? "password";
+  const promptPassphrase =
+    sshEnabled && sshAuth === "identityfile" && !!form.ssh_prompt_passphrase;
+
   return {
     ...form,
     name: form.name.trim(),
@@ -34,10 +50,20 @@ function normalizeConnectionForm(form: ConnectionConfig): ConnectionConfig {
     user: form.db_type === "sqlite" ? form.user : form.user.trim(),
     database: form.database.trim(),
     group: form.group?.trim() ? form.group.trim().slice(0, MAX_FOLDER_NAME_LENGTH) : null,
+    ssh_enabled: sshEnabled,
+    ssh_host: sshEnabled ? (form.ssh_host ?? "").trim() : "",
+    ssh_port: sshEnabled ? form.ssh_port ?? 22 : 22,
+    ssh_user: sshEnabled ? (form.ssh_user ?? "").trim() : "",
+    ssh_auth_method: sshEnabled ? sshAuth : "password",
+    // Identity-file path only meaningful with identityfile auth.
+    ssh_key_path: sshEnabled && sshAuth === "identityfile" ? (form.ssh_key_path ?? "").trim() : "",
+    // Don't persist a passphrase the user opted out of saving.
+    ssh_password: sshEnabled && !promptPassphrase ? form.ssh_password ?? "" : "",
+    ssh_prompt_passphrase: promptPassphrase,
   };
 }
 
-function validateConnectionForm(
+export function validateConnectionForm(
   form: ConnectionConfig,
   existingConnections: ConnectionConfig[],
 ): ValidationErrors {
@@ -54,6 +80,36 @@ function validateConnectionForm(
     );
     if (duplicateName) {
       errors.name = "A connection with this name already exists.";
+    }
+  }
+
+  // SSH validation runs for every db type that uses TCP. SQLite is local
+  // to the user's machine so SSH never applies; we just ignore the toggle
+  // there. The shared SSH block must come before the early returns below
+  // so it still runs for cassandra and the default branch.
+  if (normalized.db_type !== "sqlite" && normalized.ssh_enabled) {
+    if (!normalized.ssh_host) {
+      errors.ssh_host = "SSH host is required.";
+    }
+    if (
+      !Number.isInteger(normalized.ssh_port ?? NaN) ||
+      (normalized.ssh_port ?? 0) < 1 ||
+      (normalized.ssh_port ?? 0) > 65535
+    ) {
+      errors.ssh_port = "SSH port must be between 1 and 65535.";
+    }
+    if (!normalized.ssh_user) {
+      errors.ssh_user = "SSH username is required.";
+    }
+    if (normalized.ssh_auth_method === "identityfile") {
+      if (!normalized.ssh_key_path) {
+        errors.ssh_key_path = "Identity file path is required.";
+      }
+    } else if (!normalized.ssh_password) {
+      // Only require a password when the user opted to store it.
+      // (For identity-file auth, ssh_password is the *passphrase* and may
+      // be intentionally empty for unencrypted keys.)
+      errors.ssh_password = "SSH password is required.";
     }
   }
 
@@ -278,6 +334,216 @@ function GroupInput({
   );
 }
 
+interface SshTunnelSectionProps {
+  form: ConnectionConfig;
+  updateField: <K extends keyof ConnectionConfig>(field: K, value: ConnectionConfig[K]) => void;
+  touchField: (field: ValidationField) => void;
+  getFieldError: (field: ValidationField) => string | undefined;
+}
+
+function SshTunnelSection({
+  form,
+  updateField,
+  touchField,
+  getFieldError,
+}: SshTunnelSectionProps) {
+  const enabled = !!form.ssh_enabled;
+  const authMethod: SshAuthMethod = form.ssh_auth_method ?? "password";
+  const promptPassphrase = !!form.ssh_prompt_passphrase;
+  const isIdentity = authMethod === "identityfile";
+
+  const browseForKey = async () => {
+    try {
+      const path = await openFileDialog({
+        multiple: false,
+        directory: false,
+        title: "Select SSH identity file",
+      });
+      if (typeof path === "string" && path) updateField("ssh_key_path", path);
+    } catch {
+      // User cancelled — no-op.
+    }
+  };
+
+  return (
+    <div className="security-options ssh-tunnel-section" aria-label="SSH tunnel">
+      <label className={`security-toggle${enabled ? " security-toggle--active" : ""}`}>
+        <span className="security-toggle__control">
+          <input
+            className="security-toggle__input"
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => updateField("ssh_enabled", e.target.checked)}
+          />
+          <span className="security-toggle__slider" aria-hidden="true" />
+        </span>
+        <span className="security-toggle__text">
+          <span className="security-toggle__label">Use SSH tunneling</span>
+          <span className="security-toggle__meta">connect through an SSH bastion</span>
+        </span>
+      </label>
+
+      {enabled && (
+        <div className="ssh-tunnel-fields">
+          <div className="form-row">
+            <div
+              className={`form-group flex-1${getFieldError("ssh_host") ? " form-group--error" : ""}`}
+            >
+              <label>Tunnel host</label>
+              <input
+                value={form.ssh_host ?? ""}
+                onChange={(e) => updateField("ssh_host", e.target.value)}
+                onBlur={() => touchField("ssh_host")}
+                placeholder="bastion.example.com"
+                aria-invalid={!!getFieldError("ssh_host")}
+              />
+              {getFieldError("ssh_host") && (
+                <div className="field-error">{getFieldError("ssh_host")}</div>
+              )}
+            </div>
+            <div
+              className={`form-group${getFieldError("ssh_port") ? " form-group--error" : ""}`}
+              style={{ width: 100 }}
+            >
+              <label>Tunnel port</label>
+              <input
+                type="number"
+                value={form.ssh_port ?? 22}
+                onChange={(e) => updateField("ssh_port", parseInt(e.target.value, 10) || 0)}
+                onBlur={() => touchField("ssh_port")}
+                min={1}
+                max={65535}
+                aria-invalid={!!getFieldError("ssh_port")}
+              />
+              {getFieldError("ssh_port") && (
+                <div className="field-error">{getFieldError("ssh_port")}</div>
+              )}
+            </div>
+          </div>
+
+          <div className="form-row">
+            <div
+              className={`form-group flex-1${getFieldError("ssh_user") ? " form-group--error" : ""}`}
+            >
+              <label>SSH username</label>
+              <input
+                value={form.ssh_user ?? ""}
+                onChange={(e) => updateField("ssh_user", e.target.value)}
+                onBlur={() => touchField("ssh_user")}
+                placeholder="ubuntu"
+                aria-invalid={!!getFieldError("ssh_user")}
+              />
+              {getFieldError("ssh_user") && (
+                <div className="field-error">{getFieldError("ssh_user")}</div>
+              )}
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label>Authentication</label>
+            <div className="ssh-auth-toggle" role="radiogroup" aria-label="SSH authentication">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={!isIdentity}
+                className={`ssh-auth-toggle__btn${!isIdentity ? " ssh-auth-toggle__btn--active" : ""}`}
+                onClick={() => updateField("ssh_auth_method", "password")}
+              >
+                <Lock size={14} />
+                Password
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={isIdentity}
+                className={`ssh-auth-toggle__btn${isIdentity ? " ssh-auth-toggle__btn--active" : ""}`}
+                onClick={() => updateField("ssh_auth_method", "identityfile")}
+              >
+                <Key size={14} />
+                Identity file
+              </button>
+            </div>
+          </div>
+
+          {isIdentity && (
+            <div className="form-row">
+              <div
+                className={`form-group flex-1${getFieldError("ssh_key_path") ? " form-group--error" : ""}`}
+              >
+                <label>Identity file</label>
+                <div className="ssh-file-picker">
+                  <input
+                    value={form.ssh_key_path ?? ""}
+                    onChange={(e) => updateField("ssh_key_path", e.target.value)}
+                    onBlur={() => touchField("ssh_key_path")}
+                    placeholder="~/.ssh/id_ed25519"
+                    aria-invalid={!!getFieldError("ssh_key_path")}
+                  />
+                  <button
+                    type="button"
+                    className="btn-secondary ssh-file-picker__browse"
+                    onClick={browseForKey}
+                  >
+                    Browse…
+                  </button>
+                </div>
+                {getFieldError("ssh_key_path") && (
+                  <div className="field-error">{getFieldError("ssh_key_path")}</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {!(isIdentity && promptPassphrase) && (
+            <div className="form-row">
+              <div
+                className={`form-group flex-1${getFieldError("ssh_password") ? " form-group--error" : ""}`}
+              >
+                <label>{isIdentity ? "Key passphrase" : "Password"}</label>
+                <input
+                  type="password"
+                  value={form.ssh_password ?? ""}
+                  onChange={(e) => updateField("ssh_password", e.target.value)}
+                  onBlur={() => touchField("ssh_password")}
+                  placeholder={isIdentity ? "(leave blank if key is unencrypted)" : ""}
+                  aria-invalid={!!getFieldError("ssh_password")}
+                />
+                {getFieldError("ssh_password") && (
+                  <div className="field-error">{getFieldError("ssh_password")}</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {isIdentity && (
+            <label
+              className={`security-toggle security-toggle--nested${
+                promptPassphrase ? " security-toggle--active" : ""
+              }`}
+            >
+              <span className="security-toggle__control">
+                <input
+                  className="security-toggle__input"
+                  type="checkbox"
+                  checked={promptPassphrase}
+                  onChange={(e) => updateField("ssh_prompt_passphrase", e.target.checked)}
+                />
+                <span className="security-toggle__slider" aria-hidden="true" />
+              </span>
+              <span className="security-toggle__text">
+                <span className="security-toggle__label">Prompt for passphrase?</span>
+                <span className="security-toggle__meta">
+                  ask each time instead of saving the passphrase to disk
+                </span>
+              </span>
+            </label>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface Props {
   onClose: () => void;
   editConfig?: ConnectionConfig;
@@ -318,6 +584,14 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
       color: COLORS[0],
       ssl: false,
       trust_server_cert: false,
+      ssh_enabled: false,
+      ssh_host: "",
+      ssh_port: 22,
+      ssh_user: "",
+      ssh_password: "",
+      ssh_key_path: "",
+      ssh_auth_method: "password",
+      ssh_prompt_passphrase: false,
     };
   });
 
@@ -598,6 +872,15 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                 </span>
               </label>
             </div>
+          )}
+
+          {!isSqlite && (
+            <SshTunnelSection
+              form={form}
+              updateField={updateField}
+              touchField={touchField}
+              getFieldError={getFieldError}
+            />
           )}
 
           <GroupInput

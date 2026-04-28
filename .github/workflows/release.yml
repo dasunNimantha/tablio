@@ -324,6 +324,72 @@ jobs:
       - name: Run SQLite integration tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --test sqlite_integration
 
+  test-ssh-tunnel:
+    name: SSH Tunnel
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Start OpenSSH bastion
+        run: |
+          docker run -d --name sshd \
+            --network host \
+            -e PUID=1000 -e PGID=1000 \
+            -e USER_NAME=tablio -e USER_PASSWORD=tablio-pw \
+            -e PASSWORD_ACCESS=true \
+            -e SUDO_ACCESS=false \
+            -e LISTEN_PORT=2222 \
+            lscr.io/linuxserver/openssh-server:latest
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 2222; then
+              echo "sshd is up"; break
+            fi
+            echo "Waiting for sshd... (attempt $i/30)"
+            sleep 2
+          done
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run SSH tunnel integration tests
+        env:
+          TEST_SSH_HOST: 127.0.0.1
+          TEST_SSH_PORT: "2222"
+          TEST_SSH_USER: tablio
+          TEST_SSH_PASSWORD: tablio-pw
+          TEST_SSH_TARGET_HOST: 127.0.0.1
+          TEST_SSH_TARGET_PORT: "5432"
+          TEST_POSTGRES_USER: test
+          TEST_POSTGRES_PASSWORD: test
+          TEST_POSTGRES_DB: testdb
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test ssh_tunnel_integration -- --test-threads=1
+
+      - name: Dump bastion logs on failure
+        if: failure()
+        run: docker logs sshd
+
   test-cassandra:
     name: Cassandra ${{ matrix.cassandra_version }}
     runs-on: ubuntu-latest
@@ -402,7 +468,7 @@ jobs:
 
   release:
     name: Build & Release (${{ matrix.platform }})
-    needs: [test-frontend, test-e2e, test-postgres, test-mysql, test-mariadb, test-mssql, test-cockroachdb, test-tidb, test-sqlite, test-cassandra, test-scylladb]
+    needs: [test-frontend, test-e2e, test-postgres, test-mysql, test-mariadb, test-mssql, test-cockroachdb, test-tidb, test-sqlite, test-ssh-tunnel, test-cassandra, test-scylladb]
     strategy:
       fail-fast: false
       matrix:

@@ -3,6 +3,15 @@ use crate::models::*;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
+// TODO(ssh-tunnel): The pg_dump / mysqldump / pg_restore subprocesses below
+// still talk to the *raw* remote host/port from the saved
+// `ConnectionConfig`. When the connection has `ssh_enabled = true`, those
+// commands bypass the in-process russh tunnel managed by `PoolManager`
+// and will fail (or worse, leak credentials) for hosts only reachable via
+// the bastion. Tracked in a follow-up issue; the fix is to spawn a
+// short-lived russh tunnel here too and substitute `127.0.0.1:<local>`
+// before invoking the dump/restore binaries.
+
 fn emit_log(app: &AppHandle, line: &str) {
     let _ = app.emit("dump-restore-log", line.to_string());
 }

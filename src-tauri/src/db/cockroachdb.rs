@@ -545,6 +545,8 @@ mod tests {
             ssh_user: String::new(),
             ssh_password: String::new(),
             ssh_key_path: String::new(),
+            ssh_auth_method: SshAuthMethod::default(),
+            ssh_prompt_passphrase: false,
         }
     }
 

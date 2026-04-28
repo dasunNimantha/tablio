@@ -11,6 +11,7 @@ import { BackupRestoreDialog } from "./components/BackupRestore/BackupRestoreDia
 import { DumpRestoreDialog } from "./components/DumpRestore/DumpRestoreDialog";
 import { KeyboardShortcuts } from "./components/KeyboardShortcuts/KeyboardShortcuts";
 import { ToastContainer } from "./components/Toast/Toast";
+import { PassphrasePrompt } from "./components/PassphrasePrompt";
 import { useConnectionStore } from "./stores/connectionStore";
 import { useTabStore } from "./stores/tabStore";
 import { loader } from "@monaco-editor/react";
@@ -429,6 +430,7 @@ export default function App() {
         <KeyboardShortcuts onClose={() => setShowShortcuts(false)} />
       )}
       <ToastContainer />
+      <PassphrasePrompt />
     </div>
     </div>
   );

@@ -34,13 +34,20 @@ test.describe("Connection dialog — DB type switching", () => {
   test("SQLite hides SSL toggles", async ({ page }) => {
     await page.locator(".db-dropdown-trigger").click();
     await page.locator(".db-dropdown-item", { hasText: "SQLite" }).click();
-    await expect(page.locator(".security-toggle")).not.toBeVisible();
+    // SSL block (and the whole SSH section) are gated off for SQLite.
+    await expect(
+      page.locator(".security-toggle__label", { hasText: "SSL / TLS" }),
+    ).not.toBeVisible();
   });
 
   test("Cassandra hides SSL toggles", async ({ page }) => {
     await page.locator(".db-dropdown-trigger").click();
     await page.locator(".db-dropdown-item", { hasText: "Cassandra" }).click();
-    await expect(page.locator(".security-toggle")).not.toBeVisible();
+    // SSL block hidden for cassandra; SSH section still applies and is
+    // independently tested below.
+    await expect(
+      page.locator(".security-toggle__label", { hasText: "SSL / TLS" }),
+    ).not.toBeVisible();
   });
 
   test("switching to CockroachDB changes port to 26257", async ({ page }) => {
@@ -152,6 +159,140 @@ test.describe("Connection dialog — validation", () => {
     await nameInput.fill("Local Postgres");
     await page.locator(".btn-test-conn").click();
     await expect(page.locator(".field-error", { hasText: "already exists" })).toBeVisible();
+  });
+});
+
+test.describe("Connection dialog — SSH tunnel section", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/");
+    await openConnectionDialog(page);
+  });
+
+  test("SSH section is visible for postgres and hidden for sqlite", async ({ page }) => {
+    await expect(
+      page.locator(".ssh-tunnel-section .security-toggle__label", {
+        hasText: "Use SSH tunneling",
+      }),
+    ).toBeVisible();
+
+    await page.locator(".db-dropdown-trigger").click();
+    await page.locator(".db-dropdown-item", { hasText: "SQLite" }).click();
+    await expect(page.locator(".ssh-tunnel-section")).not.toBeVisible();
+  });
+
+  test("toggling SSH on reveals tunnel host / port / username inputs", async ({ page }) => {
+    const tunnelToggle = page
+      .locator(".ssh-tunnel-section .security-toggle")
+      .first()
+      .locator(".security-toggle__input");
+    await expect(
+      page.locator(".ssh-tunnel-section label", { hasText: "Tunnel host" }),
+    ).not.toBeVisible();
+    await tunnelToggle.check({ force: true });
+    await expect(
+      page.locator(".ssh-tunnel-section label", { hasText: "Tunnel host" }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".ssh-tunnel-section label", { hasText: "Tunnel port" }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".ssh-tunnel-section label", { hasText: "SSH username" }),
+    ).toBeVisible();
+  });
+
+  test("auth toggle swaps Password input <-> Identity file picker", async ({ page }) => {
+    const tunnelToggle = page
+      .locator(".ssh-tunnel-section .security-toggle")
+      .first()
+      .locator(".security-toggle__input");
+    await tunnelToggle.check({ force: true });
+
+    // Default = Password: password field visible, identity file hidden.
+    await expect(
+      page.locator(".ssh-tunnel-section label", { hasText: "Password" }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".ssh-tunnel-section label", { hasText: "Identity file" }),
+    ).not.toBeVisible();
+
+    // Switch to Identity file.
+    await page
+      .locator(".ssh-auth-toggle__btn", { hasText: "Identity file" })
+      .click();
+    await expect(
+      page.locator(".ssh-tunnel-section label", { hasText: "Identity file" }),
+    ).toBeVisible();
+    // The password field's label flips to "Key passphrase".
+    await expect(
+      page.locator(".ssh-tunnel-section label", { hasText: "Key passphrase" }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".ssh-tunnel-section label", { hasText: /^Password$/ }),
+    ).not.toBeVisible();
+    // Prompt-for-passphrase nested toggle becomes available.
+    await expect(
+      page.locator(".ssh-tunnel-section .security-toggle__label", {
+        hasText: "Prompt for passphrase?",
+      }),
+    ).toBeVisible();
+  });
+
+  test("'Prompt for passphrase' hides the passphrase input", async ({ page }) => {
+    const tunnelToggle = page
+      .locator(".ssh-tunnel-section .security-toggle")
+      .first()
+      .locator(".security-toggle__input");
+    await tunnelToggle.check({ force: true });
+    await page
+      .locator(".ssh-auth-toggle__btn", { hasText: "Identity file" })
+      .click();
+    const promptToggle = page
+      .locator(".ssh-tunnel-section .security-toggle--nested .security-toggle__input");
+    await promptToggle.check({ force: true });
+    await expect(
+      page.locator(".ssh-tunnel-section label", { hasText: "Key passphrase" }),
+    ).not.toBeVisible();
+  });
+
+  test("validation flags missing tunnel host / username on test", async ({ page }) => {
+    // Fill in a name + DB connection details so the only outstanding errors
+    // come from the SSH section.
+    await page.locator(".dialog input").nth(0).fill("SSH Test");
+    await page
+      .locator(".dialog")
+      .locator("label", { hasText: "Host" })
+      .locator("..")
+      .locator("input")
+      .fill("127.0.0.1");
+    await page
+      .locator(".dialog")
+      .locator("label", { hasText: "Username" })
+      .locator("..")
+      .locator("input")
+      .fill("admin");
+
+    const tunnelToggle = page
+      .locator(".ssh-tunnel-section .security-toggle")
+      .first()
+      .locator(".security-toggle__input");
+    await tunnelToggle.check({ force: true });
+    await page.locator(".btn-test-conn").click();
+
+    await expect(
+      page.locator(".ssh-tunnel-section .field-error", {
+        hasText: "SSH host is required",
+      }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".ssh-tunnel-section .field-error", {
+        hasText: "SSH username is required",
+      }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".ssh-tunnel-section .field-error", {
+        hasText: "SSH password is required",
+      }),
+    ).toBeVisible();
   });
 });
 
