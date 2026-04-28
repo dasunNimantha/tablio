@@ -212,6 +212,7 @@ export function TableView({
               schema={schema}
               table={table}
               hideTitle
+              isActive={mode === "data"}
             />
           </div>
         )}

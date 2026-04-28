@@ -19,6 +19,7 @@ import { ColumnOrganizer, ColumnSettings, loadColumnSettings, saveColumnSettings
 import { useToastStore } from "../../stores/toastStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { useConnectionStore } from "../../stores/connectionStore";
+import { boolLiteral, paginationClause, quoteIdent, quoteQualified } from "../../lib/sqlDialect";
 import {
   Save,
   Undo2,
@@ -123,6 +124,11 @@ interface Props {
   schema: string;
   table: string;
   hideTitle?: boolean;
+  /** When false, the periodic auto-refresh interval is suspended.
+   *  Used by `TableView` to pause polling when the grid is hidden
+   *  behind the Schema tab — otherwise the network keeps churning
+   *  on a panel the user isn't even looking at. Defaults to `true`. */
+  isActive?: boolean;
 }
 
 interface PendingChanges {
@@ -149,7 +155,7 @@ const REFRESH_OPTIONS = [
   { label: "5m", value: 300 },
 ];
 
-export function DataGrid({ connectionId, database, schema, table, hideTitle = false }: Props) {
+export function DataGrid({ connectionId, database, schema, table, hideTitle = false, isActive = true }: Props) {
   const addToast = useToastStore((s) => s.addToast);
   const openTab = useTabStore((s) => s.openTab);
   const connections = useConnectionStore((s) => s.connections);
@@ -305,12 +311,19 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
   }, [changes, detailRowIdx]);
 
   useEffect(() => {
-    if (refreshInterval <= 0 || hasChanges) return;
+    // Skip the timer entirely when:
+    //  - the user disabled auto-refresh (refreshInterval = 0)
+    //  - there are unsaved changes (would clobber pending edits)
+    //  - the grid is mounted but currently hidden (TableView keeps the
+    //    Data tab in the DOM with display:none when Schema is shown;
+    //    polling a hidden grid is wasted work and can confuse users
+    //    who think "I'm not on this tab, why is it making requests?")
+    if (refreshInterval <= 0 || hasChanges || !isActive) return;
     const id = setInterval(() => {
       fetchData({ silent: true });
     }, refreshInterval * 1000);
     return () => clearInterval(id);
-  }, [refreshInterval, fetchData, hasChanges]);
+  }, [refreshInterval, fetchData, hasChanges, isActive]);
 
   useEffect(() => {
     if (!showRefreshMenu) return;
@@ -752,17 +765,21 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
 
   const formatRowAsInsert = useCallback((row: unknown[]): string => {
     if (!data) return "";
-    const cols = data.columns.map((c) => `"${c.name}"`).join(", ");
+    // Dialect-aware: previously hardcoded `"col"` / `"schema"."table"`
+    // / `TRUE` regardless of connection type, producing snippets that
+    // didn't run as-is on default-mode MySQL or MSSQL.
+    const dbType = connections.find((c) => c.id === connectionId)?.db_type;
+    const cols = data.columns.map((c) => quoteIdent(dbType, c.name)).join(", ");
     const vals = row
       .map((v) => {
         if (v === null) return "NULL";
         if (typeof v === "number") return String(v);
-        if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
+        if (typeof v === "boolean") return boolLiteral(dbType, v);
         return `'${String(v).replace(/'/g, "''")}'`;
       })
       .join(", ");
-    return `INSERT INTO "${schema}"."${table}" (${cols}) VALUES (${vals});`;
-  }, [data, schema, table]);
+    return `INSERT INTO ${quoteQualified(dbType, schema, table)} (${cols}) VALUES (${vals});`;
+  }, [data, schema, table, connections, connectionId]);
 
   const handleCopyAllAsInsert = () => {
     navigator.clipboard.writeText(editingRows.map(formatRowAsInsert).join("\n"));
@@ -829,10 +846,18 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     setExplainLoading(true);
     setShowExplain(true);
     try {
-      let sql = `SELECT * FROM "${schema}"."${table}"`;
+      const dbType = connections.find((c) => c.id === connectionId)?.db_type;
+      let sql = `SELECT * FROM ${quoteQualified(dbType, schema, table)}`;
       if (activeFilter) sql += ` WHERE ${activeFilter}`;
-      if (sort) sql += ` ORDER BY "${sort.column}" ${sort.direction}`;
-      sql += ` LIMIT ${PAGE_SIZE} OFFSET ${page * PAGE_SIZE}`;
+      if (sort) {
+        sql += ` ORDER BY ${quoteIdent(dbType, sort.column)} ${sort.direction}`;
+      } else if (dbType === "mssql") {
+        // MSSQL's `OFFSET ... ROWS FETCH NEXT ... ROWS ONLY` syntax
+        // requires an `ORDER BY`. Use a NULL-sort sentinel so the
+        // pagination clause is always valid even without a user sort.
+        sql += ` ORDER BY (SELECT NULL)`;
+      }
+      sql += ` ${paginationClause(dbType, PAGE_SIZE, page * PAGE_SIZE)}`;
       const result = await api.explainQuery({
         connection_id: connectionId,
         database,
@@ -845,12 +870,18 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     } finally {
       setExplainLoading(false);
     }
-  }, [connectionId, database, schema, table, activeFilter, sort, page, addToast, showExplain]);
+  }, [connectionId, database, schema, table, activeFilter, sort, page, addToast, showExplain, connections]);
 
   const handleGenerateTestData = useCallback(() => {
     if (!data) return;
     const generateValue = (col: ColumnInfo): unknown => {
-      const t = col.data_type.toLowerCase();
+      // `data_type` should always be a non-null string from the
+      // backend, but Cassandra's collection types and a handful of
+      // synthetic columns (e.g. computed views) have produced
+      // undefined here in the wild. Fall back to a typeless string
+      // bucket so we never crash the dialog with `cannot read
+      // properties of undefined (reading 'toLowerCase')`.
+      const t = (col.data_type ?? "").toLowerCase();
       if (col.is_auto_generated || col.is_primary_key) return null;
       if (t.includes("smallint") || t === "smallserial")
         return Math.floor(Math.random() * 30000);
@@ -1145,6 +1176,7 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
           columns={data.columns}
           onApply={handleFilterApply}
           onClose={() => setShowFilter(false)}
+          dbType={connections.find((c) => c.id === connectionId)?.db_type}
         />
       )}
 

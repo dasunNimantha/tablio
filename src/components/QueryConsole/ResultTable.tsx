@@ -8,6 +8,7 @@ import { ExportMenu } from "../ExportMenu";
 import { useToastStore } from "../../stores/toastStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { useConnectionStore } from "../../stores/connectionStore";
+import { boolLiteral, quoteIdent, quoteQualified } from "../../lib/sqlDialect";
 import "../DataGrid/ag-grid-theme.css";
 import "./QueryConsole.css";
 
@@ -741,18 +742,23 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
 
   const formatRowAsInsert = useCallback((row: unknown[]): string => {
     if (!sourceTable) return "";
-    const cols = result.columns.map((c) => `"${c}"`).join(", ");
+    // Dialect-aware: previously emitted PG-style `"..."` quoting and
+    // `TRUE` / `FALSE` literals regardless of the source connection,
+    // so the snippet wasn't runnable as-is on default-mode MySQL or
+    // MSSQL.
+    const dbType = connections.find((c) => c.id === connectionId)?.db_type;
+    const cols = result.columns.map((c) => quoteIdent(dbType, c)).join(", ");
     const vals = row
       .map((v) => {
         if (v === null) return "NULL";
         if (typeof v === "number") return String(v);
-        if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
+        if (typeof v === "boolean") return boolLiteral(dbType, v);
         return `'${String(v).replace(/'/g, "''")}'`;
       })
       .join(", ");
-    const tbl = sourceTable.schema ? `"${sourceTable.schema}"."${sourceTable.table}"` : `"${sourceTable.table}"`;
+    const tbl = quoteQualified(dbType, sourceTable.schema, sourceTable.table);
     return `INSERT INTO ${tbl} (${cols}) VALUES (${vals});`;
-  }, [sourceTable, result.columns]);
+  }, [sourceTable, result.columns, connections, connectionId]);
 
   const handleCopyAsInsert = useCallback(() => {
     if (contextMenu === null) return;

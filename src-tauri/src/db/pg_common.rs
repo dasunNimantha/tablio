@@ -123,6 +123,20 @@ pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// Standard "is this filter fragment too risky to splice into a WHERE
+/// clause" check. The Tauri command interface only accepts filter strings
+/// from the local Tablio UI, so the threat model is "stop a typo or
+/// confused-deputy from accidentally executing a second statement", not
+/// "defend against an attacker with arbitrary network access".
+///
+/// The same heuristic is exposed verbatim on every driver so behaviour
+/// is consistent across Postgres / MySQL / SQLite / MSSQL / Cassandra:
+///  * `;`, `--`, `/*`, `*/`     -> statement terminator / comment injection
+///  * `(SELECT`                  -> subquery splice
+///  * ` UNION [ALL|DISTINCT] SELECT` -> classic union-based shape change
+///
+/// Drivers should call this directly (not roll their own) so the matrix
+/// stays uniform — that's why the function is `pub`.
 pub fn filter_is_unsafe(filter: &str) -> bool {
     let s = filter.trim();
     if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
@@ -138,8 +152,49 @@ pub fn filter_is_unsafe(filter: &str) -> bool {
         || u.contains(" UNION DISTINCT SELECT")
 }
 
+/// Human-readable explanation of *what* `filter_is_unsafe` rejected, so
+/// drivers can surface a better error than "invalid characters".
+/// Returns `None` when the fragment is safe.
+pub fn filter_unsafe_reason(filter: &str) -> Option<&'static str> {
+    let s = filter.trim();
+    if s.contains(';') {
+        return Some("statement terminator (`;`)");
+    }
+    if s.contains("--") || s.contains("/*") || s.contains("*/") {
+        return Some("SQL comment markers (`--` / `/* */`)");
+    }
+    let u = s.to_uppercase();
+    if u.contains("(SELECT") {
+        return Some("nested `(SELECT ...)` subquery");
+    }
+    if u.contains(" UNION SELECT")
+        || u.contains(" UNION ALL SELECT")
+        || u.contains(" UNION DISTINCT SELECT")
+    {
+        return Some("`UNION SELECT` clause");
+    }
+    None
+}
+
+/// Strict check for SQL fragments that should never contain string
+/// literals: column data types, operator names, sort directions, etc.
+/// Bans `'` here because a type or operator never legitimately needs
+/// one — anything quoted in those contexts is almost certainly a typo
+/// or an injection attempt.
+///
+/// For places that DO need to accept user-authored expressions (column
+/// `DEFAULT` clauses, check constraints, generated columns), use
+/// `sql_default_is_unsafe` instead — it allows `'` so string defaults
+/// like `DEFAULT 'pending'` work.
 pub fn sql_fragment_is_unsafe(s: &str) -> bool {
     s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") || s.contains('\'')
+}
+
+/// Same as `sql_fragment_is_unsafe` but tolerates `'` so legitimate
+/// string-literal `DEFAULT 'value'` clauses survive validation. Still
+/// blocks the statement-terminator / comment-injection vectors.
+pub fn sql_default_is_unsafe(s: &str) -> bool {
+    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/")
 }
 
 pub fn json_to_sql_literal(val: &serde_json::Value) -> String {
@@ -860,8 +915,11 @@ pub async fn pg_fetch_rows_impl(
     filter: Option<String>,
 ) -> Result<TableData> {
     if let Some(ref f) = filter {
-        if !f.trim().is_empty() && filter_is_unsafe(f) {
-            anyhow::bail!("Filter contains invalid characters (; -- /* */)");
+        if !f.trim().is_empty() {
+            if let Some(reason) = filter_unsafe_reason(f) {
+                anyhow::bail!("Filter rejected: {}", reason);
+            }
+            debug_assert!(!filter_is_unsafe(f));
         }
     }
 
@@ -1083,7 +1141,11 @@ pub async fn pg_create_table(
             anyhow::bail!("Invalid character in data type for column {}", col.name);
         }
         if let Some(d) = &col.default_value {
-            if !d.is_empty() && sql_fragment_is_unsafe(d) {
+            // `sql_default_is_unsafe` (not `sql_fragment_is_unsafe`)
+            // here so that legitimate string defaults like
+            // `DEFAULT 'pending'` survive — only statement terminators
+            // and comment markers are rejected.
+            if !d.is_empty() && sql_default_is_unsafe(d) {
                 anyhow::bail!("Invalid character in default value for column {}", col.name);
             }
         }
@@ -1140,7 +1202,7 @@ pub async fn pg_alter_table(
                 default_value: Some(d),
                 ..
             } if !d.is_empty() => {
-                if sql_fragment_is_unsafe(d) {
+                if sql_default_is_unsafe(d) {
                     anyhow::bail!("Invalid character in default value");
                 }
             }
@@ -1658,6 +1720,94 @@ mod tests {
     #[test]
     fn filter_unsafe_subquery_attempt() {
         assert!(filter_is_unsafe("1=1) OR (SELECT password FROM pg_shadow)"));
+    }
+
+    // -----------------------------------------------------------------------
+    // `sql_default_is_unsafe`: same as `sql_fragment_is_unsafe` but tolerates
+    // single quotes so legitimate string-literal DEFAULTs survive validation.
+    // Regression for the bug that previously rejected `DEFAULT 'pending'`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sql_default_allows_string_literals() {
+        // Repro: previously `'pending'` triggered the strict check and the
+        // user couldn't set ANY string default through the UI.
+        assert!(!sql_default_is_unsafe("'pending'"));
+        assert!(!sql_default_is_unsafe("'O''Brien'"));
+        assert!(!sql_default_is_unsafe("'multi word string'"));
+    }
+
+    #[test]
+    fn sql_default_allows_function_calls_with_args() {
+        // PG accepts scalar subqueries and function calls in DEFAULT
+        // expressions; only statement terminators / comment markers
+        // should be rejected.
+        assert!(!sql_default_is_unsafe("now()"));
+        assert!(!sql_default_is_unsafe("CURRENT_TIMESTAMP"));
+        assert!(!sql_default_is_unsafe("nextval('seq_id')"));
+    }
+
+    #[test]
+    fn sql_default_still_blocks_statement_terminators() {
+        assert!(sql_default_is_unsafe("'x'; DROP TABLE users"));
+        assert!(sql_default_is_unsafe("'x' -- comment"));
+        assert!(sql_default_is_unsafe("'x' /* comment */"));
+        assert!(sql_default_is_unsafe("'x' */"));
+    }
+
+    // -----------------------------------------------------------------------
+    // `filter_unsafe_reason`: returns a precise explanation when a filter
+    // is rejected, replacing the generic "(; -- /* */)" message.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn filter_unsafe_reason_safe_returns_none() {
+        assert!(filter_unsafe_reason("\"id\" = 1").is_none());
+        assert!(filter_unsafe_reason("").is_none());
+    }
+
+    #[test]
+    fn filter_unsafe_reason_pinpoints_each_pattern() {
+        assert_eq!(
+            filter_unsafe_reason("x; DROP TABLE t"),
+            Some("statement terminator (`;`)")
+        );
+        assert_eq!(
+            filter_unsafe_reason("x -- comment"),
+            Some("SQL comment markers (`--` / `/* */`)")
+        );
+        assert_eq!(
+            filter_unsafe_reason("1=1 UNION SELECT * FROM users"),
+            Some("`UNION SELECT` clause")
+        );
+        assert_eq!(
+            filter_unsafe_reason("1=1) OR (SELECT * FROM users)"),
+            Some("nested `(SELECT ...)` subquery")
+        );
+    }
+
+    #[test]
+    fn filter_unsafe_reason_matches_filter_is_unsafe() {
+        // Any input flagged by `filter_is_unsafe` MUST produce a Some(_)
+        // from `filter_unsafe_reason`, otherwise we'd bail with an empty
+        // explanation. Lock that invariant.
+        let cases = [
+            "x; y",
+            "x -- y",
+            "x /* y",
+            "x */",
+            "id = 1 UNION SELECT 1",
+            "id = 1 UNION ALL SELECT 1",
+            "id = 1 UNION DISTINCT SELECT 1",
+            "(SELECT 1)",
+        ];
+        for c in cases {
+            assert!(filter_is_unsafe(c), "{c:?} should be unsafe");
+            assert!(
+                filter_unsafe_reason(c).is_some(),
+                "{c:?} flagged unsafe but no reason returned"
+            );
+        }
     }
 
     #[test]

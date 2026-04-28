@@ -87,13 +87,54 @@ fn json_to_sql_literal(val: &serde_json::Value) -> String {
     }
 }
 
+/// Strict — types/operators must never legitimately contain `'`.
 fn sql_fragment_is_unsafe(s: &str) -> bool {
     s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") || s.contains('\'')
 }
 
+/// Same as `sql_fragment_is_unsafe` but allows `'` so legitimate
+/// string-literal defaults survive validation.
+fn sql_default_is_unsafe(s: &str) -> bool {
+    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/")
+}
+
+/// Mirrors `pg_common::filter_is_unsafe` so SQLite rejects the same set
+/// of patterns as the Postgres path: statement terminator `;`, comment
+/// markers `--` / `/* */`, nested `(SELECT ...)` subqueries, and
+/// `UNION SELECT` shape changes.
 fn filter_is_unsafe(filter: &str) -> bool {
     let s = filter.trim();
-    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/")
+    if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
+        return true;
+    }
+    let u = s.to_uppercase();
+    if u.contains("(SELECT") {
+        return true;
+    }
+    u.contains(" UNION SELECT")
+        || u.contains(" UNION ALL SELECT")
+        || u.contains(" UNION DISTINCT SELECT")
+}
+
+fn filter_unsafe_reason(filter: &str) -> Option<&'static str> {
+    let s = filter.trim();
+    if s.contains(';') {
+        return Some("statement terminator (`;`)");
+    }
+    if s.contains("--") || s.contains("/*") || s.contains("*/") {
+        return Some("SQL comment markers (`--` / `/* */`)");
+    }
+    let u = s.to_uppercase();
+    if u.contains("(SELECT") {
+        return Some("nested `(SELECT ...)` subquery");
+    }
+    if u.contains(" UNION SELECT")
+        || u.contains(" UNION ALL SELECT")
+        || u.contains(" UNION DISTINCT SELECT")
+    {
+        return Some("`UNION SELECT` clause");
+    }
+    None
 }
 
 fn format_bytes(bytes: i64) -> String {
@@ -282,8 +323,11 @@ impl DatabaseDriver for SqliteDriver {
         filter: Option<String>,
     ) -> Result<TableData> {
         if let Some(ref f) = filter {
-            if !f.trim().is_empty() && filter_is_unsafe(f) {
-                anyhow::bail!("Filter contains invalid characters (; -- /* */)");
+            if !f.trim().is_empty() {
+                if let Some(reason) = filter_unsafe_reason(f) {
+                    anyhow::bail!("Filter rejected: {}", reason);
+                }
+                debug_assert!(!filter_is_unsafe(f));
             }
         }
 
@@ -504,7 +548,7 @@ impl DatabaseDriver for SqliteDriver {
                 anyhow::bail!("Invalid character in data type for column {}", col.name);
             }
             if let Some(d) = &col.default_value {
-                if !d.is_empty() && sql_fragment_is_unsafe(d) {
+                if !d.is_empty() && sql_default_is_unsafe(d) {
                     anyhow::bail!("Invalid character in default value for column {}", col.name);
                 }
             }
@@ -643,7 +687,7 @@ impl DatabaseDriver for SqliteDriver {
                     anyhow::bail!("Invalid character in data type for column {}", column.name);
                 }
                 if let Some(d) = &column.default_value {
-                    if !d.is_empty() && sql_fragment_is_unsafe(d) {
+                    if !d.is_empty() && sql_default_is_unsafe(d) {
                         anyhow::bail!(
                             "Invalid character in default value for column {}",
                             column.name
@@ -1093,5 +1137,52 @@ mod tests {
     fn json_to_sql_string_injection_attempt() {
         let val = json_to_sql_literal(&serde_json::Value::String("'; DROP TABLE t; --".into()));
         assert_eq!(val, "'''; DROP TABLE t; --'");
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-driver parity: the SQLite filter check now matches Postgres.
+    // Previously it only blocked `;`, `--`, `/*`, `*/`, so `UNION SELECT`
+    // and `(SELECT ...)` payloads slipped through.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn filter_unsafe_unionless_subquery_now_blocked() {
+        assert!(filter_is_unsafe("1=1 OR (SELECT 1)"));
+        assert!(filter_is_unsafe("(SELECT count(*) FROM sqlite_master) > 0"));
+    }
+
+    #[test]
+    fn filter_unsafe_union_without_comments_now_blocked() {
+        assert!(filter_is_unsafe("1=1 UNION SELECT * FROM sqlite_master"));
+        assert!(filter_is_unsafe("1=1 UNION ALL SELECT 1"));
+        assert!(filter_is_unsafe("1=1 UNION DISTINCT SELECT 1"));
+    }
+
+    #[test]
+    fn filter_unsafe_reason_descriptive_messages() {
+        assert_eq!(
+            filter_unsafe_reason("x; DROP TABLE t"),
+            Some("statement terminator (`;`)")
+        );
+        assert_eq!(
+            filter_unsafe_reason("(SELECT 1)"),
+            Some("nested `(SELECT ...)` subquery")
+        );
+        assert!(filter_unsafe_reason("\"id\" = 1").is_none());
+    }
+
+    #[test]
+    fn sql_default_allows_string_literals_sqlite() {
+        // Same regression class as pg_common / mysql_common.
+        assert!(!sql_default_is_unsafe("'pending'"));
+        assert!(!sql_default_is_unsafe("'O''Brien'"));
+        assert!(!sql_default_is_unsafe("CURRENT_TIMESTAMP"));
+    }
+
+    #[test]
+    fn sql_default_still_blocks_injection() {
+        assert!(sql_default_is_unsafe("'x'; DROP TABLE users"));
+        assert!(sql_default_is_unsafe("'x' -- comment"));
+        assert!(sql_default_is_unsafe("'x' /* comment */"));
     }
 }

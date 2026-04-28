@@ -21,6 +21,44 @@ fn bracket(ident: &str) -> String {
     format!("[{}]", ident.replace(']', "]]"))
 }
 
+/// Mirrors `pg_common::filter_is_unsafe` so the MSSQL driver rejects the
+/// same set of filter patterns as Postgres / MySQL / SQLite. See the
+/// doc comment on the Postgres helper for the threat model.
+fn filter_is_unsafe(filter: &str) -> bool {
+    let s = filter.trim();
+    if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
+        return true;
+    }
+    let u = s.to_uppercase();
+    if u.contains("(SELECT") {
+        return true;
+    }
+    u.contains(" UNION SELECT")
+        || u.contains(" UNION ALL SELECT")
+        || u.contains(" UNION DISTINCT SELECT")
+}
+
+fn filter_unsafe_reason(filter: &str) -> Option<&'static str> {
+    let s = filter.trim();
+    if s.contains(';') {
+        return Some("statement terminator (`;`)");
+    }
+    if s.contains("--") || s.contains("/*") || s.contains("*/") {
+        return Some("SQL comment markers (`--` / `/* */`)");
+    }
+    let u = s.to_uppercase();
+    if u.contains("(SELECT") {
+        return Some("nested `(SELECT ...)` subquery");
+    }
+    if u.contains(" UNION SELECT")
+        || u.contains(" UNION ALL SELECT")
+        || u.contains(" UNION DISTINCT SELECT")
+    {
+        return Some("`UNION SELECT` clause");
+    }
+    None
+}
+
 fn three_part_table(database: &str, schema: &str, table: &str) -> String {
     format!(
         "{}.{}.{}",
@@ -771,9 +809,10 @@ impl DatabaseDriver for MssqlDriver {
         if let Some(f) = filter {
             let t = f.trim();
             if !t.is_empty() {
-                if t.contains(';') || t.contains("--") || t.contains("/*") || t.contains("*/") {
-                    anyhow::bail!("Filter contains invalid characters (; -- /* */)");
+                if let Some(reason) = filter_unsafe_reason(t) {
+                    anyhow::bail!("Filter rejected: {}", reason);
                 }
+                debug_assert!(!filter_is_unsafe(t));
                 where_clause = format!(" WHERE {}", t);
             }
         }
