@@ -44,13 +44,43 @@ pub fn to_json(columns: &[String], rows: &[Vec<Value>]) -> String {
     serde_json::to_string_pretty(&objects).unwrap_or_else(|_| "[]".to_string())
 }
 
-pub fn to_sql_inserts(table_name: &str, columns: &[String], rows: &[Vec<Value>]) -> String {
+/// Render rows as `INSERT INTO ... VALUES (...);` statements.
+///
+/// `schema` is optional: when provided the output emits a fully
+/// qualified `"schema"."table"` reference so the dump can be replayed
+/// in a database that doesn't have a matching `search_path` /
+/// `current_schema`. Previously this argument was missing entirely and
+/// every export silently dropped to `INSERT INTO "table"`, which round-
+/// tripped fine on single-schema databases (SQLite, MySQL when
+/// `database == schema`) but broke restores in PostgreSQL multi-schema
+/// setups.
+///
+/// The output uses standard `"…"` identifier quoting (PG / SQLite /
+/// MSSQL with `QUOTED_IDENTIFIER ON` / Cassandra all accept this).
+/// MySQL with default `sql_mode` would need backticks — the dialect
+/// mismatch is tracked separately; this fix at least makes
+/// schema-qualified targets correct on the dialects that already work.
+pub fn to_sql_inserts(
+    schema: Option<&str>,
+    table_name: &str,
+    columns: &[String],
+    rows: &[Vec<Value>],
+) -> String {
     let mut out = String::new();
     let cols_str = columns
         .iter()
         .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(", ");
+
+    let qualified = match schema {
+        Some(s) if !s.is_empty() => format!(
+            "\"{}\".\"{}\"",
+            s.replace('"', "\"\""),
+            table_name.replace('"', "\"\"")
+        ),
+        _ => format!("\"{}\"", table_name.replace('"', "\"\"")),
+    };
 
     for row in rows {
         let vals: Vec<String> = row
@@ -65,8 +95,8 @@ pub fn to_sql_inserts(table_name: &str, columns: &[String], rows: &[Vec<Value>])
             .collect();
 
         out.push_str(&format!(
-            "INSERT INTO \"{}\" ({}) VALUES ({});\n",
-            table_name.replace('"', "\"\""),
+            "INSERT INTO {} ({}) VALUES ({});\n",
+            qualified,
             cols_str,
             vals.join(", ")
         ));
@@ -198,15 +228,47 @@ mod tests {
     fn sql_inserts_basic() {
         let cols = ["name".to_string()];
         let rows = vec![vec![Value::String("O'Brien".into())]];
-        let out = to_sql_inserts("users", &cols, &rows);
+        let out = to_sql_inserts(None, "users", &cols, &rows);
         assert!(out.contains("INSERT INTO \"users\""));
         assert!(out.contains("'O''Brien'"));
     }
 
     #[test]
+    fn sql_inserts_with_schema_qualifies_target() {
+        // Regression test: previously the schema was dropped on the
+        // floor, producing `INSERT INTO "events"` for a table named
+        // `analytics.events`. That file would re-import into the wrong
+        // table (or fail) when restored against a multi-schema database.
+        let cols = ["id".to_string()];
+        let rows = vec![vec![Value::Number(1i64.into())]];
+        let out = to_sql_inserts(Some("analytics"), "events", &cols, &rows);
+        assert!(
+            out.contains(r#"INSERT INTO "analytics"."events""#),
+            "expected schema-qualified target, got: {out}"
+        );
+    }
+
+    #[test]
+    fn sql_inserts_with_empty_schema_falls_back_to_unqualified() {
+        let cols = ["id".to_string()];
+        let rows = vec![vec![Value::Number(1i64.into())]];
+        let out = to_sql_inserts(Some(""), "t", &cols, &rows);
+        assert!(out.contains(r#"INSERT INTO "t""#));
+        assert!(!out.contains("\"\".\"t\""));
+    }
+
+    #[test]
+    fn sql_inserts_with_quoted_schema_escapes_correctly() {
+        let cols = ["v".to_string()];
+        let rows = vec![vec![Value::Number(1i64.into())]];
+        let out = to_sql_inserts(Some(r#"weird"schema"#), "t", &cols, &rows);
+        assert!(out.contains(r#""weird""schema"."t""#));
+    }
+
+    #[test]
     fn sql_inserts_empty_rows() {
         let cols = ["id".to_string()];
-        let out = to_sql_inserts("t", &cols, &[]);
+        let out = to_sql_inserts(None, "t", &cols, &[]);
         assert_eq!(out, "");
     }
 
@@ -214,7 +276,7 @@ mod tests {
     fn sql_inserts_null_and_number() {
         let cols = ["a".to_string(), "b".to_string()];
         let rows = vec![vec![Value::Null, Value::Number(42i64.into())]];
-        let out = to_sql_inserts("t", &cols, &rows);
+        let out = to_sql_inserts(None, "t", &cols, &rows);
         assert!(out.contains("NULL, 42"));
     }
 
@@ -222,7 +284,7 @@ mod tests {
     fn sql_inserts_bool() {
         let cols = ["flag".to_string()];
         let rows = vec![vec![Value::Bool(true)]];
-        let out = to_sql_inserts("t", &cols, &rows);
+        let out = to_sql_inserts(None, "t", &cols, &rows);
         assert!(out.contains("true"));
     }
 
@@ -230,7 +292,7 @@ mod tests {
     fn sql_inserts_table_name_with_quote() {
         let cols = ["v".to_string()];
         let rows = vec![vec![Value::Number(1i64.into())]];
-        let out = to_sql_inserts(r#"my"table"#, &cols, &rows);
+        let out = to_sql_inserts(None, r#"my"table"#, &cols, &rows);
         assert!(out.contains(r#""my""table""#));
     }
 
@@ -238,7 +300,7 @@ mod tests {
     fn sql_inserts_column_name_with_quote() {
         let cols = [r#"col"umn"#.to_string()];
         let rows = vec![vec![Value::Number(1i64.into())]];
-        let out = to_sql_inserts("t", &cols, &rows);
+        let out = to_sql_inserts(None, "t", &cols, &rows);
         assert!(out.contains(r#""col""umn""#));
     }
 
@@ -250,7 +312,7 @@ mod tests {
             vec![Value::Number(2i64.into())],
             vec![Value::Number(3i64.into())],
         ];
-        let out = to_sql_inserts("t", &cols, &rows);
+        let out = to_sql_inserts(None, "t", &cols, &rows);
         assert_eq!(out.matches("INSERT INTO").count(), 3);
     }
 
@@ -337,7 +399,7 @@ mod tests {
     fn sql_inserts_array_value() {
         let cols = ["arr".to_string()];
         let rows = vec![vec![Value::Array(vec![Value::Number(1i64.into())])]];
-        let out = to_sql_inserts("t", &cols, &rows);
+        let out = to_sql_inserts(None, "t", &cols, &rows);
         assert!(out.contains("[1]"));
         assert!(out.contains("'"));
     }
@@ -349,7 +411,7 @@ mod tests {
             "k".to_string(),
             Value::String("v".into()),
         )]))]];
-        let out = to_sql_inserts("t", &cols, &rows);
+        let out = to_sql_inserts(None, "t", &cols, &rows);
         assert!(out.contains("INSERT INTO"));
     }
 

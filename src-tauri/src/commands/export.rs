@@ -31,7 +31,12 @@ pub async fn export_table_data(
     let content = match request.format.as_str() {
         "csv" => export::to_csv(&columns, &data.rows),
         "json" => export::to_json(&columns, &data.rows),
-        "sql" => export::to_sql_inserts(&request.table, &columns, &data.rows),
+        "sql" => export::to_sql_inserts(
+            Some(request.schema.as_str()),
+            &request.table,
+            &columns,
+            &data.rows,
+        ),
         _ => return Err(format!("Unsupported format: {}", request.format)),
     };
 
@@ -66,7 +71,12 @@ pub async fn export_table_to_file(
     let content = match request.format.as_str() {
         "csv" => export::to_csv(&columns, &data.rows),
         "json" => export::to_json(&columns, &data.rows),
-        "sql" => export::to_sql_inserts(&request.table, &columns, &data.rows),
+        "sql" => export::to_sql_inserts(
+            Some(request.schema.as_str()),
+            &request.table,
+            &columns,
+            &data.rows,
+        ),
         _ => return Err(format!("Unsupported format: {}", request.format)),
     };
 
@@ -83,7 +93,9 @@ pub async fn export_query_result(request: ExportResultRequest) -> Result<String,
     let content = match request.format.as_str() {
         "csv" => export::to_csv(&request.columns, &request.rows),
         "json" => export::to_json(&request.columns, &request.rows),
-        "sql" => export::to_sql_inserts(&table_name, &request.columns, &request.rows),
+        // No schema available from the query-result path -- the caller
+        // doesn't know which logical table the rows belong to.
+        "sql" => export::to_sql_inserts(None, &table_name, &request.columns, &request.rows),
         _ => return Err(format!("Unsupported format: {}", request.format)),
     };
     Ok(content)
@@ -100,7 +112,7 @@ pub async fn export_query_result_to_file(
     let content = match request.format.as_str() {
         "csv" => export::to_csv(&request.columns, &request.rows),
         "json" => export::to_json(&request.columns, &request.rows),
-        "sql" => export::to_sql_inserts(&table_name, &request.columns, &request.rows),
+        "sql" => export::to_sql_inserts(None, &table_name, &request.columns, &request.rows),
         _ => return Err(format!("Unsupported format: {}", request.format)),
     };
 

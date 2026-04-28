@@ -12,6 +12,45 @@ pub struct CassandraDriver {
     session: Session,
 }
 
+/// Mirrors `pg_common::filter_is_unsafe`. Cassandra/CQL has its own
+/// expression grammar but the threat model (typo or confused-deputy
+/// statement injection from the local UI) is identical, so we apply
+/// the same heuristic across drivers for consistency.
+fn filter_is_unsafe(filter: &str) -> bool {
+    let s = filter.trim();
+    if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
+        return true;
+    }
+    let u = s.to_uppercase();
+    if u.contains("(SELECT") {
+        return true;
+    }
+    u.contains(" UNION SELECT")
+        || u.contains(" UNION ALL SELECT")
+        || u.contains(" UNION DISTINCT SELECT")
+}
+
+fn filter_unsafe_reason(filter: &str) -> Option<&'static str> {
+    let s = filter.trim();
+    if s.contains(';') {
+        return Some("statement terminator (`;`)");
+    }
+    if s.contains("--") || s.contains("/*") || s.contains("*/") {
+        return Some("CQL comment markers (`--` / `/* */`)");
+    }
+    let u = s.to_uppercase();
+    if u.contains("(SELECT") {
+        return Some("nested `(SELECT ...)` subquery");
+    }
+    if u.contains(" UNION SELECT")
+        || u.contains(" UNION ALL SELECT")
+        || u.contains(" UNION DISTINCT SELECT")
+    {
+        return Some("`UNION SELECT` clause");
+    }
+    None
+}
+
 const SYSTEM_KEYSPACES: &[&str] = &[
     "system",
     "system_auth",
@@ -341,17 +380,50 @@ impl DatabaseDriver for CassandraDriver {
         let columns = self.list_columns(database, database, table).await?;
 
         let qualified = format!("{}.{}", quote_ident(database), quote_ident(table));
-        let mut cql = format!("SELECT * FROM {}", qualified);
 
-        if let Some(ref f) = filter {
-            let f = f.trim();
-            if !f.is_empty() {
-                if f.contains(';') || f.contains("--") || f.contains("/*") || f.contains("*/") {
-                    anyhow::bail!("Filter contains invalid characters (; -- /* */)");
+        // Build the optional WHERE fragment once and reuse it for both
+        // the count query and the data query so the two stay in sync.
+        let where_clause = match filter.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+            Some(f) => {
+                if let Some(reason) = filter_unsafe_reason(f) {
+                    anyhow::bail!("Filter rejected: {}", reason);
                 }
-                cql.push_str(&format!(" WHERE {}", f));
+                debug_assert!(!filter_is_unsafe(f));
+                format!(" WHERE {}", f)
             }
-        }
+            None => String::new(),
+        };
+
+        // Total row count -- previously we computed `LIMIT (offset + limit)`,
+        // pulled the entire window into memory, then reported the fetched
+        // page size as `total_rows`. That meant pagination UI was wrong
+        // (total stuck at the page boundary) and deep pages OOM'd.
+        //
+        // CQL has no real OFFSET, so we do it in two stages:
+        //   1. `SELECT COUNT(*) ... [WHERE ...]` for the true total.
+        //      `ALLOW FILTERING` is required when the WHERE references
+        //      non-key columns; we always send it for consistency.
+        //   2. `SELECT * ... [WHERE ...] LIMIT (offset + limit)` for the
+        //      data, then skip+take in Rust. We can't avoid loading
+        //      `offset` rows -- that's a CQL limitation -- but at least
+        //      the total is now correct.
+        let count_cql = format!(
+            "SELECT COUNT(*) FROM {}{} ALLOW FILTERING",
+            qualified, where_clause
+        );
+        let count_result = self
+            .session
+            .query_unpaged(count_cql.as_str(), &[])
+            .await
+            .map_err(|e| anyhow!("{}", e))?
+            .into_rows_result()
+            .map_err(|e| anyhow!("{}", e))?;
+        let total_rows: i64 = count_result
+            .first_row::<(i64,)>()
+            .map(|(c,)| c)
+            .unwrap_or(0);
+
+        let mut cql = format!("SELECT * FROM {}{}", qualified, where_clause);
 
         if let Some(ref s) = sort {
             cql.push_str(&format!(
@@ -364,8 +436,12 @@ impl DatabaseDriver for CassandraDriver {
             ));
         }
 
-        let fetch_limit = offset + limit;
-        cql.push_str(&format!(" LIMIT {}", fetch_limit));
+        // Saturating add prevents an integer overflow if the caller
+        // passes hostile pagination parameters; the worst that can
+        // happen is we send the largest representable LIMIT, which
+        // Cassandra will then reject or truncate cleanly.
+        let fetch_limit = offset.saturating_add(limit);
+        cql.push_str(&format!(" LIMIT {} ALLOW FILTERING", fetch_limit));
 
         let result = self
             .session
@@ -376,7 +452,6 @@ impl DatabaseDriver for CassandraDriver {
             .map_err(|e| anyhow!("{}", e))?;
 
         let (_, all_rows) = rows_from_result(&result);
-        let fetched_total = all_rows.len() as i64;
 
         let rows: Vec<Vec<serde_json::Value>> = all_rows
             .into_iter()
@@ -384,12 +459,10 @@ impl DatabaseDriver for CassandraDriver {
             .take(limit as usize)
             .collect();
 
-        let total = fetched_total;
-
         Ok(TableData {
             columns,
             rows,
-            total_rows: total,
+            total_rows,
             offset,
             limit,
         })

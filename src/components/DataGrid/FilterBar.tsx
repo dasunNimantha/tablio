@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Plus, X, Play } from "lucide-react";
 import { ColumnInfo } from "../../lib/tauri";
 import { buildWhereClause as buildWhereClauseFromConditions, NO_VALUE_OPS, type FilterCondition } from "../../lib/filterBuilder";
+import type { DbType } from "../../lib/sqlDialect";
 import { CustomSelect } from "../CustomSelect/CustomSelect";
 import "./FilterBar.css";
 
@@ -9,6 +10,10 @@ interface Props {
   columns: ColumnInfo[];
   onApply: (filter: string | null) => void;
   onClose: () => void;
+  /** Optional — when provided, filters are emitted in dialect-correct
+   *  identifier quoting and `ILIKE` is rewritten to `LOWER(...) LIKE
+   *  LOWER(...)` on engines that don't support `ILIKE` natively. */
+  dbType?: DbType;
 }
 
 const OPERATORS = [
@@ -24,7 +29,7 @@ const OPERATORS = [
   { value: "IS NOT NULL", label: "IS NOT NULL" },
 ];
 
-export function FilterBar({ columns, onApply, onClose }: Props) {
+export function FilterBar({ columns, onApply, onClose, dbType }: Props) {
   const [conditions, setConditions] = useState<FilterCondition[]>([
     { id: "1", column: columns[0]?.name || "", operator: "=", value: "", join: "AND" },
   ]);
@@ -62,7 +67,7 @@ export function FilterBar({ columns, onApply, onClose }: Props) {
   };
 
   const handleApply = () => {
-    onApply(buildWhereClauseFromConditions(conditions, columns));
+    onApply(buildWhereClauseFromConditions(conditions, columns, dbType));
   };
 
   const handleClear = () => {

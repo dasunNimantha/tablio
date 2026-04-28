@@ -111,8 +111,19 @@ pub fn json_to_sql_literal(val: &serde_json::Value) -> String {
     }
 }
 
+/// Strict check for SQL fragments that should never contain string
+/// literals (data types, operator names, etc). Bans `'` here because
+/// types never legitimately need one. For `DEFAULT` clauses use
+/// `sql_default_is_unsafe` instead so string defaults survive.
 pub fn sql_fragment_is_unsafe(s: &str) -> bool {
     s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") || s.contains('\'')
+}
+
+/// Same as `sql_fragment_is_unsafe` but allows `'` so legitimate
+/// string-literal defaults (e.g. `DEFAULT 'pending'`) aren't blocked.
+/// Mirrors `pg_common::sql_default_is_unsafe`.
+pub fn sql_default_is_unsafe(s: &str) -> bool {
+    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/")
 }
 
 pub fn mysql_variable_category(name: &str) -> &str {
@@ -147,9 +158,45 @@ pub fn mysql_variable_category(name: &str) -> &str {
     }
 }
 
+/// MySQL/MariaDB/TiDB filter safety check. Mirrors the strict
+/// PostgreSQL version (`pg_common::filter_is_unsafe`) so the rejection
+/// matrix is identical across drivers — see the doc comment there for
+/// the rationale and the full list of patterns blocked.
 pub fn filter_is_unsafe(filter: &str) -> bool {
     let s = filter.trim();
-    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/")
+    if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
+        return true;
+    }
+    let u = s.to_uppercase();
+    if u.contains("(SELECT") {
+        return true;
+    }
+    u.contains(" UNION SELECT")
+        || u.contains(" UNION ALL SELECT")
+        || u.contains(" UNION DISTINCT SELECT")
+}
+
+/// Mirrors `pg_common::filter_unsafe_reason` so MySQL-family drivers
+/// can produce the same precise error messages.
+pub fn filter_unsafe_reason(filter: &str) -> Option<&'static str> {
+    let s = filter.trim();
+    if s.contains(';') {
+        return Some("statement terminator (`;`)");
+    }
+    if s.contains("--") || s.contains("/*") || s.contains("*/") {
+        return Some("SQL comment markers (`--` / `/* */`)");
+    }
+    let u = s.to_uppercase();
+    if u.contains("(SELECT") {
+        return Some("nested `(SELECT ...)` subquery");
+    }
+    if u.contains(" UNION SELECT")
+        || u.contains(" UNION ALL SELECT")
+        || u.contains(" UNION DISTINCT SELECT")
+    {
+        return Some("`UNION SELECT` clause");
+    }
+    None
 }
 
 pub fn format_bytes(bytes: Option<i64>) -> String {
@@ -401,8 +448,11 @@ pub async fn my_fetch_rows_impl(
     filter: Option<String>,
 ) -> Result<TableData> {
     if let Some(ref f) = filter {
-        if !f.trim().is_empty() && filter_is_unsafe(f) {
-            anyhow::bail!("Filter contains invalid characters (; -- /* */)");
+        if !f.trim().is_empty() {
+            if let Some(reason) = filter_unsafe_reason(f) {
+                anyhow::bail!("Filter rejected: {}", reason);
+            }
+            debug_assert!(!filter_is_unsafe(f));
         }
     }
 
@@ -551,7 +601,10 @@ pub async fn my_create_table(
             anyhow::bail!("Invalid character in data type for column {}", col.name);
         }
         if let Some(d) = &col.default_value {
-            if !d.is_empty() && sql_fragment_is_unsafe(d) {
+            // String defaults like `DEFAULT 'pending'` are valid SQL
+            // and must survive validation; only block statement
+            // terminators / comment markers.
+            if !d.is_empty() && sql_default_is_unsafe(d) {
                 anyhow::bail!("Invalid character in default value for column {}", col.name);
             }
         }
@@ -603,7 +656,7 @@ pub async fn my_alter_table(
                     anyhow::bail!("Invalid character in data type for column {}", column.name);
                 }
                 if let Some(d) = &column.default_value {
-                    if !d.is_empty() && sql_fragment_is_unsafe(d) {
+                    if !d.is_empty() && sql_default_is_unsafe(d) {
                         anyhow::bail!(
                             "Invalid character in default value for column {}",
                             column.name
@@ -620,7 +673,7 @@ pub async fn my_alter_table(
                 default_value: Some(d),
                 ..
             } if !d.is_empty() => {
-                if sql_fragment_is_unsafe(d) {
+                if sql_default_is_unsafe(d) {
                     anyhow::bail!("Invalid character in default value");
                 }
             }
@@ -1169,6 +1222,57 @@ mod tests {
     fn filter_safe_normal_operators() {
         assert!(!filter_is_unsafe("`age` >= 18 AND `status` = 'active'"));
         assert!(!filter_is_unsafe("`price` BETWEEN 10 AND 100"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-driver parity: MySQL's filter_is_unsafe used to only block
+    // `;`, `--`, `/*`, `*/` (no UNION / subquery checks), so a payload
+    // like `1=1 UNION SELECT password FROM mysql.user` was accepted
+    // when it would have been rejected on the Postgres driver. After
+    // the unification it must reject the same set of patterns.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn filter_unsafe_unionless_subquery_now_blocked() {
+        assert!(filter_is_unsafe("1=1 OR (SELECT 1)"));
+        assert!(filter_is_unsafe("(SELECT count(*) FROM mysql.user) > 0"));
+    }
+
+    #[test]
+    fn filter_unsafe_union_without_comments_now_blocked() {
+        // Previously slipped through because there's no `;`, `--`, `/*`, `*/`.
+        assert!(filter_is_unsafe("1=1 UNION SELECT user FROM mysql.user"));
+        assert!(filter_is_unsafe("1=1 UNION ALL SELECT 1"));
+        assert!(filter_is_unsafe("1=1 UNION DISTINCT SELECT 1"));
+    }
+
+    #[test]
+    fn filter_unsafe_reason_descriptive_messages() {
+        assert_eq!(
+            filter_unsafe_reason("x; DROP TABLE t"),
+            Some("statement terminator (`;`)")
+        );
+        assert_eq!(
+            filter_unsafe_reason("1=1 UNION SELECT 1"),
+            Some("`UNION SELECT` clause")
+        );
+        assert!(filter_unsafe_reason("`id` = 1").is_none());
+    }
+
+    #[test]
+    fn sql_default_allows_string_literals_mysql() {
+        // Same regression class as pg_common: legitimate `DEFAULT 'val'`
+        // must not be rejected for containing a single quote.
+        assert!(!sql_default_is_unsafe("'pending'"));
+        assert!(!sql_default_is_unsafe("'O''Brien'"));
+        assert!(!sql_default_is_unsafe("CURRENT_TIMESTAMP"));
+    }
+
+    #[test]
+    fn sql_default_still_blocks_injection() {
+        assert!(sql_default_is_unsafe("'x'; DROP TABLE users"));
+        assert!(sql_default_is_unsafe("'x' -- comment"));
+        assert!(sql_default_is_unsafe("'x' /* comment */"));
     }
 
     #[test]

@@ -128,13 +128,19 @@ export function QueryConsole({ connectionId, database }: Props) {
   }, []);
 
   const loadColumnsForTable = useCallback(async (tableName: string, schema: string) => {
-    const cached = columnsCache.current.get(tableName);
+    // Key by `schema.table`, not just `table`. With the previous key
+    // two same-named tables in different schemas (e.g. `auth.users`
+    // and `app.users`) collided in this cache and autocomplete
+    // returned the first-loaded set for both — wrong columns,
+    // confusing UX, and very hard to spot once cached.
+    const key = `${schema}.${tableName}`;
+    const cached = columnsCache.current.get(key);
     if (cached) return cached;
     const { connectionId: cid, database: db } = connRef.current;
     try {
       const colInfos = await api.listColumns(cid, db, schema, tableName);
       const cols = colInfos.map((c) => ({ name: c.name, type: c.data_type }));
-      columnsCache.current.set(tableName, cols);
+      columnsCache.current.set(key, cols);
       return cols;
     } catch { return []; }
   }, []);
