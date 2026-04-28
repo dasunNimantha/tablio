@@ -455,6 +455,107 @@ async fn mssql_get_table_stats() {
         .unwrap();
 }
 
+// SQL Server table partitioning needs a partition function + scheme +
+// table-on-scheme. The driver's COUNT_BIG(*) is unbounded by partition,
+// and the size SQL aggregates `sys.partitions` rows, so a partitioned
+// table should report an aggregate count and a non-empty size.
+//
+// We drop the table → scheme → function in that order because partition
+// functions can't be dropped while a scheme references them, and schemes
+// can't be dropped while a table references them.
+#[tokio::test]
+async fn mssql_get_table_stats_partitioned_table_aggregates_partitions() {
+    let (driver, db) = mssql_driver!();
+    let suffix = unique_table("");
+    let tbl = format!("ms_stats_part_{}", suffix.trim_start_matches('_'));
+    let pf = format!("pf_{}", suffix.trim_start_matches('_'));
+    let ps = format!("ps_{}", suffix.trim_start_matches('_'));
+
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE PARTITION FUNCTION [{}] (INT) AS RANGE LEFT FOR VALUES (2024, 2025)",
+                pf
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE PARTITION SCHEME [{}] AS PARTITION [{}] ALL TO ([PRIMARY])",
+                ps, pf
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE [dbo].[{}] (
+                    id INT NOT NULL,
+                    yr INT NOT NULL
+                ) ON [{}](yr)",
+                tbl, ps
+            ),
+        )
+        .await
+        .unwrap();
+    // RANGE LEFT (2024, 2025) splits values into:
+    //   p1: yr <= 2024 → (1,2023), (2,2024), (3,2024) = 3 rows
+    //   p2: 2024 < yr <= 2025 → (4,2025), (5,2025) = 2 rows
+    //   p3: yr > 2025 → (6,2026) = 1 row
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "INSERT INTO [dbo].[{}] VALUES (1,2023),(2,2024),(3,2024),(4,2025),(5,2025),(6,2026)",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let stats = driver.get_table_stats(&db, SCHEMA, &tbl).await.unwrap();
+    assert!(stats.table_name.contains(&tbl));
+    assert_eq!(
+        stats.row_count, 6,
+        "MSSQL stats must aggregate across all partitions"
+    );
+    assert!(!stats.total_size.is_empty());
+
+    // Tear down in reverse dependency order.
+    driver
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("DROP PARTITION SCHEME [{}]", ps))
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("DROP PARTITION FUNCTION [{}]", pf))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mssql_get_table_stats_unknown_table_errors() {
+    let (driver, db) = mssql_driver!();
+    let bogus = unique_table("ms_no_such_table");
+    let result = driver.get_table_stats(&db, SCHEMA, &bogus).await;
+    // MSSQL surfaces unknown objects as a SQL "Invalid object name" error
+    // from the COUNT_BIG(*) probe; we only assert is_err here because the
+    // exact phrasing varies by server version and locale.
+    assert!(
+        result.is_err(),
+        "unknown tables must error, not return zeros"
+    );
+}
+
 // ===========================================================================
 // fetch_rows: empty table
 // ===========================================================================
