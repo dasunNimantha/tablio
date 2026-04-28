@@ -308,6 +308,21 @@ async fn sqlite_get_table_stats() {
     let _ = std::fs::remove_file(&path);
 }
 
+// SQLite has no notion of partitioning so the partitioned-parent test
+// surface from postgres_integration.rs doesn't apply. We do still pin
+// that unknown tables fail loudly instead of returning zero counts.
+#[tokio::test]
+async fn sqlite_get_table_stats_unknown_table_errors() {
+    let (driver, path) = create_driver().await;
+    let bogus = unique_table("sqlite_no_such_table");
+    let result = driver.get_table_stats(DB, SCHEMA, &bogus).await;
+    assert!(
+        result.is_err(),
+        "unknown tables must error, not return zero counts"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 // ---------------------------------------------------------------------------
 // Fetch rows
 // ---------------------------------------------------------------------------

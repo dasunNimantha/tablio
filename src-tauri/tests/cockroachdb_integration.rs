@@ -1363,3 +1363,71 @@ async fn validate_query_empty_string() {
     let result = driver.validate_query(&db, "").await.unwrap();
     assert!(result.is_some(), "empty SQL should be an error");
 }
+
+// ---------------------------------------------------------------------------
+// Table stats
+//
+// CockroachDB exposes a Postgres-compatible pg_class catalog, so the same
+// happy-path contract applies: row_count is returned (planner estimate or
+// exact, both acceptable; the cluster decides), total_size is non-empty,
+// and unknown tables surface as a clean "not found" instead of a SQL
+// error. Note: CockroachDB partitioning is zone-based and does NOT
+// materialize child relations in pg_class, so the partitioned-parent
+// aggregation we ship in the Postgres driver is a no-op here.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn crdb_get_table_stats() {
+    let (driver, db) = crdb_driver!();
+    let tbl = unique_table("crdb_stats");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE \"{}\".\"{}\" (id INT PRIMARY KEY, n INT)",
+                SCHEMA, tbl
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "INSERT INTO \"{}\".\"{}\" VALUES (1,10),(2,20),(3,30),(4,40),(5,50)",
+                SCHEMA, tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let stats = driver.get_table_stats(&db, SCHEMA, &tbl).await.unwrap();
+    assert_eq!(stats.table_name, tbl);
+    // Some CockroachDB versions return reltuples=0 until ANALYZE/auto-stats
+    // catches up; we only assert the field is non-negative and the size
+    // labels are populated to keep the test robust across versions.
+    assert!(stats.row_count >= 0);
+    assert!(!stats.total_size.is_empty(), "total_size should be set");
+    assert!(!stats.data_size.is_empty(), "data_size should be set");
+
+    driver
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn crdb_get_table_stats_unknown_table_returns_not_found() {
+    let (driver, db) = crdb_driver!();
+    let bogus = unique_table("crdb_no_such_table");
+    let result = driver.get_table_stats(&db, SCHEMA, &bogus).await;
+    assert!(
+        result.is_err(),
+        "unknown tables must error, not return zeros"
+    );
+    let msg = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        msg.contains("not found"),
+        "expected 'not found' in error, got: {msg}"
+    );
+}

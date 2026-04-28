@@ -366,6 +366,72 @@ async fn mariadb_get_table_stats() {
     driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }
 
+// MariaDB inherits MySQL's PARTITION BY semantics: every partition is
+// rolled up into a single information_schema.TABLES row. This test pins
+// that get_table_stats reports the aggregate count, not a single
+// partition's count.
+#[tokio::test]
+async fn mariadb_get_table_stats_partitioned_table_aggregates_partitions() {
+    let (driver, db) = mariadb_driver!();
+    let tbl = unique_table("mdb_stats_part");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{}` (
+                    id INT NOT NULL,
+                    yr INT NOT NULL,
+                    PRIMARY KEY (id, yr)
+                ) ENGINE=InnoDB
+                PARTITION BY RANGE (yr) (
+                    PARTITION p2024 VALUES LESS THAN (2025),
+                    PARTITION p2025 VALUES LESS THAN (2026),
+                    PARTITION p2026 VALUES LESS THAN (2027)
+                )",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "INSERT INTO `{}` VALUES \
+                 (1,2024),(2,2024),(3,2025),(4,2025),(5,2026),(6,2026)",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let stats = driver.get_table_stats(&db, &db, &tbl).await.unwrap();
+    assert_eq!(stats.table_name, tbl);
+    assert_eq!(
+        stats.row_count, 6,
+        "stats must aggregate across all RANGE partitions"
+    );
+    assert!(!stats.total_size.is_empty());
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mariadb_get_table_stats_unknown_table_returns_not_found() {
+    let (driver, db) = mariadb_driver!();
+    let bogus = unique_table("mdb_no_such_table");
+    let result = driver.get_table_stats(&db, &db, &bogus).await;
+    assert!(
+        result.is_err(),
+        "unknown tables must error, not return zeros"
+    );
+    let msg = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        msg.contains("not found"),
+        "expected 'not found' in error, got: {msg}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // fetch_rows
 // ---------------------------------------------------------------------------
