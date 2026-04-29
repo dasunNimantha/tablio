@@ -102,68 +102,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   connectTo: async (config) => {
     try {
-      // If the user opted to be prompted for the SSH key passphrase rather
-      // than persisting it, surface a one-shot modal request. The stored
-      // `ssh_password` is empty in this case; we inject a transient one
-      // for this connect call only and clear the prompt flag so the
-      // backend takes the supplied passphrase.
-      let effectiveConfig = config;
-      if (
-        config.ssh_enabled &&
-        config.ssh_auth_method === "identityfile" &&
-        config.ssh_prompt_passphrase
-      ) {
-        const passphrase = await new Promise<string>((resolve, reject) => {
-          set({
-            pendingPassphrasePrompt: {
-              connectionName: config.name,
-              keyPath: config.ssh_key_path ?? "",
-              resolve: (p) => {
-                set({ pendingPassphrasePrompt: null });
-                resolve(p);
-              },
-              reject: (err) => {
-                set({ pendingPassphrasePrompt: null });
-                reject(err);
-              },
-            },
-          });
-        });
-        effectiveConfig = {
-          ...config,
-          ssh_password: passphrase,
-          ssh_prompt_passphrase: false,
-        };
-      }
-
-      // Retry once if the bastion's host key has changed and the user
-      // confirms they want to re-trust it. Anything else propagates as
-      // a normal error.
-      try {
-        await api.connect(effectiveConfig);
-      } catch (err) {
-        const mismatch = parseSshHostKeyMismatch(err);
-        if (!mismatch) throw err;
-        const forgetAndRetry = await new Promise<boolean>((resolve) => {
-          set({
-            pendingHostKeyMismatch: {
-              connectionName: config.name,
-              info: mismatch,
-              resolve: (decision) => {
-                set({ pendingHostKeyMismatch: null });
-                resolve(decision);
-              },
-            },
-          });
-        });
-        if (!forgetAndRetry) throw err;
-        await api.forgetKnownHost(
-          mismatch.host,
-          mismatch.port,
-          mismatch.fingerprint,
-        );
-        await api.connect(effectiveConfig);
-      }
+      const effectiveConfig = await resolveSshPassphrase(config);
+      await withHostKeyMismatchRetry(config.name, () =>
+        api.connect(effectiveConfig),
+      );
 
       set((s) => {
         const next = new Set(s.activeConnections);
@@ -191,3 +133,94 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   isConnected: (id) => get().activeConnections.has(id),
 }));
+
+/**
+ * Surface the passphrase prompt for SSH identity-file connections that
+ * opted out of persisting the passphrase, and return a config with the
+ * just-entered passphrase injected into `ssh_password` (and the prompt
+ * flag cleared so the backend uses the supplied value verbatim).
+ *
+ * For every other case the original config is returned unchanged.
+ *
+ * Exported so any caller that initiates an SSH connect — currently
+ * `connectTo` and the dialog's "Test Connection" button — can share
+ * the same UX without re-implementing the modal lifecycle.
+ */
+export async function resolveSshPassphrase(
+  config: ConnectionConfig,
+): Promise<ConnectionConfig> {
+  if (
+    !config.ssh_enabled ||
+    config.ssh_auth_method !== "identityfile" ||
+    !config.ssh_prompt_passphrase
+  ) {
+    return config;
+  }
+  const passphrase = await new Promise<string>((resolve, reject) => {
+    useConnectionStore.setState({
+      pendingPassphrasePrompt: {
+        connectionName: config.name,
+        keyPath: config.ssh_key_path ?? "",
+        resolve: (p) => {
+          useConnectionStore.setState({ pendingPassphrasePrompt: null });
+          resolve(p);
+        },
+        reject: (err) => {
+          useConnectionStore.setState({ pendingPassphrasePrompt: null });
+          reject(err);
+        },
+      },
+    });
+  });
+  return {
+    ...config,
+    ssh_password: passphrase,
+    ssh_prompt_passphrase: false,
+  };
+}
+
+/**
+ * Run `action`; if it fails with a structured `ssh_host_key_mismatch`
+ * error, surface the prompt and — when the user confirms — forget the
+ * recorded key and call `action` exactly once more. Any non-mismatch
+ * error or a Cancel decision propagates the original error.
+ *
+ * Use this around any backend call that can open an SSH session
+ * (`api.connect`, `api.testConnection`, `api.backupDatabase`,
+ * `api.restoreDatabase`, `api.dumpAndRestore`) so users get a
+ * consistent Forget & Retry experience instead of a raw
+ * `ssh_host_key_mismatch:{...}` string.
+ *
+ * `connectionName` is shown to the user in the modal — keep it stable
+ * (no IDs) so the message is meaningful.
+ */
+export async function withHostKeyMismatchRetry<T>(
+  connectionName: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await action();
+  } catch (err) {
+    const mismatch = parseSshHostKeyMismatch(err);
+    if (!mismatch) throw err;
+    const forgetAndRetry = await new Promise<boolean>((resolve) => {
+      useConnectionStore.setState({
+        pendingHostKeyMismatch: {
+          connectionName,
+          info: mismatch,
+          resolve: (decision) => {
+            useConnectionStore.setState({ pendingHostKeyMismatch: null });
+            resolve(decision);
+          },
+        },
+      });
+    });
+    if (!forgetAndRetry) throw err;
+    await api.forgetKnownHost(
+      mismatch.host,
+      mismatch.port,
+      mismatch.fingerprint,
+    );
+    return action();
+  }
+}

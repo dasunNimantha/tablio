@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { useConnectionStore } from "../stores/connectionStore";
+import {
+  resolveSshPassphrase,
+  useConnectionStore,
+  withHostKeyMismatchRetry,
+} from "../stores/connectionStore";
 import { api, ConnectionConfig, SshAuthMethod } from "../lib/tauri";
 import {
   AlertCircle,
@@ -590,6 +594,24 @@ function SshTunnelSection({
     }
   };
 
+  // --- Cross-section advisories ---
+  // We surface these in the SSH section because they only matter when
+  // SSH is *enabled*, but they're triggered by other fields (SSL on
+  // General-style settings; the chosen DB driver). Displayed inline so
+  // the user sees them at the moment they enable the tunnel rather
+  // than discovering them at connect time.
+  const tlsVerifyConflict =
+    enabled && !!form.ssl && !form.trust_server_cert && form.db_type !== "cassandra";
+  const cassandraPeerDiscovery = enabled && form.db_type === "cassandra";
+  // Warns only when the field actually contains something — empty
+  // passphrases are unencrypted keys, not a security risk.
+  const persistedPassphrase =
+    enabled &&
+    isIdentity &&
+    !promptPassphrase &&
+    !!form.ssh_password &&
+    form.ssh_password.length > 0;
+
   return (
     <div className="security-options ssh-tunnel-section" aria-label="SSH tunnel">
       <label className={`security-toggle${enabled ? " security-toggle--active" : ""}`}>
@@ -609,6 +631,35 @@ function SshTunnelSection({
 
       {enabled && (
         <div className="ssh-tunnel-fields">
+          {tlsVerifyConflict && (
+            <div className="ssh-tunnel-warning" role="alert">
+              <AlertCircle size={14} />
+              <div>
+                <strong>SSL hostname verification will fail.</strong>
+                <span>
+                  After tunneling, the driver connects to{" "}
+                  <code>127.0.0.1</code> — the server certificate's hostname
+                  won't match. Either turn on{" "}
+                  <em>Trust server certificate</em> in the Security section, or
+                  disable SSL.
+                </span>
+              </div>
+            </div>
+          )}
+          {cassandraPeerDiscovery && (
+            <div className="ssh-tunnel-warning" role="alert">
+              <AlertCircle size={14} />
+              <div>
+                <strong>Cassandra cluster discovery bypasses the tunnel.</strong>
+                <span>
+                  The driver contacts the seed node through the tunnel, then
+                  opens direct TCP connections to every peer it learns about.
+                  This works for single-node clusters; multi-node clusters
+                  need each peer reachable directly or its own forward.
+                </span>
+              </div>
+            </div>
+          )}
           <div className="form-row">
             <div
               className={`form-group flex-1${getFieldError("ssh_host") ? " form-group--error" : ""}`}
@@ -735,6 +786,23 @@ function SshTunnelSection({
                 {getFieldError("ssh_password") && (
                   <div className="field-error">{getFieldError("ssh_password")}</div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {persistedPassphrase && (
+            <div
+              className="ssh-tunnel-warning ssh-tunnel-warning--info"
+              role="status"
+            >
+              <AlertCircle size={14} />
+              <div>
+                <strong>Passphrase will be saved to disk.</strong>
+                <span>
+                  Tablio stores connection details in plain text. Enable
+                  <em> Prompt for passphrase?</em> below to be asked at
+                  connect time instead.
+                </span>
               </div>
             </div>
           )}
@@ -904,7 +972,15 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
     setTestError("");
     setTesting(true);
     try {
-      await api.testConnection(normalized);
+      // Walk the same SSH UX as a live connect: prompt for the
+      // identity-file passphrase if the user opted not to persist it,
+      // and offer a Forget & Retry modal when the bastion's host key
+      // has changed. Without this the user would just see a raw
+      // `ssh_host_key_mismatch:{...}` error string.
+      const effective = await resolveSshPassphrase(normalized);
+      await withHostKeyMismatchRetry(normalized.name || "this connection", () =>
+        api.testConnection(effective),
+      );
       setTestResult("success");
     } catch (e) {
       setTestResult("error");

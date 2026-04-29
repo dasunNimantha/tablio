@@ -1,6 +1,9 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { api, BackupRequest, RestoreRequest } from "../../lib/tauri";
-import { useConnectionStore } from "../../stores/connectionStore";
+import {
+  useConnectionStore,
+  withHostKeyMismatchRetry,
+} from "../../stores/connectionStore";
 import {
   X,
   Loader2,
@@ -134,6 +137,12 @@ export function BackupRestoreDialog({
   onClose,
 }: Props) {
   const connections = useConnectionStore((s) => s.connections);
+  const connectionLabel = useMemo(
+    () =>
+      connections.find((c) => c.id === connectionId)?.name ||
+      "this connection",
+    [connections, connectionId],
+  );
   const [tab, setTab] = useState<Tab>("backup");
 
   const [outputPath, setOutputPath] = useState("");
@@ -233,7 +242,10 @@ export function BackupRestoreDialog({
         schema_only: contentMode === "schema",
         data_only: contentMode === "data",
       };
-      const message = await api.backupDatabase(request);
+      const message = await withHostKeyMismatchRetry(
+        connectionLabel,
+        () => api.backupDatabase(request),
+      );
       setResult(message);
     } catch (e) {
       setError(String(e));
@@ -257,7 +269,10 @@ export function BackupRestoreDialog({
         input_path: inputPath.trim(),
         format: restoreFormat,
       };
-      const message = await api.restoreDatabase(request);
+      const message = await withHostKeyMismatchRetry(
+        connectionLabel,
+        () => api.restoreDatabase(request),
+      );
       setResult(message);
     } catch (e) {
       setError(String(e));

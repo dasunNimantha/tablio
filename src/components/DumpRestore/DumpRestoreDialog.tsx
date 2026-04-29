@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, DumpRestoreRequest } from "../../lib/tauri";
-import { useConnectionStore } from "../../stores/connectionStore";
+import {
+  useConnectionStore,
+  withHostKeyMismatchRetry,
+} from "../../stores/connectionStore";
 import { X, Loader2, AlertTriangle, CheckCircle, XCircle, Shield, Search, ChevronDown, ChevronUp } from "lucide-react";
 import "./DumpRestoreDialog.css";
 
@@ -144,7 +147,16 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
         target_connection_id: selectedTargetInfo.connectionId,
         target_database: selectedTargetInfo.database,
       };
-      const msg = await api.dumpAndRestore(request);
+      // Surface the same Forget & Retry modal that `connectTo` /
+      // "Test Connection" use when either bastion's host key has
+      // changed. Use the source connection's name as the prompt label
+      // because the dump runs first; if the *target* tunnel mismatches
+      // the modal will refer to "source" but the embedded host:port
+      // makes the actual culprit unambiguous.
+      const label = sourceConn?.name || "this connection";
+      const msg = await withHostKeyMismatchRetry(label, () =>
+        api.dumpAndRestore(request),
+      );
       setResult(msg);
       setStep("done");
     } catch (e) {

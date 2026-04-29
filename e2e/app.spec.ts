@@ -36,9 +36,13 @@ test.describe("Connection dialog", () => {
     await page.goto("/");
     await page.locator(".empty-state .btn-primary").click();
     const dialog = page.locator(".dialog");
+    // General section is the default landing page after the sectioned-dialog
+    // refactor; it now hosts host/port/database alongside connection name.
     await expect(dialog.locator("label", { hasText: "Connection Name" })).toBeVisible();
     await expect(dialog.locator("label", { hasText: "Host" })).toBeVisible();
     await expect(dialog.locator("label", { hasText: "Port" })).toBeVisible();
+    // Username + Password live in the Authentication section.
+    await dialog.locator(".connection-nav-item", { hasText: "Authentication" }).click();
     await expect(dialog.locator("label", { hasText: "Username" })).toBeVisible();
     await expect(dialog.locator("label", { hasText: "Password" })).toBeVisible();
   });
@@ -48,9 +52,11 @@ test.describe("Connection dialog", () => {
     await page.locator(".empty-state .btn-primary").click();
     const dialog = page.locator(".dialog");
 
-    await dialog.locator("input").nth(0).fill("Test DB");
-    await dialog.locator("input").nth(1).fill("localhost");
-    await dialog.locator("input").nth(3).fill("testuser");
+    // Connection Name is always the first input in the General section;
+    // Host follows. Username defaults to "postgres" so we don't need to
+    // touch the Authentication section here.
+    await dialog.locator("label", { hasText: "Connection Name" }).locator("..").locator("input").fill("Test DB");
+    await dialog.locator("label", { hasText: "Host" }).locator("..").locator("input").fill("localhost");
 
     await page.locator(".btn-test-conn").click();
     await expect(page.locator(".btn-test-conn")).toContainText("Connected", { timeout: 5000 });

@@ -732,6 +732,58 @@
   /* Align with the toggle's text column above. */
 }
 
+.ssh-tunnel-warning {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  background: rgba(250, 196, 23, 0.08);
+  border: 1px solid rgba(250, 196, 23, 0.45);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+}
+
+.ssh-tunnel-warning > svg {
+  color: rgb(250, 196, 23);
+  margin-top: 2px;
+}
+
+.ssh-tunnel-warning strong {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.ssh-tunnel-warning span {
+  color: var(--text-secondary);
+}
+
+.ssh-tunnel-warning code {
+  padding: 0 4px;
+  font-size: 11px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+}
+
+.ssh-tunnel-warning em {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ssh-tunnel-warning--info {
+  background: rgba(89, 178, 250, 0.08);
+  border-color: rgba(89, 178, 250, 0.45);
+}
+
+.ssh-tunnel-warning--info > svg {
+  color: rgb(89, 178, 250);
+}
+
 .ssh-auth-toggle {
   display: inline-flex;
   gap: 4px;
