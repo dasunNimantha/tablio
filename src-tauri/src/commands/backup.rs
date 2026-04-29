@@ -1,16 +1,19 @@
 use crate::db::pool::PoolManager;
+use crate::db::ssh_tunnel::{self, EffectiveTarget};
 use crate::models::*;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
-// TODO(ssh-tunnel): The pg_dump / mysqldump / pg_restore subprocesses below
-// still talk to the *raw* remote host/port from the saved
-// `ConnectionConfig`. When the connection has `ssh_enabled = true`, those
-// commands bypass the in-process russh tunnel managed by `PoolManager`
-// and will fail (or worse, leak credentials) for hosts only reachable via
-// the bastion. Tracked in a follow-up issue; the fix is to spawn a
-// short-lived russh tunnel here too and substitute `127.0.0.1:<local>`
-// before invoking the dump/restore binaries.
+/// Open an SSH tunnel for `config` if one is configured, returning the
+/// `host:port` the dump/restore subprocess should actually contact.
+///
+/// The returned [`EffectiveTarget`] keeps the russh session alive while the
+/// subprocess is running; dropping it shuts the bastion connection down.
+async fn effective_target(config: &ConnectionConfig) -> Result<EffectiveTarget, String> {
+    ssh_tunnel::open_for(config)
+        .await
+        .map_err(|e| format!("Failed to open SSH tunnel: {}", e))
+}
 
 fn emit_log(app: &AppHandle, line: &str) {
     let _ = app.emit("dump-restore-log", line.to_string());
@@ -75,13 +78,23 @@ pub async fn dump_and_restore(
         ),
     );
 
-    // pg_dump with --verbose to get progress output on stderr
+    let src_target = effective_target(&src_config).await?;
+    if src_config.ssh_enabled {
+        emit_log(
+            &app,
+            &format!(
+                "Routing pg_dump through SSH tunnel {}:{} → {}:{}",
+                src_config.ssh_host, src_config.ssh_port, src_config.host, src_config.port
+            ),
+        );
+    }
+
     let dump_status = {
         let mut cmd = tokio::process::Command::new("pg_dump");
         cmd.arg("-h")
-            .arg(&src_config.host)
+            .arg(&src_target.host)
             .arg("-p")
-            .arg(src_config.port.to_string())
+            .arg(src_target.port.to_string())
             .arg("-U")
             .arg(&src_config.user)
             .arg("-d")
@@ -101,6 +114,7 @@ pub async fn dump_and_restore(
             .await
             .map_err(|e| format!("pg_dump process error: {}", e))?
     };
+    drop(src_target);
 
     if !dump_status.success() {
         let _ = tokio::fs::remove_file(&tmp_path).await;
@@ -109,6 +123,17 @@ pub async fn dump_and_restore(
 
     emit_log(&app, "Dump complete. Starting pg_restore (transactional)…");
 
+    let tgt_target = effective_target(&tgt_config).await?;
+    if tgt_config.ssh_enabled {
+        emit_log(
+            &app,
+            &format!(
+                "Routing pg_restore through SSH tunnel {}:{} → {}:{}",
+                tgt_config.ssh_host, tgt_config.ssh_port, tgt_config.host, tgt_config.port
+            ),
+        );
+    }
+
     // First attempt: --single-transaction for atomic all-or-nothing restore.
     // If anything fails, the entire transaction is rolled back and the target
     // DB is left untouched. We skip --clean here because DROP commands inside
@@ -116,9 +141,9 @@ pub async fn dump_and_restore(
     let tx_status = {
         let mut cmd = tokio::process::Command::new("pg_restore");
         cmd.arg("-h")
-            .arg(&tgt_config.host)
+            .arg(&tgt_target.host)
             .arg("-p")
-            .arg(tgt_config.port.to_string())
+            .arg(tgt_target.port.to_string())
             .arg("-U")
             .arg(&tgt_config.user)
             .arg("-d")
@@ -141,6 +166,7 @@ pub async fn dump_and_restore(
     };
 
     if tx_status.success() {
+        drop(tgt_target);
         let _ = tokio::fs::remove_file(&tmp_path).await;
         emit_log(&app, "Restore complete (transactional).");
         return Ok(format!(
@@ -160,9 +186,9 @@ pub async fn dump_and_restore(
     let restore_status = {
         let mut cmd = tokio::process::Command::new("pg_restore");
         cmd.arg("-h")
-            .arg(&tgt_config.host)
+            .arg(&tgt_target.host)
             .arg("-p")
-            .arg(tgt_config.port.to_string())
+            .arg(tgt_target.port.to_string())
             .arg("-U")
             .arg(&tgt_config.user)
             .arg("-d")
@@ -182,6 +208,7 @@ pub async fn dump_and_restore(
             .await
             .map_err(|e| format!("pg_restore process error: {}", e))?
     };
+    drop(tgt_target);
 
     let _ = tokio::fs::remove_file(&tmp_path).await;
 
@@ -254,11 +281,13 @@ async fn backup_postgres(config: &ConnectionConfig, req: &BackupRequest) -> Resu
         return Err("Cannot use both schema-only and data-only at the same time".to_string());
     }
 
+    let target = effective_target(config).await?;
+
     let mut cmd = tokio::process::Command::new("pg_dump");
     cmd.arg("-h")
-        .arg(&config.host)
+        .arg(&target.host)
         .arg("-p")
-        .arg(config.port.to_string())
+        .arg(target.port.to_string())
         .arg("-U")
         .arg(&config.user)
         .arg("-d")
@@ -297,6 +326,7 @@ async fn backup_postgres(config: &ConnectionConfig, req: &BackupRequest) -> Resu
         .output()
         .await
         .map_err(|e| format!("Failed to run pg_dump: {}. Is it installed?", e))?;
+    drop(target);
 
     if output.status.success() {
         Ok(format!("Backup completed: {}", req.output_path))
@@ -312,12 +342,14 @@ async fn restore_postgres(
 ) -> Result<String, String> {
     let is_sql = req.format == "plain" || req.input_path.ends_with(".sql");
 
+    let target = effective_target(config).await?;
+
     if is_sql {
         let mut cmd = tokio::process::Command::new("psql");
         cmd.arg("-h")
-            .arg(&config.host)
+            .arg(&target.host)
             .arg("-p")
-            .arg(config.port.to_string())
+            .arg(target.port.to_string())
             .arg("-U")
             .arg(&config.user)
             .arg("-d")
@@ -330,6 +362,7 @@ async fn restore_postgres(
             .output()
             .await
             .map_err(|e| format!("Failed to run psql: {}", e))?;
+        drop(target);
         if output.status.success() {
             Ok("Restore completed".to_string())
         } else {
@@ -339,9 +372,9 @@ async fn restore_postgres(
     } else {
         let mut cmd = tokio::process::Command::new("pg_restore");
         cmd.arg("-h")
-            .arg(&config.host)
+            .arg(&target.host)
             .arg("-p")
-            .arg(config.port.to_string())
+            .arg(target.port.to_string())
             .arg("-U")
             .arg(&config.user)
             .arg("-d")
@@ -367,6 +400,7 @@ async fn restore_postgres(
             .output()
             .await
             .map_err(|e| format!("Failed to run pg_restore: {}", e))?;
+        drop(target);
         if output.status.success() {
             Ok("Restore completed".to_string())
         } else {
@@ -377,11 +411,13 @@ async fn restore_postgres(
 }
 
 async fn backup_mysql(config: &ConnectionConfig, req: &BackupRequest) -> Result<String, String> {
+    let target = effective_target(config).await?;
+
     let mut cmd = tokio::process::Command::new("mysqldump");
     cmd.arg("-h")
-        .arg(&config.host)
+        .arg(&target.host)
         .arg("-P")
-        .arg(config.port.to_string())
+        .arg(target.port.to_string())
         .arg("-u")
         .arg(&config.user)
         .arg(&req.database)
@@ -402,6 +438,7 @@ async fn backup_mysql(config: &ConnectionConfig, req: &BackupRequest) -> Result<
         .output()
         .await
         .map_err(|e| format!("Failed to run mysqldump: {}", e))?;
+    drop(target);
     if output.status.success() {
         Ok(format!("Backup completed: {}", req.output_path))
     } else {
@@ -411,11 +448,13 @@ async fn backup_mysql(config: &ConnectionConfig, req: &BackupRequest) -> Result<
 }
 
 async fn restore_mysql(config: &ConnectionConfig, req: &RestoreRequest) -> Result<String, String> {
+    let target = effective_target(config).await?;
+
     let mut cmd = tokio::process::Command::new("mysql");
     cmd.arg("-h")
-        .arg(&config.host)
+        .arg(&target.host)
         .arg("-P")
-        .arg(config.port.to_string())
+        .arg(target.port.to_string())
         .arg("-u")
         .arg(&config.user)
         .arg(&req.database);
@@ -444,6 +483,7 @@ async fn restore_mysql(config: &ConnectionConfig, req: &RestoreRequest) -> Resul
         .wait_with_output()
         .await
         .map_err(|e| format!("Failed: {}", e))?;
+    drop(target);
     if output.status.success() {
         Ok("Restore completed".to_string())
     } else {

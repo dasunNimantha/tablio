@@ -1,0 +1,114 @@
+.host-mismatch-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.host-mismatch-prompt {
+  width: min(480px, calc(100vw - 48px));
+  background: var(--bg-secondary);
+  border: 1px solid var(--danger, #dc2626);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-dialog);
+  overflow: hidden;
+}
+
+.host-mismatch-prompt__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(220, 38, 38, 0.12);
+  color: var(--danger, #dc2626);
+}
+
+.host-mismatch-prompt__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.host-mismatch-prompt__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.host-mismatch-prompt__close:hover {
+  background: rgba(220, 38, 38, 0.18);
+}
+
+.host-mismatch-prompt__body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.host-mismatch-prompt__lead {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.host-mismatch-prompt__meta {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 4px 12px;
+  font-size: 12px;
+}
+
+.host-mismatch-prompt__meta dt {
+  color: var(--text-muted);
+}
+
+.host-mismatch-prompt__meta dd {
+  margin: 0;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.host-mismatch-prompt__fp,
+.host-mismatch-prompt__path {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+}
+
+.host-mismatch-prompt__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+
+.host-mismatch-prompt .btn-danger {
+  background: var(--danger, #dc2626);
+  border-color: var(--danger, #dc2626);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.host-mismatch-prompt .btn-danger:hover {
+  filter: brightness(1.05);
+}

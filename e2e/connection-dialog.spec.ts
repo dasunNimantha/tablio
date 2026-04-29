@@ -17,9 +17,7 @@ test.describe("Connection dialog — DB type switching", () => {
 
   test("left navigation switches between configuration sections", async ({ page }) => {
     await expect(page.locator(".connection-nav-item", { hasText: "General" })).toHaveClass(/connection-nav-item--active/);
-
-    await openDialogSection(page, "Connection");
-    await expect(page.locator(".connection-section-heading h3")).toHaveText("Connection");
+    // General now also owns the connection target (host/port/database).
     await expect(dialogField(page, /^Host$/)).toBeVisible();
 
     await openDialogSection(page, "Authentication");
@@ -30,7 +28,6 @@ test.describe("Connection dialog — DB type switching", () => {
   test("defaults to PostgreSQL with port 5432", async ({ page }) => {
     const dialog = page.locator(".dialog");
     await expect(dialog.locator(".db-dropdown-value")).toHaveText("PostgreSQL");
-    await openDialogSection(page, "Connection");
     const portInput = dialogField(page, /^Port$/);
     await expect(portInput).toHaveValue("5432");
   });
@@ -39,7 +36,6 @@ test.describe("Connection dialog — DB type switching", () => {
     await page.locator(".db-dropdown-trigger").click();
     await page.locator(".db-dropdown-item", { hasText: "MySQL" }).click();
     await expect(page.locator(".db-dropdown-value")).toHaveText("MySQL");
-    await openDialogSection(page, "Connection");
     const portInput = dialogField(page, /^Port$/);
     await expect(portInput).toHaveValue("3306");
   });
@@ -47,7 +43,6 @@ test.describe("Connection dialog — DB type switching", () => {
   test("switching to SQLite shows file path instead of host/port/user", async ({ page }) => {
     await page.locator(".db-dropdown-trigger").click();
     await page.locator(".db-dropdown-item", { hasText: "SQLite" }).click();
-    await openDialogSection(page, "Connection");
     await expect(page.locator(".dialog").locator("label", { hasText: "Database File Path" })).toBeVisible();
     await expect(page.locator(".dialog").locator("label", { hasText: "Host" })).not.toBeVisible();
     await expect(page.locator(".dialog").locator("label", { hasText: "Port" })).not.toBeVisible();
@@ -79,7 +74,6 @@ test.describe("Connection dialog — DB type switching", () => {
   test("switching to CockroachDB changes port to 26257", async ({ page }) => {
     await page.locator(".db-dropdown-trigger").click();
     await page.locator(".db-dropdown-item", { hasText: "CockroachDB" }).click();
-    await openDialogSection(page, "Connection");
     const portInput = dialogField(page, /^Port$/);
     await expect(portInput).toHaveValue("26257");
   });
@@ -87,7 +81,6 @@ test.describe("Connection dialog — DB type switching", () => {
   test("switching to MSSQL changes port to 1433", async ({ page }) => {
     await page.locator(".db-dropdown-trigger").click();
     await page.locator(".db-dropdown-item", { hasText: "Microsoft SQL Server" }).click();
-    await openDialogSection(page, "Connection");
     const portInput = dialogField(page, /^Port$/);
     await expect(portInput).toHaveValue("1433");
   });
@@ -178,7 +171,6 @@ test.describe("Connection dialog — validation", () => {
 
   test("empty host shows error after blur", async ({ page }) => {
     await page.locator(".dialog input").first().fill("Missing Host");
-    await openDialogSection(page, "Connection");
     const hostInput = dialogField(page, /^Host$/);
     await hostInput.fill("");
     await hostInput.blur();
@@ -194,13 +186,16 @@ test.describe("Connection dialog — validation", () => {
   });
 
   test("test connection jumps to the first section with validation errors", async ({ page }) => {
+    // Username lives in Authentication; clearing host on General + missing
+    // username triggers errors in two distinct sections, so the dialog
+    // should land on General (the first invalid one) and badge both nav
+    // items.
     await page.locator(".dialog input").first().fill("Needs Host");
-    await openDialogSection(page, "Connection");
     await dialogField(page, /^Host$/).fill("");
     await page.locator(".btn-test-conn").click();
 
-    await expect(page.locator(".connection-nav-item--active")).toContainText("Connection");
-    await expect(page.locator(".connection-nav-item--error", { hasText: "Connection" })).toBeVisible();
+    await expect(page.locator(".connection-nav-item--active")).toContainText("General");
+    await expect(page.locator(".connection-nav-item--error", { hasText: "General" })).toBeVisible();
     await expect(page.locator(".connection-nav-item--error", { hasText: "Authentication" })).toBeVisible();
     await expect(page.locator(".field-error", { hasText: "Host is required" })).toBeVisible();
   });
@@ -308,7 +303,6 @@ test.describe("Connection dialog — SSH tunnel section", () => {
     // Fill in a name + DB connection details so the only outstanding errors
     // come from the SSH section.
     await page.locator(".dialog input").nth(0).fill("SSH Test");
-    await openDialogSection(page, "Connection");
     await dialogField(page, /^Host$/).fill("127.0.0.1");
     await openDialogSection(page, "Authentication");
     await dialogField(page, /^Username$/).fill("admin");
@@ -346,7 +340,6 @@ test.describe("Connection dialog — save and close", () => {
     await openConnectionDialog(page);
     const dialog = page.locator(".dialog");
     await dialog.locator("input").nth(0).fill("E2E Test DB");
-    await openDialogSection(page, "Connection");
     await dialogField(page, /^Host$/).fill("127.0.0.1");
     await openDialogSection(page, "Authentication");
     await dialogField(page, /^Username$/).fill("admin");

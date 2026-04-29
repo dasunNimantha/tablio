@@ -20,8 +20,9 @@
 //! tunnel as opaque and connect to `127.0.0.1:tunnel.local_port()`.
 
 use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -61,6 +62,38 @@ impl Drop for SshTunnel {
     }
 }
 
+/// Structured payload surfaced when a server's host key no longer matches
+/// the one previously recorded in our known_hosts file.
+///
+/// The frontend looks for the `ssh_host_key_mismatch:` prefix in the
+/// stringified Tauri error and parses the JSON body to drive the
+/// "Forget & Retry" prompt. Keep this struct strictly serde-compatible —
+/// renaming a field is a breaking UI change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshHostKeyMismatch {
+    pub host: String,
+    pub port: u16,
+    /// SHA-256 fingerprint of the *new* key (what the server just presented).
+    pub fingerprint: String,
+    #[serde(rename = "knownHostsPath")]
+    pub known_hosts_path: String,
+}
+
+/// Magic prefix the frontend uses to detect a mismatch error coming back
+/// from any Tauri command that may open an SSH session.
+pub const HOST_KEY_MISMATCH_PREFIX: &str = "ssh_host_key_mismatch:";
+
+impl std::fmt::Display for SshHostKeyMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // serde_json on a small struct of String/u16 cannot fail in practice;
+        // fall back to a plain message just so we never panic in Display.
+        let json = serde_json::to_string(self).unwrap_or_default();
+        write!(f, "{HOST_KEY_MISMATCH_PREFIX}{json}")
+    }
+}
+
+impl std::error::Error for SshHostKeyMismatch {}
+
 /// Verifier that consults a Tablio-owned known_hosts file.
 ///
 /// On first contact the server key is recorded; on later connections a
@@ -69,9 +102,23 @@ struct KnownHostsHandler {
     path: PathBuf,
     host: String,
     port: u16,
+    /// Set by `check_server_key` when the presented key doesn't match the
+    /// recorded one. `open()` swaps it out after `client::connect` fails so
+    /// callers see a structured `SshHostKeyMismatch` instead of a generic
+    /// "ssh: invalid key" error.
+    mismatch: Arc<Mutex<Option<SshHostKeyMismatch>>>,
 }
 
 impl KnownHostsHandler {
+    fn new(path: PathBuf, host: String, port: u16) -> Self {
+        Self {
+            path,
+            host,
+            port,
+            mismatch: Arc::new(Mutex::new(None)),
+        }
+    }
+
     fn fingerprint(key: &PublicKey) -> String {
         // SHA-256 base64 fingerprint, formatted like OpenSSH ("SHA256:...").
         // `PublicKeyBase64` exposes the wire-format bytes; we hash them ourselves
@@ -101,13 +148,25 @@ impl client::Handler for KnownHostsHandler {
                 Ok(true)
             }
             Err(e) => {
+                let fp = Self::fingerprint(server_public_key);
                 log::error!(
                     "SSH host key for {}:{} does not match the recorded one ({}). New fingerprint: {}",
                     self.host,
                     self.port,
                     e,
-                    Self::fingerprint(server_public_key)
+                    fp
                 );
+                if let Ok(mut slot) = self.mismatch.lock() {
+                    *slot = Some(SshHostKeyMismatch {
+                        host: self.host.clone(),
+                        port: self.port,
+                        fingerprint: fp,
+                        known_hosts_path: self.path.to_string_lossy().into_owned(),
+                    });
+                }
+                // Returning `Ok(false)` makes russh tear the handshake down;
+                // `open()` notices the mismatch slot was filled and converts
+                // the resulting connect error into [`SshHostKeyMismatch`].
                 Ok(false)
             }
         }
@@ -119,6 +178,50 @@ fn known_hosts_path() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("Cannot determine home directory for SSH known_hosts"))?
         .join(".tablio")
         .join("known_hosts"))
+}
+
+/// Public wrapper around the (intentionally private) path resolver so that
+/// command handlers (e.g. `commands::known_hosts`) and the planned
+/// `KnownHostsDialog` UI hit the same file russh writes to.
+pub fn known_hosts_path_pub() -> Result<PathBuf> {
+    known_hosts_path()
+}
+
+/// Effective network target after optionally interposing an SSH tunnel.
+///
+/// When `_tunnel` is `Some`, callers should connect to `host:port` (always
+/// `127.0.0.1:<local>`) and keep the [`EffectiveTarget`] alive for the
+/// lifetime of the consumer (subprocess, sqlx pool, etc.). The tunnel is
+/// torn down when this struct is dropped.
+pub struct EffectiveTarget {
+    pub host: String,
+    pub port: u16,
+    /// Held purely to keep the SSH session alive; never read directly.
+    pub _tunnel: Option<SshTunnel>,
+}
+
+/// Decide whether to open an SSH tunnel for `config` and return the
+/// host/port the caller should actually talk to.
+///
+/// Mirrors the logic in [`crate::db::pool::PoolManager::connect`] so
+/// short-lived consumers (e.g. backup/restore subprocesses) can route
+/// through the same bastion the live driver uses without holding a slot
+/// in the pool's tunnel table.
+pub async fn open_for(config: &ConnectionConfig) -> Result<EffectiveTarget> {
+    if config.ssh_enabled && !config.ssh_host.trim().is_empty() {
+        let tunnel = open(config).await?;
+        Ok(EffectiveTarget {
+            host: "127.0.0.1".to_string(),
+            port: tunnel.local_port(),
+            _tunnel: Some(tunnel),
+        })
+    } else {
+        Ok(EffectiveTarget {
+            host: config.host.clone(),
+            port: config.port,
+            _tunnel: None,
+        })
+    }
 }
 
 /// Open a tunnel that forwards `127.0.0.1:<random>` to
@@ -141,29 +244,36 @@ pub async fn open(config: &ConnectionConfig) -> Result<SshTunnel> {
     let local_port = listener.local_addr()?.port();
 
     let known_hosts = known_hosts_path()?;
-    let handler = KnownHostsHandler {
-        path: known_hosts,
-        host: config.ssh_host.clone(),
-        port: config.ssh_port,
-    };
+    let handler = KnownHostsHandler::new(known_hosts, config.ssh_host.clone(), config.ssh_port);
+    let mismatch_slot = handler.mismatch.clone();
 
     let ssh_config = Arc::new(client::Config {
         inactivity_timeout: Some(Duration::from_secs(60)),
         ..Default::default()
     });
 
-    let mut session = client::connect(
+    let mut session = match client::connect(
         ssh_config,
         (config.ssh_host.as_str(), config.ssh_port),
         handler,
     )
     .await
-    .with_context(|| {
-        format!(
-            "SSH connect to {}:{} failed",
-            config.ssh_host, config.ssh_port
-        )
-    })?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            // If the handshake aborted because we rejected the key, prefer
+            // the structured mismatch error over russh's generic message —
+            // the frontend keys off this to offer a one-click "Forget &
+            // retry" flow.
+            if let Some(info) = mismatch_slot.lock().ok().and_then(|mut s| s.take()) {
+                return Err(anyhow::Error::from(info));
+            }
+            return Err(anyhow::Error::new(e).context(format!(
+                "SSH connect to {}:{} failed",
+                config.ssh_host, config.ssh_port
+            )));
+        }
+    };
 
     authenticate(&mut session, config).await?;
 
@@ -348,6 +458,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_for_passes_through_when_ssh_disabled() {
+        let mut cfg = pg_config_with(SshAuthMethod::Password);
+        cfg.ssh_enabled = false;
+        cfg.host = "remote-db".into();
+        cfg.port = 5432;
+        let target = open_for(&cfg)
+            .await
+            .expect("open_for must not fail when SSH is disabled");
+        assert_eq!(target.host, "remote-db");
+        assert_eq!(target.port, 5432);
+        assert!(target._tunnel.is_none(), "no tunnel should be allocated");
+    }
+
+    #[tokio::test]
+    async fn open_for_passes_through_when_ssh_host_blank() {
+        let mut cfg = pg_config_with(SshAuthMethod::Password);
+        cfg.ssh_enabled = true;
+        cfg.ssh_host = "   ".into();
+        cfg.host = "remote-db".into();
+        cfg.port = 5432;
+        let target = open_for(&cfg)
+            .await
+            .expect("blank ssh_host must skip tunneling, not error");
+        assert_eq!(target.host, "remote-db");
+        assert_eq!(target.port, 5432);
+        assert!(target._tunnel.is_none());
+    }
+
+    #[tokio::test]
     async fn open_rejects_empty_ssh_host() {
         let mut cfg = pg_config_with(SshAuthMethod::Password);
         cfg.ssh_host = "   ".into();
@@ -412,11 +551,7 @@ CUrE7QRAvdVpD5e3zKH/MZjilWrMOm6cyI1LKBCssLztPyvOALtroLAPlp7WYWfu\n\
     async fn known_hosts_handler_learns_first_contact() {
         let dir = tempfile::tempdir().unwrap();
         let kh = dir.path().join("known_hosts");
-        let mut handler = KnownHostsHandler {
-            path: kh.clone(),
-            host: "host.example".into(),
-            port: 22,
-        };
+        let mut handler = KnownHostsHandler::new(kh.clone(), "host.example".into(), 22);
         // Build a key by parsing an OpenSSH-formatted one.
         let key = russh::keys::parse_public_key_base64(
             "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ",
@@ -434,11 +569,8 @@ CUrE7QRAvdVpD5e3zKH/MZjilWrMOm6cyI1LKBCssLztPyvOALtroLAPlp7WYWfu\n\
     async fn known_hosts_handler_rejects_changed_key() {
         let dir = tempfile::tempdir().unwrap();
         let kh = dir.path().join("known_hosts");
-        let mut handler = KnownHostsHandler {
-            path: kh,
-            host: "host.example".into(),
-            port: 22,
-        };
+        let mut handler = KnownHostsHandler::new(kh.clone(), "host.example".into(), 22);
+        let mismatch_slot = handler.mismatch.clone();
         let key1 = russh::keys::parse_public_key_base64(
             "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ",
         )
@@ -448,8 +580,53 @@ CUrE7QRAvdVpD5e3zKH/MZjilWrMOm6cyI1LKBCssLztPyvOALtroLAPlp7WYWfu\n\
         )
         .unwrap();
         assert!(handler.check_server_key(&key1).await.unwrap());
+        assert!(
+            mismatch_slot.lock().unwrap().is_none(),
+            "no mismatch should be recorded on first contact"
+        );
         // Now the same host hands us a different key — must be rejected.
         let rejected = handler.check_server_key(&key2).await.unwrap();
         assert!(!rejected, "changed host key must be rejected");
+        let info = mismatch_slot
+            .lock()
+            .unwrap()
+            .take()
+            .expect("mismatch slot must be populated");
+        assert_eq!(info.host, "host.example");
+        assert_eq!(info.port, 22);
+        assert!(
+            info.fingerprint.starts_with("SHA256:"),
+            "fingerprint should be SHA256-formatted, got {}",
+            info.fingerprint
+        );
+        assert_eq!(info.known_hosts_path, kh.to_string_lossy());
+    }
+
+    #[test]
+    fn host_key_mismatch_serialises_with_prefix() {
+        let info = SshHostKeyMismatch {
+            host: "h".into(),
+            port: 22,
+            fingerprint: "SHA256:xyz".into(),
+            known_hosts_path: "/tmp/known_hosts".into(),
+        };
+        let s = info.to_string();
+        assert!(
+            s.starts_with(HOST_KEY_MISMATCH_PREFIX),
+            "missing prefix: {s}"
+        );
+        let json = &s[HOST_KEY_MISMATCH_PREFIX.len()..];
+        let parsed: SshHostKeyMismatch =
+            serde_json::from_str(json).expect("payload after prefix must be valid JSON");
+        assert_eq!(parsed.host, "h");
+        assert_eq!(parsed.port, 22);
+        assert_eq!(parsed.fingerprint, "SHA256:xyz");
+        assert_eq!(parsed.known_hosts_path, "/tmp/known_hosts");
+        // The serde key for the path must remain camelCase to match the
+        // Tauri/TS contract — guard against accidental rename.
+        assert!(
+            json.contains("\"knownHostsPath\""),
+            "expected camelCase key, got {json}"
+        );
     }
 }

@@ -11,7 +11,6 @@ import {
   Key,
   Loader2,
   Lock,
-  Server,
   Shield,
   SlidersHorizontal,
   UserRound,
@@ -29,15 +28,23 @@ const COLORS = [
 ];
 
 const DB_TYPES = [
-  { value: "postgres" as const, label: "PostgreSQL", short: "PG", defaultPort: 5432, accent: "#89b4fa" },
-  { value: "mysql" as const, label: "MySQL", short: "MY", defaultPort: 3306, accent: "#f9e2af" },
-  { value: "sqlite" as const, label: "SQLite", short: "SQ", defaultPort: 0, accent: "#94e2d5" },
-  { value: "mariadb" as const, label: "MariaDB", short: "MA", defaultPort: 3306, accent: "#fab387" },
-  { value: "cockroachdb" as const, label: "CockroachDB", short: "CR", defaultPort: 26257, accent: "#cba6f7" },
-  { value: "tidb" as const, label: "TiDB", short: "TI", defaultPort: 4000, accent: "#f38ba8" },
-  { value: "cassandra" as const, label: "Cassandra / ScyllaDB", short: "CS", defaultPort: 9042, accent: "#a6e3a1" },
-  { value: "mssql" as const, label: "Microsoft SQL Server", short: "MS", defaultPort: 1433, accent: "#7aa2f7" },
+  { value: "postgres" as const, label: "PostgreSQL", short: "PG", defaultPort: 5432, defaultUser: "postgres", accent: "#89b4fa" },
+  { value: "mysql" as const, label: "MySQL", short: "MY", defaultPort: 3306, defaultUser: "root", accent: "#f9e2af" },
+  { value: "sqlite" as const, label: "SQLite", short: "SQ", defaultPort: 0, defaultUser: "", accent: "#94e2d5" },
+  { value: "mariadb" as const, label: "MariaDB", short: "MA", defaultPort: 3306, defaultUser: "root", accent: "#fab387" },
+  { value: "cockroachdb" as const, label: "CockroachDB", short: "CR", defaultPort: 26257, defaultUser: "root", accent: "#cba6f7" },
+  { value: "tidb" as const, label: "TiDB", short: "TI", defaultPort: 4000, defaultUser: "root", accent: "#f38ba8" },
+  { value: "cassandra" as const, label: "Cassandra / ScyllaDB", short: "CS", defaultPort: 9042, defaultUser: "cassandra", accent: "#a6e3a1" },
+  { value: "mssql" as const, label: "Microsoft SQL Server", short: "MS", defaultPort: 1433, defaultUser: "sa", accent: "#7aa2f7" },
 ];
+
+/** Set of every per-driver default username, used to detect whether the
+ *  current `user` value is "still a default" so we can safely swap it
+ *  when the user changes DB type. A username they typed by hand is
+ *  preserved across DB-type changes. */
+const DEFAULT_USERNAMES = new Set(
+  DB_TYPES.map((d) => d.defaultUser).filter((u) => u.length > 0),
+);
 
 type ValidationField =
   | "name"
@@ -54,7 +61,6 @@ type ValidationErrors = Partial<Record<ValidationField, string>>;
 
 type DialogSectionId =
   | "general"
-  | "connection"
   | "authentication"
   | "security"
   | "ssh"
@@ -68,8 +74,10 @@ interface DialogSection {
 }
 
 const SECTION_FIELDS: Record<DialogSectionId, ValidationField[]> = {
-  general: ["name"],
-  connection: ["host", "port", "database"],
+  // General owns the basic identity *and* connection target — these
+  // typically fit on one screen and splitting them across two nav items
+  // wasted vertical space without adding clarity.
+  general: ["name", "host", "port", "database"],
   authentication: ["user"],
   security: [],
   ssh: ["ssh_host", "ssh_port", "ssh_user", "ssh_password", "ssh_key_path"],
@@ -84,14 +92,10 @@ function getConnectionDialogSections(
     {
       id: "general",
       label: "General",
-      description: "Name, type, folder and colour",
+      description: isSqlite
+        ? "Name, type, folder and database file"
+        : "Name, type and connection target",
       icon: <Database size={16} />,
-    },
-    {
-      id: "connection",
-      label: "Connection",
-      description: isSqlite ? "Local database file" : "Host, port and database",
-      icon: <Server size={16} />,
     },
   ];
 
@@ -600,7 +604,6 @@ function SshTunnelSection({
         </span>
         <span className="security-toggle__text">
           <span className="security-toggle__label">Use SSH tunneling</span>
-          <span className="security-toggle__meta">connect through an SSH bastion</span>
         </span>
       </label>
 
@@ -753,9 +756,6 @@ function SshTunnelSection({
               </span>
               <span className="security-toggle__text">
                 <span className="security-toggle__label">Prompt for passphrase?</span>
-                <span className="security-toggle__meta">
-                  ask each time instead of saving the passphrase to disk
-                </span>
               </span>
             </label>
           )}
@@ -799,7 +799,7 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
       db_type: "postgres",
       host: "localhost",
       port: 5432,
-      user: "",
+      user: DB_TYPES.find((d) => d.value === "postgres")!.defaultUser,
       password: "",
       database: "",
       color: COLORS[0],
@@ -874,12 +874,21 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
 
   const handleDbTypeChange = (dbType: ConnectionConfig["db_type"]) => {
     const info = DB_TYPES.find((d) => d.value === dbType)!;
-    setForm((f) => ({
-      ...f,
-      db_type: dbType,
-      port: info.defaultPort,
-      host: dbType === "sqlite" ? "" : f.host || "localhost",
-    }));
+    setForm((f) => {
+      // Only swap the username when it's still a default value (or
+      // empty); a value the user typed by hand survives a DB-type
+      // change so they don't lose their work flipping back and forth.
+      const trimmedUser = f.user.trim();
+      const isStillDefault =
+        trimmedUser === "" || DEFAULT_USERNAMES.has(trimmedUser);
+      return {
+        ...f,
+        db_type: dbType,
+        port: info.defaultPort,
+        host: dbType === "sqlite" ? "" : f.host || "localhost",
+        user: isStillDefault ? info.defaultUser : f.user,
+      };
+    });
     setTestResult(null);
     setTestError("");
   };
@@ -986,71 +995,69 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                       />
                     </FormField>
                   </div>
-                </>
-              )}
 
-              {activeSection === "connection" && (
-                isSqlite ? (
-                  <FormField
-                    label="Database File Path"
-                    error={getFieldError("database")}
-                    description="SQLite connections use a local database file instead of a network host."
-                  >
-                    <input
-                      value={form.database}
-                      onChange={(e) => updateField("database", e.target.value)}
-                      onBlur={() => touchField("database")}
-                      placeholder="/path/to/database.db"
-                      aria-invalid={!!getFieldError("database")}
-                    />
-                  </FormField>
-                ) : (
-                  <>
-                    <div className="form-row">
-                      <FormField
-                        label="Host"
-                        error={getFieldError("host")}
-                        className="flex-1"
-                      >
-                        <input
-                          value={form.host}
-                          onChange={(e) => updateField("host", e.target.value)}
-                          onBlur={() => touchField("host")}
-                          placeholder="localhost"
-                          aria-invalid={!!getFieldError("host")}
-                        />
-                      </FormField>
-                      <FormField
-                        label="Port"
-                        error={getFieldError("port")}
-                        style={{ width: 112 }}
-                      >
-                        <input
-                          type="number"
-                          value={form.port}
-                          onChange={(e) => updateField("port", parseInt(e.target.value, 10) || 0)}
-                          onBlur={() => touchField("port")}
-                          min={1}
-                          max={65535}
-                          aria-invalid={!!getFieldError("port")}
-                        />
-                      </FormField>
-                    </div>
-
+                  {isSqlite ? (
                     <FormField
-                      label={form.db_type === "cassandra" ? "Keyspace (optional)" : "Database (optional)"}
+                      label="Database File Path"
                       error={getFieldError("database")}
+                      description="SQLite connections use a local database file instead of a network host."
                     >
                       <input
                         value={form.database}
                         onChange={(e) => updateField("database", e.target.value)}
                         onBlur={() => touchField("database")}
-                        placeholder={form.db_type === "cassandra" ? "my_keyspace" : "mydb"}
+                        placeholder="/path/to/database.db"
                         aria-invalid={!!getFieldError("database")}
                       />
                     </FormField>
-                  </>
-                )
+                  ) : (
+                    <>
+                      <div className="form-row">
+                        <FormField
+                          label="Host"
+                          error={getFieldError("host")}
+                          className="flex-1"
+                        >
+                          <input
+                            value={form.host}
+                            onChange={(e) => updateField("host", e.target.value)}
+                            onBlur={() => touchField("host")}
+                            placeholder="localhost"
+                            aria-invalid={!!getFieldError("host")}
+                          />
+                        </FormField>
+                        <FormField
+                          label="Port"
+                          error={getFieldError("port")}
+                          style={{ width: 112 }}
+                        >
+                          <input
+                            type="number"
+                            value={form.port}
+                            onChange={(e) => updateField("port", parseInt(e.target.value, 10) || 0)}
+                            onBlur={() => touchField("port")}
+                            min={1}
+                            max={65535}
+                            aria-invalid={!!getFieldError("port")}
+                          />
+                        </FormField>
+                      </div>
+
+                      <FormField
+                        label={form.db_type === "cassandra" ? "Keyspace (optional)" : "Database (optional)"}
+                        error={getFieldError("database")}
+                      >
+                        <input
+                          value={form.database}
+                          onChange={(e) => updateField("database", e.target.value)}
+                          onBlur={() => touchField("database")}
+                          placeholder={form.db_type === "cassandra" ? "my_keyspace" : "mydb"}
+                          aria-invalid={!!getFieldError("database")}
+                        />
+                      </FormField>
+                    </>
+                  )}
+                </>
               )}
 
               {activeSection === "authentication" && !isSqlite && (
@@ -1128,7 +1135,6 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                       </span>
                       <span className="security-toggle__text">
                         <span className="security-toggle__label">Trust server certificate</span>
-                        <span className="security-toggle__meta">(self-signed)</span>
                       </span>
                     </label>
                   </div>

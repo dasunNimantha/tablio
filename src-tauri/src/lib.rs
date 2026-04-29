@@ -7,6 +7,7 @@ use commands::backup::*;
 use commands::connection::*;
 use commands::data::*;
 use commands::export::*;
+use commands::known_hosts::*;
 use commands::query::*;
 use commands::roles::*;
 use commands::saved_queries::*;
@@ -71,6 +72,8 @@ pub fn run() {
             backup_database,
             restore_database,
             dump_and_restore,
+            list_known_hosts,
+            forget_known_host,
             get_app_resource_usage,
         ])
         .run(tauri::generate_context!())

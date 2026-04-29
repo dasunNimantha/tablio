@@ -344,6 +344,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Generate SSH key for identity-file auth tests
+        id: sshkey
+        run: |
+          mkdir -p "$RUNNER_TEMP/tablio-ssh"
+          ssh-keygen -t ed25519 -N "" -f "$RUNNER_TEMP/tablio-ssh/id_ed25519" -C tablio-ci >/dev/null
+          chmod 600 "$RUNNER_TEMP/tablio-ssh/id_ed25519"
+          echo "key_path=$RUNNER_TEMP/tablio-ssh/id_ed25519" >> "$GITHUB_OUTPUT"
+          echo "pub_key=$(cat "$RUNNER_TEMP/tablio-ssh/id_ed25519.pub")" >> "$GITHUB_OUTPUT"
+
       - name: Start OpenSSH bastion
         run: |
           docker run -d --name sshd \
@@ -353,6 +362,7 @@ jobs:
             -e PASSWORD_ACCESS=true \
             -e SUDO_ACCESS=false \
             -e LISTEN_PORT=2222 \
+            -e PUBLIC_KEY="${{ steps.sshkey.outputs.pub_key }}" \
             lscr.io/linuxserver/openssh-server:latest
           for i in $(seq 1 30); do
             if nc -z 127.0.0.1 2222; then
@@ -365,7 +375,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf postgresql-client
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -384,6 +394,7 @@ jobs:
           TEST_POSTGRES_USER: test
           TEST_POSTGRES_PASSWORD: test
           TEST_POSTGRES_DB: testdb
+          TEST_SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
         run: cargo test --manifest-path src-tauri/Cargo.toml --test ssh_tunnel_integration -- --test-threads=1
 
       - name: Dump bastion logs on failure

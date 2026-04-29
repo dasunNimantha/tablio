@@ -129,6 +129,17 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       return { available: false, message: "Mock mode", entries: [] } as T;
     case "get_app_resource_usage":
       return { memory_mb: 64.5, cpu_percent: 2.3 } as T;
+    case "list_known_hosts":
+      return mock.mockKnownHosts as T;
+    case "forget_known_host": {
+      const fp = (args?.fingerprint as string) || "";
+      mock.removeMockKnownHost(
+        (args?.host as string) || "",
+        (args?.port as number) ?? 22,
+        fp,
+      );
+      return undefined as T;
+    }
     default:
       throw new Error(`Unknown mock command: ${cmd}`);
   }
@@ -583,6 +594,68 @@ export interface DumpRestoreRequest {
   target_database: string;
 }
 
+/**
+ * One row in `~/.tablio/known_hosts` as surfaced to the UI. Field names
+ * mirror the Rust `KnownHostEntry` struct (`keyType` is camelCased on
+ * purpose to match the serde rename).
+ */
+export interface KnownHostEntry {
+  host: string;
+  port: number;
+  keyType: string;
+  fingerprint: string;
+}
+
+/**
+ * Structured payload encoded inside the
+ * `ssh_host_key_mismatch:{json}` error string returned by any backend
+ * command that opens an SSH session. Matches the Rust
+ * `SshHostKeyMismatch` struct verbatim (note the camelCased
+ * `knownHostsPath`).
+ */
+export interface SshHostKeyMismatchInfo {
+  host: string;
+  port: number;
+  fingerprint: string;
+  knownHostsPath: string;
+}
+
+export const SSH_HOST_KEY_MISMATCH_PREFIX = "ssh_host_key_mismatch:";
+
+/**
+ * Detect and parse the host-key-mismatch payload that the Rust backend
+ * emits via `commands::ssh_tunnel`. Returns `null` for any error that
+ * isn't a mismatch so callers can fall through to generic handling.
+ */
+export function parseSshHostKeyMismatch(
+  err: unknown,
+): SshHostKeyMismatchInfo | null {
+  const message =
+    typeof err === "string"
+      ? err
+      : err instanceof Error
+        ? err.message
+        : err != null && typeof err === "object" && "message" in err
+          ? String((err as { message: unknown }).message)
+          : "";
+  if (!message.startsWith(SSH_HOST_KEY_MISMATCH_PREFIX)) return null;
+  const body = message.slice(SSH_HOST_KEY_MISMATCH_PREFIX.length);
+  try {
+    const parsed = JSON.parse(body) as SshHostKeyMismatchInfo;
+    if (
+      typeof parsed?.host === "string" &&
+      typeof parsed?.port === "number" &&
+      typeof parsed?.fingerprint === "string" &&
+      typeof parsed?.knownHostsPath === "string"
+    ) {
+      return parsed;
+    }
+  } catch {
+    // Fall through — malformed payload shouldn't crash the UI.
+  }
+  return null;
+}
+
 export const api = {
   testConnection: (config: ConnectionConfig): Promise<boolean> =>
     invoke("test_connection", { config }),
@@ -765,4 +838,13 @@ export const api = {
 
   getAppResourceUsage: (): Promise<{ memory_mb: number; cpu_percent: number }> =>
     invoke("get_app_resource_usage"),
+
+  listKnownHosts: (): Promise<KnownHostEntry[]> => invoke("list_known_hosts"),
+
+  forgetKnownHost: (
+    host: string,
+    port: number,
+    fingerprint: string,
+  ): Promise<void> =>
+    invoke("forget_known_host", { host, port, fingerprint }),
 };

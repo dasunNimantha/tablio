@@ -1,5 +1,10 @@
 import { create } from "zustand";
-import { api, ConnectionConfig } from "../lib/tauri";
+import {
+  api,
+  ConnectionConfig,
+  parseSshHostKeyMismatch,
+  type SshHostKeyMismatchInfo,
+} from "../lib/tauri";
 
 /**
  * In-flight request for the user to enter an SSH key passphrase. The
@@ -17,12 +22,25 @@ export interface PendingPassphrasePrompt {
   reject: (reason: Error) => void;
 }
 
+/**
+ * In-flight host-key-mismatch confirmation. The `HostKeyMismatchPrompt`
+ * subscribes to this; "Forget & retry" calls `resolve(true)` so the
+ * caller forgets the recorded key and attempts the connect again, while
+ * Cancel calls `resolve(false)` to give up.
+ */
+export interface PendingHostKeyMismatchPrompt {
+  connectionName: string;
+  info: SshHostKeyMismatchInfo;
+  resolve: (forgetAndRetry: boolean) => void;
+}
+
 interface ConnectionState {
   connections: ConnectionConfig[];
   activeConnections: Set<string>;
   loading: boolean;
   error: string | null;
   pendingPassphrasePrompt: PendingPassphrasePrompt | null;
+  pendingHostKeyMismatch: PendingHostKeyMismatchPrompt | null;
 
   loadConnections: () => Promise<void>;
   addConnection: (config: ConnectionConfig) => Promise<void>;
@@ -39,6 +57,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   loading: false,
   error: null,
   pendingPassphrasePrompt: null,
+  pendingHostKeyMismatch: null,
 
   loadConnections: async () => {
     set({ loading: true, error: null });
@@ -117,7 +136,35 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         };
       }
 
-      await api.connect(effectiveConfig);
+      // Retry once if the bastion's host key has changed and the user
+      // confirms they want to re-trust it. Anything else propagates as
+      // a normal error.
+      try {
+        await api.connect(effectiveConfig);
+      } catch (err) {
+        const mismatch = parseSshHostKeyMismatch(err);
+        if (!mismatch) throw err;
+        const forgetAndRetry = await new Promise<boolean>((resolve) => {
+          set({
+            pendingHostKeyMismatch: {
+              connectionName: config.name,
+              info: mismatch,
+              resolve: (decision) => {
+                set({ pendingHostKeyMismatch: null });
+                resolve(decision);
+              },
+            },
+          });
+        });
+        if (!forgetAndRetry) throw err;
+        await api.forgetKnownHost(
+          mismatch.host,
+          mismatch.port,
+          mismatch.fingerprint,
+        );
+        await api.connect(effectiveConfig);
+      }
+
       set((s) => {
         const next = new Set(s.activeConnections);
         next.add(config.id);

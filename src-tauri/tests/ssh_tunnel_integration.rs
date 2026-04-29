@@ -8,10 +8,14 @@
 //!   - TEST_SSH_PORT          ssh port on the bastion (e.g. "2222")
 //!   - TEST_SSH_USER          ssh login username
 //!   - TEST_SSH_PASSWORD      ssh login password
-//!   - TEST_SSH_TARGET_HOST   db host as seen *from* the bastion (e.g.
-//!                            "host.docker.internal" or "localhost")
+//!   - TEST_SSH_TARGET_HOST   db host as seen *from* the bastion
+//!     (e.g. "host.docker.internal" or "localhost")
 //!   - TEST_SSH_TARGET_PORT   db port as seen from the bastion (e.g. "5432")
 //!   - TEST_POSTGRES_USER / _PASSWORD / _DB     Postgres credentials
+//!
+//! Optional (enables identity-file auth tests):
+//!   - TEST_SSH_KEY_PATH      path to an unencrypted OpenSSH/PEM private
+//!     key whose public half is in the bastion's authorized_keys
 
 use tablio_lib::db::pool::PoolManager;
 use tablio_lib::db::ssh_tunnel;
@@ -105,6 +109,166 @@ async fn ssh_tunnel_open_drops_listener_when_dropped() {
     };
     // Sanity: port was non-zero (i.e. ephemeral allocation succeeded).
     assert_ne!(local_port, 0);
+}
+
+/// Build the same config as `ssh_test_config` but flip auth to
+/// `identityfile` and point at the key referenced by `TEST_SSH_KEY_PATH`.
+/// Returns `None` when either the base config or the key path env var is
+/// missing — every identity-file test must skip cleanly in those envs.
+fn ssh_identity_file_config() -> Option<ConnectionConfig> {
+    let mut cfg = ssh_test_config()?;
+    let key_path = env("TEST_SSH_KEY_PATH")?;
+    if !std::path::Path::new(&key_path).exists() {
+        eprintln!(
+            "Skipping identity-file test: TEST_SSH_KEY_PATH={} does not exist",
+            key_path
+        );
+        return None;
+    }
+    cfg.id = "ssh-int-test-id-file".into();
+    cfg.name = "ssh-int-test-id-file".into();
+    cfg.ssh_auth_method = SshAuthMethod::IdentityFile;
+    cfg.ssh_key_path = key_path;
+    // Empty passphrase — the CI key is unencrypted by design so we can
+    // exercise the IdentityFile branch end-to-end without prompting.
+    cfg.ssh_password = String::new();
+    Some(cfg)
+}
+
+#[tokio::test]
+async fn ssh_tunnel_open_with_identity_file() {
+    let Some(config) = ssh_identity_file_config() else {
+        eprintln!("Skipping ssh_tunnel_open_with_identity_file: env vars not set");
+        return;
+    };
+    let tunnel = ssh_tunnel::open(&config)
+        .await
+        .expect("ssh_tunnel::open with IdentityFile auth must succeed");
+    let port = tunnel.local_port();
+    assert_ne!(port, 0, "tunnel must allocate a real local port");
+    let _stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("local tunnel endpoint must accept connections");
+}
+
+#[tokio::test]
+async fn pool_manager_connects_through_identity_file_tunnel() {
+    let Some(config) = ssh_identity_file_config() else {
+        eprintln!("Skipping pool_manager_connects_through_identity_file_tunnel: env vars not set");
+        return;
+    };
+    let pool = PoolManager::new();
+    pool.connect(config.clone())
+        .await
+        .expect("connect through identity-file SSH tunnel should succeed");
+    let driver = pool
+        .get_driver(&config.id)
+        .await
+        .expect("driver should be present after connect");
+    assert!(driver
+        .test_connection()
+        .await
+        .expect("test_connection should not error"));
+    pool.disconnect(&config.id)
+        .await
+        .expect("disconnect should succeed");
+    assert!(!pool.is_connected(&config.id).await);
+}
+
+#[tokio::test]
+async fn ssh_tunnel_open_rejects_missing_identity_file() {
+    let Some(mut config) = ssh_identity_file_config() else {
+        eprintln!("Skipping ssh_tunnel_open_rejects_missing_identity_file: env vars not set");
+        return;
+    };
+    // Point at a path that's guaranteed not to exist; the IdentityFile
+    // branch should surface a clear error before any SSH handshake.
+    config.ssh_key_path = "/tmp/tablio-ssh-int-no-such-key".into();
+    let err = ssh_tunnel::open(&config)
+        .await
+        .err()
+        .expect("missing identity file must produce an error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Failed to read SSH identity file") || msg.contains("identity"),
+        "expected identity-file error, got: {msg}"
+    );
+}
+
+/// Verify that `pg_dump` running locally can reach the bastion-hosted
+/// Postgres instance through the same russh tunnel used by the live driver.
+///
+/// This protects the contract between [`ssh_tunnel::open_for`] and the
+/// dump/restore subprocesses in `commands/backup.rs`: the only way these
+/// utilities can talk to a private DB is by being handed `127.0.0.1:<local>`
+/// while a tunnel guard is alive in the calling task.
+#[tokio::test]
+async fn pg_dump_through_tunnel() {
+    let Some(config) = ssh_test_config() else {
+        eprintln!("Skipping pg_dump_through_tunnel: TEST_SSH_* env vars not set");
+        return;
+    };
+    if which::which("pg_dump").is_err() {
+        eprintln!("Skipping pg_dump_through_tunnel: pg_dump binary not found in PATH");
+        return;
+    }
+
+    let target = ssh_tunnel::open_for(&config)
+        .await
+        .expect("open_for should succeed with valid SSH creds");
+    assert_eq!(
+        target.host, "127.0.0.1",
+        "open_for must redirect through the local tunnel endpoint"
+    );
+    assert_ne!(target.port, 0, "tunnel must allocate a real local port");
+    assert_ne!(
+        target.port, config.port,
+        "tunnel local port must differ from the remote DB port"
+    );
+
+    let tmp = tempfile::Builder::new()
+        .prefix("tablio-pgdump-tunnel-")
+        .suffix(".sql")
+        .tempfile()
+        .expect("tempfile creation");
+    let tmp_path = tmp.path().to_owned();
+
+    let mut cmd = tokio::process::Command::new("pg_dump");
+    cmd.arg("-h")
+        .arg(&target.host)
+        .arg("-p")
+        .arg(target.port.to_string())
+        .arg("-U")
+        .arg(&config.user)
+        .arg("-d")
+        .arg(&config.database)
+        .arg("--schema-only")
+        .arg("-f")
+        .arg(&tmp_path);
+    cmd.env("PGPASSWORD", &config.password);
+
+    let output = cmd.output().await.expect("pg_dump must spawn successfully");
+
+    drop(target);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "pg_dump exited non-zero (status={:?}): stderr={}",
+        output.status.code(),
+        stderr
+    );
+
+    let dumped = std::fs::read_to_string(&tmp_path).expect("dump file should be readable");
+    assert!(
+        !dumped.is_empty(),
+        "pg_dump produced an empty file (stderr={stderr})"
+    );
+    assert!(
+        dumped.contains("PostgreSQL database dump"),
+        "dump file missing standard pg_dump header (got: {} bytes)",
+        dumped.len()
+    );
 }
 
 #[tokio::test]
