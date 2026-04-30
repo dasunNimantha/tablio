@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { usePolling } from "../../hooks/usePolling";
 import {
   api,
   ColumnInfo,
@@ -310,20 +311,24 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     gridApiRef.current?.redrawRows();
   }, [changes, detailRowIdx]);
 
-  useEffect(() => {
-    // Skip the timer entirely when:
-    //  - the user disabled auto-refresh (refreshInterval = 0)
-    //  - there are unsaved changes (would clobber pending edits)
-    //  - the grid is mounted but currently hidden (TableView keeps the
-    //    Data tab in the DOM with display:none when Schema is shown;
-    //    polling a hidden grid is wasted work and can confuse users
-    //    who think "I'm not on this tab, why is it making requests?")
-    if (refreshInterval <= 0 || hasChanges || !isActive) return;
-    const id = setInterval(() => {
-      fetchData({ silent: true });
-    }, refreshInterval * 1000);
-    return () => clearInterval(id);
-  }, [refreshInterval, fetchData, hasChanges, isActive]);
+  // Skip the timer entirely when:
+  //  - the user disabled auto-refresh (refreshInterval = 0)
+  //  - there are unsaved changes (would clobber pending edits)
+  //  - the grid is mounted but currently hidden (TableView keeps the
+  //    Data tab in the DOM with display:none when Schema is shown;
+  //    polling a hidden grid is wasted work and can confuse users
+  //    who think "I'm not on this tab, why is it making requests?")
+  //
+  // usePolling additionally pauses on document.hidden and prevents
+  // overlapping fetches — important for slow queries on large
+  // tables, where a 5s refresh interval used to let two or three
+  // fetchData calls stack up and freeze the grid for the duration
+  // of all of them.
+  const refreshEnabled = refreshInterval > 0 && !hasChanges && isActive;
+  const silentFetch = useCallback(() => {
+    fetchData({ silent: true });
+  }, [fetchData]);
+  usePolling(silentFetch, refreshInterval * 1000, refreshEnabled);
 
   useEffect(() => {
     if (!showRefreshMenu) return;

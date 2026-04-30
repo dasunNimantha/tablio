@@ -1,5 +1,6 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { api, QueryStatEntry, QueryStatsResponse } from "../../lib/tauri";
+import { usePolling } from "../../hooks/usePolling";
 import { formatQueryDuration as formatDuration, cacheHitClass, speedClass } from "../../lib/dashboardUtils";
 import {
   Loader2,
@@ -56,7 +57,6 @@ export function QueryStats({ connectionId }: Props) {
   const [enabling, setEnabling] = useState(false);
   const [checking, setChecking] = useState(false);
   const [enableError, setEnableError] = useState<string | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchStats = useCallback(async () => {
     try {
@@ -88,22 +88,20 @@ export function QueryStats({ connectionId }: Props) {
     }
   }, [connectionId, fetchStats]);
 
+  // We need an unconditional mount-time fetch to discover whether
+  // pg_stat_statements is installed. Only the periodic refresh is
+  // gated on `data.available`.
   useEffect(() => {
     fetchStats();
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [fetchStats]);
+    // Intentionally only on connection change; subsequent fetches go
+    // through usePolling below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionId]);
 
-  useEffect(() => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    if (!paused && data?.available) {
-      intervalRef.current = setInterval(fetchStats, 10000);
-    }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [paused, fetchStats, data?.available]);
+  // Visibility-aware, re-entrancy-safe polling. Skip ticks while
+  // the window is hidden and never overlap two in-flight fetches.
+  // Disabled when paused or pg_stat_statements isn't installed.
+  usePolling(fetchStats, 10000, !paused && !!data?.available);
 
   const uniqueUsers = useMemo(() => {
     if (!data?.entries) return [];

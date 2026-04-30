@@ -3,6 +3,7 @@ import { api, DatabaseStats } from "../../lib/tauri";
 import { computeRate, formatVal, makeLabels, type RatePoint } from "../../lib/dashboardUtils";
 import { chartDevicePixelRatio, chartFontFamily } from "../../lib/chartRendering";
 import { Loader2, Activity, ArrowUpDown, Database, HardDrive } from "lucide-react";
+import { usePolling } from "../../hooks/usePolling";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -303,7 +304,6 @@ export function DashboardOverview({ connectionId, paused }: Props) {
   const [rates, setRates] = useState<RatePoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchStats = useCallback(async () => {
     try {
@@ -331,22 +331,11 @@ export function DashboardOverview({ connectionId, paused }: Props) {
     }
   }, [connectionId]);
 
-  useEffect(() => {
-    fetchStats();
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [fetchStats]);
-
-  useEffect(() => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    if (!paused) {
-      intervalRef.current = setInterval(fetchStats, 2000);
-    }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [paused, fetchStats]);
+  // Visibility-aware, re-entrancy-safe polling. See usePolling for
+  // the why; this used to be a hand-rolled setInterval that kept
+  // firing while the window was minimized and let in-flight stats
+  // calls accumulate.
+  usePolling(fetchStats, 2000, !paused);
 
   const latest = snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
   const prevRate = rates.length > 0 ? rates[rates.length - 1] : null;
