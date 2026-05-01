@@ -16,8 +16,12 @@ test.describe("SSH known hosts dialog", () => {
     // The dialog mounts via portal and is labelled accordingly.
     const dialog = page.getByRole("dialog", { name: /SSH known hosts/i });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByText("Host")).toBeVisible();
-    await expect(dialog.getByText("Fingerprint")).toBeVisible();
+    await expect(
+      dialog.getByRole("columnheader", { name: "Host" }),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole("columnheader", { name: "Fingerprint" }),
+    ).toBeVisible();
     // The mock data ships two entries; either both render or the empty
     // state is shown — assert the dialog body resolved to something.
     const hasEntry = await dialog
