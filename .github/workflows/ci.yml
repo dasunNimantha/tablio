@@ -290,6 +290,62 @@ jobs:
           TEST_TIDB_URL: "mysql://root@localhost:4000/testdb"
         run: cargo test --manifest-path src-tauri/Cargo.toml --test tidb_integration
 
+  # SQL Server is wired into PR CI (not just release.yml) because the new
+  # get_query_stats DMV-backed implementation needs continuous coverage.
+  # Single-version (2022) here to keep PR latency in check; the 2019/2022
+  # matrix still runs on release.yml.
+  test-mssql:
+    name: SQL Server
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Str0ng_Passw0rd!"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P 'Str0ng_Passw0rd!' -C -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Str0ng_Passw0rd!' -Q 'SELECT 1'"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 30s
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create test database
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec $(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest) /opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P 'Str0ng_Passw0rd!' -C -Q "SELECT 1" 2>/dev/null || \
+               docker exec $(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest) /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Str0ng_Passw0rd!' -Q "SELECT 1" 2>/dev/null; then
+              echo "SQL Server is ready"
+              break
+            fi
+            echo "Waiting for SQL Server... (attempt $i/30)"
+            sleep 2
+          done
+          CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
+          docker exec "$CONTAINER_ID" bash -c "/opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P 'Str0ng_Passw0rd!' -C -Q 'CREATE DATABASE testdb' 2>/dev/null || /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Str0ng_Passw0rd!' -Q 'CREATE DATABASE testdb'"
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run MSSQL integration tests
+        env:
+          TEST_MSSQL_URL: "mssql://SA:Str0ng_Passw0rd!@localhost:1433/testdb"
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test mssql_integration
+
   test-sqlite:
     name: SQLite
     needs: [changes]

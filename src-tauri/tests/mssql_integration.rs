@@ -1886,3 +1886,22 @@ async fn validate_query_empty_string() {
     let result = driver.validate_query(&db, "").await.unwrap();
     assert!(result.is_some(), "empty SQL should be an error");
 }
+
+#[tokio::test]
+async fn mssql_get_query_stats_ok_or_view_server_state_message() {
+    let (driver, _db) = mssql_driver!();
+    let res = driver.get_query_stats().await;
+    assert!(res.is_ok(), "get_query_stats returned: {:?}", res.err());
+    let qs = res.unwrap();
+    if qs.available {
+        assert_eq!(qs.kind, QueryStatsKind::Available);
+        assert!(qs.message.is_none());
+    } else {
+        assert_eq!(qs.kind, QueryStatsKind::MssqlMissingViewServerState);
+        let msg = qs.message.as_deref().unwrap_or("");
+        assert!(
+            msg.to_ascii_lowercase().contains("view server state"),
+            "unexpected unavailable message: {msg}"
+        );
+    }
+}
