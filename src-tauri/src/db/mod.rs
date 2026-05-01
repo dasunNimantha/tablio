@@ -8,6 +8,7 @@ pub mod pg_common;
 pub mod pool;
 pub mod postgres;
 pub mod sqlite;
+pub mod ssh_tunnel;
 pub mod tidb;
 
 use crate::models::*;

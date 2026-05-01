@@ -11,10 +11,13 @@ import { BackupRestoreDialog } from "./components/BackupRestore/BackupRestoreDia
 import { DumpRestoreDialog } from "./components/DumpRestore/DumpRestoreDialog";
 import { KeyboardShortcuts } from "./components/KeyboardShortcuts/KeyboardShortcuts";
 import { ToastContainer } from "./components/Toast/Toast";
+import { PassphrasePrompt } from "./components/PassphrasePrompt";
+import { HostKeyMismatchPrompt } from "./components/HostKeyMismatchPrompt";
+import { KnownHostsDialog } from "./components/KnownHostsDialog";
 import { useConnectionStore } from "./stores/connectionStore";
 import { useTabStore } from "./stores/tabStore";
 import { loader } from "@monaco-editor/react";
-import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick } from "lucide-react";
+import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick, ShieldCheck } from "lucide-react";
 import { themes, getThemeById, applyTheme } from "./lib/themes";
 import { syncMonacoTheme } from "./lib/monacoTheme";
 import { api } from "./lib/tauri";
@@ -128,6 +131,7 @@ export default function App() {
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showZoom, setShowZoom] = useState(false);
   const [showThemePicker, setShowThemePicker] = useState(false);
+  const [showKnownHosts, setShowKnownHosts] = useState(false);
   const zoomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const themePickerRef = useRef<HTMLDivElement>(null);
   const [themeId, setThemeId] = useState<string>(() => {
@@ -411,6 +415,19 @@ export default function App() {
                       </button>
                     ))}
                   </div>
+                  <div className="theme-picker-group">
+                    <div className="theme-picker-group-label">Settings</div>
+                    <button
+                      className="theme-picker-item"
+                      onClick={() => {
+                        setShowThemePicker(false);
+                        setShowKnownHosts(true);
+                      }}
+                    >
+                      <ShieldCheck size={13} />
+                      <span className="theme-picker-name">SSH known hosts</span>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -467,6 +484,12 @@ export default function App() {
         <KeyboardShortcuts onClose={() => setShowShortcuts(false)} />
       )}
       <ToastContainer />
+      <PassphrasePrompt />
+      <HostKeyMismatchPrompt />
+      <KnownHostsDialog
+        open={showKnownHosts}
+        onClose={() => setShowKnownHosts(false)}
+      />
     </div>
     </div>
   );

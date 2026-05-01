@@ -40,6 +40,8 @@ macro_rules! mssql_driver {
             ssh_user: String::new(),
             ssh_password: String::new(),
             ssh_key_path: String::new(),
+            ssh_auth_method: SshAuthMethod::default(),
+            ssh_prompt_passphrase: false,
         };
         (
             MssqlDriver::connect(&config).await.unwrap(),
@@ -84,6 +86,8 @@ macro_rules! mssql_driver_no_db {
             ssh_user: String::new(),
             ssh_password: String::new(),
             ssh_key_path: String::new(),
+            ssh_auth_method: SshAuthMethod::default(),
+            ssh_prompt_passphrase: false,
         };
         MssqlDriver::connect(&config).await.unwrap()
     }};

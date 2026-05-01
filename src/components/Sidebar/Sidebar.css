@@ -288,6 +288,30 @@
   position: relative;
 }
 
+.tree-conn-ssh-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 4px;
+  border-radius: 50%;
+  color: var(--success);
+  flex-shrink: 0;
+  /* Hide while the connection-actions overlay is showing so they don't
+     visually overlap. */
+  transition: opacity 0.15s;
+}
+
+.tree-conn-row:hover .tree-conn-ssh-badge,
+.tree-root-header:hover .tree-conn-ssh-badge {
+  opacity: 0;
+}
+
+.tree-conn-ssh-badge--idle {
+  color: var(--text-muted);
+}
+
 .tree-conn-actions {
   display: flex;
   align-items: center;

@@ -304,6 +304,150 @@ jobs:
       - name: Run SQLite integration tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --test sqlite_integration
 
+  # Stand up an OpenSSH bastion in front of a Postgres instance so the
+  # russh-based SSH tunnel can be exercised end-to-end. The bastion uses
+  # `--network host` so it can reach the Postgres service on the runner's
+  # localhost without a custom docker network.
+  test-ssh-tunnel:
+    name: SSH Tunnel
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Generate SSH key for identity-file auth tests
+        id: sshkey
+        run: |
+          # An unencrypted ed25519 keypair the bastion will accept on top of
+          # the password login. Lives in the runner workspace so the tests
+          # (and `docker run` mount below) can read it.
+          mkdir -p "$RUNNER_TEMP/tablio-ssh"
+          ssh-keygen -t ed25519 -N "" -f "$RUNNER_TEMP/tablio-ssh/id_ed25519" -C tablio-ci >/dev/null
+          chmod 600 "$RUNNER_TEMP/tablio-ssh/id_ed25519"
+          echo "key_path=$RUNNER_TEMP/tablio-ssh/id_ed25519" >> "$GITHUB_OUTPUT"
+          echo "pub_key=$(cat "$RUNNER_TEMP/tablio-ssh/id_ed25519.pub")" >> "$GITHUB_OUTPUT"
+
+      - name: Start OpenSSH bastion
+        run: |
+          # Bastion runs on host network so 127.0.0.1:5432 inside the
+          # container resolves to the Postgres service on the runner.
+          # PUBLIC_KEY enables identity-file auth alongside the password.
+          docker run -d --name sshd \
+            --network host \
+            -e PUID=1000 -e PGID=1000 \
+            -e USER_NAME=tablio -e USER_PASSWORD=tablio-pw \
+            -e PASSWORD_ACCESS=true \
+            -e SUDO_ACCESS=false \
+            -e LISTEN_PORT=2222 \
+            -e PUBLIC_KEY="${{ steps.sshkey.outputs.pub_key }}" \
+            lscr.io/linuxserver/openssh-server:latest
+          # Wait for sshd to start accepting connections.
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 2222; then
+              echo "sshd is up"
+              break
+            fi
+            echo "Waiting for sshd... (attempt $i/30)"
+            sleep 2
+          done
+          # The linuxserver image ships with `AllowTcpForwarding no` in
+          # /config/sshd/sshd_config, which silently breaks every
+          # `-L`-style forward and any russh `direct-tcpip` channel —
+          # exactly what the integration suite exercises. Patch the
+          # config and bounce sshd so the bastion actually forwards.
+          docker exec sshd sh -c '
+            sed -i "s/^AllowTcpForwarding.*/AllowTcpForwarding yes/" /config/sshd/sshd_config
+            sed -i "s/^GatewayPorts.*/GatewayPorts yes/" /config/sshd/sshd_config
+            grep -E "^(AllowTcpForwarding|GatewayPorts)" /config/sshd/sshd_config
+            pkill -x sshd.pam || pkill -x sshd
+          '
+          # Give s6-overlay a moment to relaunch sshd before the test
+          # step starts hammering it.
+          for i in $(seq 1 15); do
+            if nc -z 127.0.0.1 2222; then
+              echo "sshd back up after reload"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Install Linux dependencies
+        run: |
+          # Add the PGDG apt repo so we can pull a `pg_dump` that matches
+          # the postgres:17 service. Ubuntu 24.04 only ships
+          # `postgresql-client` v16, and `pg_dump` refuses to dump a
+          # newer-version server ("aborting because of server version
+          # mismatch") which breaks `pg_dump_through_tunnel`.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSLo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf postgresql-client-17
+          pg_dump --version
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Start ssh-agent and load test key
+        id: sshagent
+        run: |
+          # Spawn a session-scoped ssh-agent and load the unencrypted key
+          # we provisioned earlier. Exporting SSH_AUTH_SOCK +
+          # TEST_SSH_AGENT_AVAILABLE into $GITHUB_ENV makes them visible
+          # to the cargo step below so the agent-auth integration tests
+          # actually run instead of skipping.
+          eval "$(ssh-agent -s)"
+          ssh-add "${{ steps.sshkey.outputs.key_path }}"
+          ssh-add -l
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          echo "TEST_SSH_AGENT_AVAILABLE=1" >> "$GITHUB_ENV"
+
+      - name: Run SSH tunnel integration tests
+        env:
+          TEST_SSH_HOST: 127.0.0.1
+          TEST_SSH_PORT: "2222"
+          TEST_SSH_USER: tablio
+          TEST_SSH_PASSWORD: tablio-pw
+          # Reach the Postgres service from inside the bastion container,
+          # which is on the host network namespace, via the runner's
+          # loopback interface.
+          TEST_SSH_TARGET_HOST: 127.0.0.1
+          TEST_SSH_TARGET_PORT: "5432"
+          TEST_POSTGRES_USER: test
+          TEST_POSTGRES_PASSWORD: test
+          TEST_POSTGRES_DB: testdb
+          # Enables the identity-file branch of the integration suite.
+          TEST_SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
+          # `SSH_AUTH_SOCK` and `TEST_SSH_AGENT_AVAILABLE` come in via
+          # $GITHUB_ENV from the previous step.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test ssh_tunnel_integration -- --test-threads=1
+
+      - name: Dump bastion logs on failure
+        if: failure()
+        run: docker logs sshd
+
   test-cassandra:
     name: Cassandra ${{ matrix.cassandra_version }}
     needs: [changes]
@@ -414,7 +558,7 @@ jobs:
 
   build:
     name: Build
-    needs: [changes, test-frontend, test-e2e, fmt-and-clippy, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite, test-cassandra, test-scylladb]
+    needs: [changes, test-frontend, test-e2e, fmt-and-clippy, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite, test-ssh-tunnel, test-cassandra, test-scylladb]
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
@@ -467,6 +611,7 @@ jobs:
       - test-cockroachdb
       - test-tidb
       - test-sqlite
+      - test-ssh-tunnel
       - test-cassandra
       - test-scylladb
       - build

@@ -29,6 +29,7 @@ import {
   Layers,
   AlertTriangle,
   GitBranch,
+  ShieldCheck,
 } from "lucide-react";
 import "./Sidebar.css";
 
@@ -1396,6 +1397,14 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
             {isActive ? (
               <div className="tree-conn-row">
                 {renderNode(node, 0)}
+                {conn.ssh_enabled && (
+                  <span
+                    className="tree-conn-ssh-badge"
+                    title={`Tunneled through ${conn.ssh_user || "ssh"}@${conn.ssh_host || "bastion"}:${conn.ssh_port || 22}`}
+                  >
+                    <ShieldCheck size={11} />
+                  </span>
+                )}
                 <div className="tree-conn-actions">
                   <button
                     className="btn-icon tree-action"
@@ -1443,6 +1452,14 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                 <span className="tree-label" style={{ color: "var(--text-muted)" }}>
                   {conn.name || conn.database}
                 </span>
+                {conn.ssh_enabled && (
+                  <span
+                    className="tree-conn-ssh-badge tree-conn-ssh-badge--idle"
+                    title={`Will tunnel through ${conn.ssh_user || "ssh"}@${conn.ssh_host || "bastion"}:${conn.ssh_port || 22}`}
+                  >
+                    <ShieldCheck size={11} />
+                  </span>
+                )}
                 <div className="tree-conn-actions">
                   <button
                     className="btn-icon tree-action"

@@ -39,6 +39,8 @@ macro_rules! pg_driver {
             ssh_user: String::new(),
             ssh_password: String::new(),
             ssh_key_path: String::new(),
+            ssh_auth_method: SshAuthMethod::default(),
+            ssh_prompt_passphrase: false,
         };
         PostgresDriver::connect(&config).await.unwrap()
     }};
@@ -91,6 +93,8 @@ macro_rules! pg_driver_no_db {
             ssh_user: String::new(),
             ssh_password: String::new(),
             ssh_key_path: String::new(),
+            ssh_auth_method: SshAuthMethod::default(),
+            ssh_prompt_passphrase: false,
         };
         PostgresDriver::connect(&config).await.unwrap()
     }};

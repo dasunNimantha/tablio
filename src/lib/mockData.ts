@@ -14,6 +14,7 @@ import type {
   TableStats as TableStatsType,
   RoleInfo,
   SavedQuery,
+  KnownHostEntry,
 } from "./tauri";
 
 const CONN_ID = "mock-conn-1";
@@ -362,3 +363,30 @@ export const mockDdl = `CREATE TABLE public.users (
 
 CREATE INDEX users_created_at_idx ON public.users USING btree (created_at);
 `;
+
+export const mockKnownHosts: KnownHostEntry[] = [
+  {
+    host: "bastion.example.com",
+    port: 22,
+    keyType: "ssh-ed25519",
+    fingerprint: "SHA256:Z2hzdGFydHMtbW9jay1maW5nZXJwcmludA",
+  },
+  {
+    host: "10.0.0.5",
+    port: 2222,
+    keyType: "ssh-rsa",
+    fingerprint: "SHA256:bW9jay1mb3ItcHJldmlldy1ldGM",
+  },
+];
+
+export function removeMockKnownHost(
+  host: string,
+  port: number,
+  fingerprint: string,
+): void {
+  const idx = mockKnownHosts.findIndex(
+    (e) =>
+      e.host === host && e.port === port && e.fingerprint === fingerprint,
+  );
+  if (idx !== -1) mockKnownHosts.splice(idx, 1);
+}

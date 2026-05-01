@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DbType {
+    #[default]
     Postgres,
     Mysql,
     Sqlite,
@@ -42,10 +43,59 @@ pub struct ConnectionConfig {
     pub ssh_password: String,
     #[serde(default)]
     pub ssh_key_path: String,
+    #[serde(default)]
+    pub ssh_auth_method: SshAuthMethod,
+    /// When true and `ssh_auth_method == IdentityFile`, the UI will ask for
+    /// the key passphrase at connect time rather than persisting it; the
+    /// stored `ssh_password` is empty and a transient one is injected.
+    #[serde(default)]
+    pub ssh_prompt_passphrase: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SshAuthMethod {
+    #[default]
+    Password,
+    #[serde(rename = "identityfile", alias = "identity_file")]
+    IdentityFile,
+    /// Use the local ssh-agent (Linux / macOS read `SSH_AUTH_SOCK`,
+    /// Windows tries Pageant). The agent is asked for the list of loaded
+    /// identities and each one is offered to the bastion in turn. No
+    /// passphrase is ever read by Tablio in this mode.
+    #[serde(rename = "agent")]
+    Agent,
 }
 
 fn default_ssh_port() -> u16 {
     22
+}
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            db_type: DbType::default(),
+            host: String::new(),
+            port: 0,
+            user: String::new(),
+            password: String::new(),
+            database: String::new(),
+            color: String::new(),
+            ssl: false,
+            trust_server_cert: false,
+            group: None,
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: default_ssh_port(),
+            ssh_user: String::new(),
+            ssh_password: String::new(),
+            ssh_key_path: String::new(),
+            ssh_auth_method: SshAuthMethod::default(),
+            ssh_prompt_passphrase: false,
+        }
+    }
 }
 
 impl ConnectionConfig {
@@ -637,6 +687,70 @@ mod tests {
         assert!(!config.ssh_enabled);
         assert_eq!(config.ssh_host, "");
         assert!(config.group.is_none());
+    }
+
+    #[test]
+    fn ssh_auth_method_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&SshAuthMethod::Password).unwrap(),
+            r#""password""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SshAuthMethod::IdentityFile).unwrap(),
+            r#""identityfile""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SshAuthMethod::Agent).unwrap(),
+            r#""agent""#
+        );
+    }
+
+    #[test]
+    fn ssh_auth_method_default_is_password() {
+        let m: SshAuthMethod = Default::default();
+        assert_eq!(m, SshAuthMethod::Password);
+    }
+
+    #[test]
+    fn ssh_auth_method_accepts_legacy_identity_file_alias() {
+        let m: SshAuthMethod = serde_json::from_str(r#""identity_file""#).unwrap();
+        assert_eq!(m, SshAuthMethod::IdentityFile);
+    }
+
+    #[test]
+    fn ssh_auth_method_deserializes_agent() {
+        let m: SshAuthMethod = serde_json::from_str(r#""agent""#).unwrap();
+        assert_eq!(m, SshAuthMethod::Agent);
+    }
+
+    #[test]
+    fn connection_config_ssh_defaults_to_password_auth() {
+        let json = r##"{
+            "id": "1", "name": "test", "db_type": "postgres",
+            "host": "localhost", "port": 5432, "user": "u",
+            "password": "p", "database": "db", "color": "#fff",
+            "ssl": false
+        }"##;
+        let config: ConnectionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.ssh_auth_method, SshAuthMethod::Password);
+        assert!(!config.ssh_prompt_passphrase);
+    }
+
+    #[test]
+    fn connection_config_ssh_identity_file() {
+        let json = r##"{
+            "id": "1", "name": "test", "db_type": "postgres",
+            "host": "localhost", "port": 5432, "user": "u",
+            "password": "p", "database": "db", "color": "#fff",
+            "ssl": false, "ssh_enabled": true, "ssh_host": "bastion",
+            "ssh_user": "admin", "ssh_auth_method": "identityfile",
+            "ssh_key_path": "/home/u/.ssh/id_ed25519",
+            "ssh_prompt_passphrase": true
+        }"##;
+        let config: ConnectionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.ssh_auth_method, SshAuthMethod::IdentityFile);
+        assert_eq!(config.ssh_key_path, "/home/u/.ssh/id_ed25519");
+        assert!(config.ssh_prompt_passphrase);
     }
 
     #[test]

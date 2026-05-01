@@ -36,6 +36,8 @@ macro_rules! mysql_driver {
             ssh_user: String::new(),
             ssh_password: String::new(),
             ssh_key_path: String::new(),
+            ssh_auth_method: SshAuthMethod::default(),
+            ssh_prompt_passphrase: false,
         };
         (
             MysqlDriver::connect(&config).await.unwrap(),
@@ -77,6 +79,8 @@ macro_rules! mysql_driver_no_db {
             ssh_user: String::new(),
             ssh_password: String::new(),
             ssh_key_path: String::new(),
+            ssh_auth_method: SshAuthMethod::default(),
+            ssh_prompt_passphrase: false,
         };
         MysqlDriver::connect(&config).await.unwrap()
     }};

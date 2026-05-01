@@ -24,6 +24,8 @@ async fn create_driver() -> (SqliteDriver, String) {
         ssh_user: String::new(),
         ssh_password: String::new(),
         ssh_key_path: String::new(),
+        ssh_auth_method: SshAuthMethod::default(),
+        ssh_prompt_passphrase: false,
     };
     let driver = SqliteDriver::connect(&config).await.unwrap();
     (driver, path)
