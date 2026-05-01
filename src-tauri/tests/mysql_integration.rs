@@ -1787,3 +1787,104 @@ async fn validate_query_empty_string() {
     let result = driver.validate_query(&db, "").await.unwrap();
     assert!(result.is_some(), "empty SQL should be an error");
 }
+
+// ---------------------------------------------------------------------------
+// Big-data soak — nightly only (`#[ignore]`-gated)
+// ---------------------------------------------------------------------------
+
+const MYSQL_BIG_DATA_ROWS: i64 = 1_000_000;
+
+/// MySQL has no `generate_series`, so we materialise a million rows by
+/// chained joins on a CTE numbers table. Faster than a million round-trips
+/// and works on every supported MySQL/MariaDB version.
+async fn mysql_seed_million_rows(
+    driver: &MysqlDriver,
+    db: &str,
+    table: &str,
+) -> anyhow::Result<()> {
+    let create_sql = format!(
+        "CREATE TABLE `{db}`.`{table}` ( \
+             id BIGINT PRIMARY KEY, \
+             payload TEXT NOT NULL, \
+             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP \
+         )"
+    );
+    driver.execute_query(db, &create_sql).await?;
+
+    // Recursive CTE produces the integers 1..=N in a single statement.
+    // MySQL caps `cte_max_recursion_depth` at 1000 by default; bump it
+    // to N so we can fan out without partitioning the insert.
+    let bump = format!(
+        "SET SESSION cte_max_recursion_depth = {n}",
+        n = MYSQL_BIG_DATA_ROWS + 1
+    );
+    let _ = driver.execute_query(db, &bump).await; // ignored on MariaDB
+
+    let insert_sql = format!(
+        "INSERT INTO `{db}`.`{table}` (id, payload) \
+         WITH RECURSIVE seq(n) AS ( \
+             SELECT 1 \
+             UNION ALL \
+             SELECT n + 1 FROM seq WHERE n < {n} \
+         ) \
+         SELECT n, CONCAT('row-', n) FROM seq",
+        n = MYSQL_BIG_DATA_ROWS
+    );
+    driver.execute_query(db, &insert_sql).await?;
+    Ok(())
+}
+
+async fn mysql_drop_table_silent(driver: &MysqlDriver, db: &str, table: &str) {
+    let _ = driver
+        .execute_query(db, &format!("DROP TABLE IF EXISTS `{db}`.`{table}`"))
+        .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn million_row_paginate() {
+    let (driver, db) = mysql_driver!();
+    let table = unique_table("big_data_paginate");
+
+    mysql_drop_table_silent(&driver, &db, &table).await;
+    mysql_seed_million_rows(&driver, &db, &table)
+        .await
+        .expect("seed million rows");
+
+    const PAGE: u64 = 5_000;
+    const MAX_PAGE_MS: u128 = 5_000;
+    let mut offset: u64 = 0;
+    let mut total: u64 = 0;
+    let mut pages: u64 = 0;
+    let started = std::time::Instant::now();
+
+    loop {
+        let t = std::time::Instant::now();
+        let data = driver
+            .fetch_rows(&db, &db, &table, offset, PAGE, None, None)
+            .await
+            .expect("fetch_rows page");
+        let elapsed = t.elapsed().as_millis();
+        assert!(
+            elapsed < MAX_PAGE_MS,
+            "page at offset {offset} took {elapsed}ms (>{MAX_PAGE_MS}ms budget)"
+        );
+        let n = data.rows.len() as u64;
+        total += n;
+        pages += 1;
+        if n < PAGE {
+            break;
+        }
+        offset += PAGE;
+    }
+
+    let total_elapsed = started.elapsed().as_secs_f64();
+    eprintln!("[big-data][mysql] paginated {total} rows in {pages} pages in {total_elapsed:.2}s");
+
+    assert_eq!(
+        total, MYSQL_BIG_DATA_ROWS as u64,
+        "expected {MYSQL_BIG_DATA_ROWS} rows total, got {total} across {pages} pages"
+    );
+
+    mysql_drop_table_silent(&driver, &db, &table).await;
+}

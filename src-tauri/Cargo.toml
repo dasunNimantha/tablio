@@ -46,3 +46,4 @@ log = "0.4"
 [dev-dependencies]
 tempfile = "3"
 which = "6"
+proptest = "1"

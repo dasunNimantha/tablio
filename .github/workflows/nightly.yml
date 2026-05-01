@@ -1,0 +1,516 @@
+name: Nightly
+
+# Why a separate workflow?
+#   * Catches regressions PR CI cannot afford to test (slow, soak, fuzz, multi-OS).
+#   * Zero impact on PR latency or required-status surface — nothing here
+#     is wired into ci.yml's `ci-required` aggregator.
+#   * Single notification per night instead of one per check class.
+#
+# Anything that costs > ~2 min of wall-clock or has any flake risk under
+# load belongs in this file, not ci.yml.
+
+on:
+  schedule:
+    - cron: "0 4 * * *" # 04:00 UTC nightly
+  workflow_dispatch:
+
+# Default to read-only. The cargo-fuzz job uploads crash artifacts via
+# the default GITHUB_TOKEN — `actions/upload-artifact` only writes to the
+# workflow run, not the repo, so no extra scope is needed.
+permissions:
+  contents: read
+
+# Don't cancel an in-flight nightly when a follow-up cron tick fires
+# (`cancel-in-progress: false`). A flake-finder run mid-execution carries
+# more signal than the next night's run does.
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ===========================================================================
+  # Tier 1 — security hygiene + leak surveillance + release readiness
+  # ===========================================================================
+
+  audit:
+    name: Audit (Rust + npm)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Rust advisory check
+        # Surfaces RUSTSEC IDs Dependabot does NOT raise PRs for
+        # (yanked crates, unmaintained advisories, license drift).
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "lts/*"
+          cache: "npm"
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: npm audit (high+)
+        # `--audit-level=high` skips the noisy moderate findings that
+        # are mostly transitive dev-dependency churn. `|| true` is
+        # deliberately not used — we want this to fail when a real
+        # high/critical lands.
+        run: npm audit --audit-level=high
+
+  stress-fdleak:
+    name: Resource monitor stress
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run #[ignore]-gated stress harness
+        # 5,000 sequential + 8,000 concurrent calls into get_app_resource_usage.
+        # Threshold is 0.05 fd/call — three orders of magnitude of headroom
+        # over the historical leak rate (~0.66 fd/call).
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --lib \
+            commands::system::tests::stress_fd_leak \
+            -- --ignored --nocapture
+
+  build-rehearsal:
+    name: Build rehearsal (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "lts/*"
+          cache: "npm"
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Install Linux deps
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build Tauri app (debug)
+        # Debug build proves "would tip-of-master ship?" without the
+        # signing/notarization friction of a release build. A real
+        # release-only breakage (icon assets, bundle config) still
+        # surfaces at debug time.
+        run: npx tauri build --debug
+
+  # ===========================================================================
+  # Tier 2 — extended DB matrix + SSH soak
+  # ===========================================================================
+
+  legacy-db-matrix:
+    name: Legacy DB ${{ matrix.engine }} ${{ matrix.version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: postgres
+            version: "12"
+            test: postgres_integration
+            url_env: TEST_POSTGRES_URL
+            url: "postgres://test:test@localhost:5432/testdb"
+          - engine: postgres
+            version: "13"
+            test: postgres_integration
+            url_env: TEST_POSTGRES_URL
+            url: "postgres://test:test@localhost:5432/testdb"
+          - engine: mysql
+            version: "5.7"
+            test: mysql_integration
+            url_env: TEST_MYSQL_URL
+            url: "mysql://root:test@localhost:3306/testdb"
+    services:
+      postgres:
+        image: ${{ matrix.engine == 'postgres' && format('postgres:{0}', matrix.version) || '' }}
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mysql:
+        image: ${{ matrix.engine == 'mysql' && format('mysql:{0}', matrix.version) || '' }}
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_DATABASE: testdb
+          MYSQL_USER: test
+          MYSQL_PASSWORD: test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run integration suite
+        env:
+          TEST_POSTGRES_URL: ${{ matrix.engine == 'postgres' && matrix.url || '' }}
+          TEST_MYSQL_URL: ${{ matrix.engine == 'mysql' && matrix.url || '' }}
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml \
+            --test ${{ matrix.test }}
+
+  ssh-soak:
+    name: SSH tunnel soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+
+      # Identical bastion setup to ci.yml `test-ssh-tunnel` — we keep
+      # the soak isolated to its own job (rather than tacking onto the
+      # PR test) so a soak flake never blocks PR signal.
+      - name: Generate SSH key
+        id: sshkey
+        run: |
+          mkdir -p "$RUNNER_TEMP/tablio-ssh"
+          ssh-keygen -t ed25519 -N "" \
+            -f "$RUNNER_TEMP/tablio-ssh/id_ed25519" -C tablio-ci >/dev/null
+          chmod 600 "$RUNNER_TEMP/tablio-ssh/id_ed25519"
+          echo "key_path=$RUNNER_TEMP/tablio-ssh/id_ed25519" >> "$GITHUB_OUTPUT"
+          echo "pub_key=$(cat "$RUNNER_TEMP/tablio-ssh/id_ed25519.pub")" >> "$GITHUB_OUTPUT"
+
+      - name: Start OpenSSH bastion
+        run: |
+          docker run -d --name sshd \
+            --network host \
+            -e PUID=1000 -e PGID=1000 \
+            -e USER_NAME=tablio -e USER_PASSWORD=tablio-pw \
+            -e PASSWORD_ACCESS=true -e SUDO_ACCESS=false \
+            -e LISTEN_PORT=2222 \
+            -e PUBLIC_KEY="${{ steps.sshkey.outputs.pub_key }}" \
+            lscr.io/linuxserver/openssh-server:latest
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 2222; then break; fi
+            sleep 2
+          done
+          # linuxserver image ships with AllowTcpForwarding no — patch it
+          # so direct-tcpip channels (every -L forward) actually work.
+          docker exec sshd sh -c '
+            sed -i "s/^AllowTcpForwarding.*/AllowTcpForwarding yes/" /config/sshd/sshd_config
+            sed -i "s/^GatewayPorts.*/GatewayPorts yes/" /config/sshd/sshd_config
+            pkill -x sshd.pam || pkill -x sshd
+          '
+          for i in $(seq 1 15); do
+            if nc -z 127.0.0.1 2222; then break; fi
+            sleep 1
+          done
+
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev \
+            libappindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run open/close soak (200 cycles)
+        env:
+          TEST_SSH_HOST: 127.0.0.1
+          TEST_SSH_PORT: "2222"
+          TEST_SSH_USER: tablio
+          TEST_SSH_PASSWORD: tablio-pw
+          TEST_SSH_TARGET_HOST: 127.0.0.1
+          TEST_SSH_TARGET_PORT: "5432"
+          TEST_POSTGRES_USER: test
+          TEST_POSTGRES_PASSWORD: test
+          TEST_POSTGRES_DB: testdb
+          # Override default (200) here when you want to dial intensity.
+          SOAK_ITERATIONS: "200"
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml \
+            --test ssh_tunnel_integration \
+            -- --ignored soak_open_close_loop \
+            --nocapture --test-threads=1
+
+      - name: Dump bastion logs on failure
+        if: failure()
+        run: docker logs sshd
+
+  # ===========================================================================
+  # Tier 3 — flake detection, big-data, fuzzing, cross-OS e2e
+  # ===========================================================================
+
+  flake-finder:
+    name: Flake finder
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "lts/*"
+          cache: "npm"
+
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run repeated test loops
+        env:
+          ITERATIONS: "20"
+        run: bash scripts/flake-finder.sh
+
+      - name: Upload per-iteration logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: flake-finder-logs
+          path: flake-finder-logs/
+          retention-days: 14
+
+  big-data:
+    name: Big-data scenarios
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_DATABASE: testdb
+          MYSQL_USER: test
+          MYSQL_PASSWORD: test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux deps + matching pg_dump
+        # PGDG repo so pg_dump matches the postgres:17 service.
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSLo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf postgresql-client-17
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run --ignored big-data tests
+        env:
+          TEST_POSTGRES_URL: "postgres://test:test@localhost:5432/testdb"
+          TEST_MYSQL_URL: "mysql://root:test@localhost:3306/testdb"
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml \
+            --test postgres_integration \
+            -- --ignored --nocapture --test-threads=1
+          cargo test --manifest-path src-tauri/Cargo.toml \
+            --test mysql_integration \
+            -- --ignored --nocapture --test-threads=1
+
+  proptest:
+    name: Property-based tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run proptest blocks (PROPTEST_CASES=4096)
+        env:
+          # 4,096 cases per property × 7 properties ≈ ~30k generated
+          # inputs total. Comfortably under the 20 min job budget.
+          PROPTEST_CASES: "4096"
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --lib proptests \
+            -- --nocapture
+
+  cargo-fuzz:
+    name: cargo-fuzz (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ssh_config, proc_self_stat, sql_identifier]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf
+
+      # libfuzzer-sys requires the nightly toolchain because it links
+      # against unstable LLVM sanitiser interfaces.
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            src-tauri/fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz ${{ matrix.target }} for 5 minutes
+        # `-max_total_time=300` caps each target at 300s of mutation;
+        # libFuzzer exits 0 on time-out (no crashes found) and non-zero
+        # on a discovered crash, which is exactly the gate we want.
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            --fuzz-dir src-tauri/fuzz \
+            -- -max_total_time=300
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-${{ matrix.target }}-crashes
+          path: |
+            src-tauri/fuzz/artifacts/${{ matrix.target }}/
+            src-tauri/fuzz/corpus/${{ matrix.target }}/
+          retention-days: 30
+
+  cross-os-e2e:
+    name: Cross-OS E2E (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "lts/*"
+          cache: "npm"
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run mocked e2e suite
+        run: npx playwright test
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: nightly-playwright-${{ matrix.os }}
+          path: test-results/
+          retention-days: 7

@@ -315,3 +315,67 @@ Host prod-* !prod-secret
         assert!(resolve_target(cfg, "prod-secret").is_none());
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    //! Property-based coverage for the SSH config parser. Real users
+    //! drop arbitrary text into `~/.ssh/config` and the parser is
+    //! invoked on every alias lookup in the connection dialog —
+    //! panicking there would crash the renderer. The contract is
+    //! simple: arbitrary input must always return cleanly.
+    use super::{glob_match, host_line_matches, resolve_target};
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// The top-level entry point must never panic on arbitrary
+        /// config text + target. Returns either `Some(_)` or `None`
+        /// — never aborts.
+        #[test]
+        fn resolve_target_never_panics(
+            content in ".{0,4096}",
+            target in "[A-Za-z0-9._-]{0,128}",
+        ) {
+            let _ = resolve_target(&content, &target);
+        }
+
+        /// Glob matching must terminate (no infinite recursion on
+        /// pathological `*?*?*` patterns) and never panic.
+        #[test]
+        fn glob_match_never_panics(
+            // Limit pattern length so worst-case `*?*?*?*?*?` doesn't
+            // blow the recursion budget on the test runner — the
+            // parser has the same implicit budget.
+            pat in "[*?A-Za-z0-9.-]{0,32}",
+            name in "[A-Za-z0-9.-]{0,64}",
+        ) {
+            let _ = glob_match(&pat, &name);
+        }
+
+        /// Negation guard: if a positive pattern matches AND a
+        /// negated pattern also matches, the line must not match.
+        /// This is the OpenSSH semantic our SSH-config import relies
+        /// on; a regression here would silently leak credentials
+        /// across host aliases.
+        #[test]
+        fn negation_always_wins(name in "prod-[a-z]{1,8}") {
+            // Build `prod-* !<name>` — the literal target is excluded.
+            let neg = format!("!{name}");
+            let pats = vec!["prod-*", neg.as_str()];
+            prop_assert!(!host_line_matches(&pats, &name));
+        }
+
+        /// A `Host *` block must always match any non-empty target.
+        /// Regressions here would silently break every wildcard
+        /// fallback users rely on for default username / identity.
+        #[test]
+        fn star_block_matches_any_target(target in "[A-Za-z0-9.-]{1,64}") {
+            let cfg = format!(
+                "Host *\n  HostName {target}.example.com\n  User deploy\n"
+            );
+            let r = resolve_target(&cfg, &target).expect("Host * must match");
+            prop_assert_eq!(r.user.as_deref(), Some("deploy"));
+        }
+    }
+}

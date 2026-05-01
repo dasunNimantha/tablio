@@ -2265,3 +2265,227 @@ async fn validate_query_valid_with_cte() {
         .unwrap();
     assert!(result.is_none(), "valid CTE should return None");
 }
+
+// ---------------------------------------------------------------------------
+// Big-data soak — nightly only (`#[ignore]`-gated)
+// ---------------------------------------------------------------------------
+//
+// These tests seed a temporary table with a million rows and exercise the
+// production fetch_rows pagination path on a payload size representative of
+// real users with substantial datasets. They are NOT part of the regular CI
+// matrix because seeding alone takes ~30s on the smallest CI runners; the
+// nightly `big-data` job invokes them via `--ignored`.
+
+const BIG_DATA_ROWS: i64 = 1_000_000;
+
+/// Seed a one-million-row table named `<table>` in `SCHEMA.DB` using a
+/// single `INSERT … SELECT generate_series(...)` so the work happens
+/// server-side. Returns the table name (qualified).
+async fn pg_seed_million_rows(driver: &PostgresDriver, table: &str) -> anyhow::Result<()> {
+    let create_sql = format!(
+        "CREATE TABLE {schema}.{table} ( \
+             id BIGINT PRIMARY KEY, \
+             payload TEXT NOT NULL, \
+             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW() \
+         )",
+        schema = SCHEMA,
+        table = table
+    );
+    driver.execute_query(DB, &create_sql).await?;
+    let insert_sql = format!(
+        "INSERT INTO {schema}.{table} (id, payload) \
+         SELECT g, 'row-' || g \
+         FROM generate_series(1, {n}) g",
+        schema = SCHEMA,
+        table = table,
+        n = BIG_DATA_ROWS
+    );
+    driver.execute_query(DB, &insert_sql).await?;
+    Ok(())
+}
+
+async fn pg_drop_table_silent(driver: &PostgresDriver, table: &str) {
+    let _ = driver
+        .execute_query(DB, &format!("DROP TABLE IF EXISTS {SCHEMA}.{table}"))
+        .await;
+}
+
+/// Paginate through a million-row table via the same `fetch_rows` code path
+/// the renderer drives. Asserts:
+///   * every page returns exactly `LIMIT` rows except possibly the last
+///   * each page comes back within `MAX_PAGE_MS`
+///   * total fetched row count matches the table cardinality
+///
+/// The wall-clock budget is intentionally loose (per-page, not total) so a
+/// noisy CI runner can stretch the soak without flaking. A real perf
+/// regression would push individual pages over a hard limit, not redistribute
+/// time evenly across them.
+#[tokio::test]
+#[ignore]
+async fn million_row_paginate() {
+    let driver = pg_driver!();
+    let table = unique_table("big_data_paginate");
+
+    // Best-effort cleanup before AND after — a previous aborted run could
+    // leave the table behind on the same DB.
+    pg_drop_table_silent(&driver, &table).await;
+    pg_seed_million_rows(&driver, &table)
+        .await
+        .expect("seed million rows");
+
+    const PAGE: u64 = 5_000;
+    const MAX_PAGE_MS: u128 = 5_000;
+    let mut offset: u64 = 0;
+    let mut total: u64 = 0;
+    let mut pages: u64 = 0;
+    let started = std::time::Instant::now();
+
+    loop {
+        let t = std::time::Instant::now();
+        let data = driver
+            .fetch_rows(DB, SCHEMA, &table, offset, PAGE, None, None)
+            .await
+            .expect("fetch_rows page");
+        let elapsed = t.elapsed().as_millis();
+        assert!(
+            elapsed < MAX_PAGE_MS,
+            "page at offset {offset} took {elapsed}ms (>{MAX_PAGE_MS}ms budget)"
+        );
+        let n = data.rows.len() as u64;
+        total += n;
+        pages += 1;
+        if n < PAGE {
+            break;
+        }
+        offset += PAGE;
+    }
+
+    let total_elapsed = started.elapsed().as_secs_f64();
+    eprintln!("[big-data][pg] paginated {total} rows in {pages} pages in {total_elapsed:.2}s");
+
+    assert_eq!(
+        total, BIG_DATA_ROWS as u64,
+        "expected {BIG_DATA_ROWS} rows total, got {total} across {pages} pages"
+    );
+
+    pg_drop_table_silent(&driver, &table).await;
+}
+
+/// End-to-end pg_dump → pg_restore round-trip on a sizeable fixture. Skips
+/// cleanly when `pg_dump` / `pg_restore` aren't on PATH (the nightly job
+/// installs them; local devs without them just see the test skip).
+#[tokio::test]
+#[ignore]
+async fn dump_restore_roundtrip() {
+    use std::process::Command;
+
+    if which::which("pg_dump").is_err() || which::which("pg_restore").is_err() {
+        eprintln!("Skipping dump_restore_roundtrip: pg_dump/pg_restore not on PATH");
+        return;
+    }
+
+    let url = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            eprintln!("Skipping dump_restore_roundtrip: TEST_POSTGRES_URL not set");
+            return;
+        }
+    };
+
+    let driver = pg_driver!();
+    let src_table = unique_table("big_data_dump_src");
+
+    pg_drop_table_silent(&driver, &src_table).await;
+    pg_seed_million_rows(&driver, &src_table)
+        .await
+        .expect("seed dump source");
+
+    // Parse the URL once for the pg_dump/restore env vars.
+    // postgres://user:pw@host:port/db
+    let stripped = url
+        .strip_prefix("postgres://")
+        .or_else(|| url.strip_prefix("postgresql://"))
+        .expect("bad TEST_POSTGRES_URL");
+    let (user_pass, rest) = stripped.split_once('@').expect("@");
+    let (user, password) = user_pass.split_once(':').expect(":");
+    let (host_port, database) = rest.split_once('/').expect("/");
+    let database = database.split('?').next().unwrap();
+    let (host, port) = host_port.split_once(':').expect("port");
+
+    let dump_file = tempfile::Builder::new()
+        .prefix("tablio-bigdata-dump-")
+        .suffix(".dump")
+        .tempfile()
+        .expect("tempfile");
+    let dump_path = dump_file.path().to_owned();
+
+    let dump_status = Command::new("pg_dump")
+        .arg("-h")
+        .arg(host)
+        .arg("-p")
+        .arg(port)
+        .arg("-U")
+        .arg(user)
+        .arg("-d")
+        .arg(database)
+        .arg("-Fc") // custom format — required by pg_restore -t with --data-only
+        .arg("-t")
+        .arg(format!("{SCHEMA}.{src_table}"))
+        .arg("-f")
+        .arg(&dump_path)
+        .env("PGPASSWORD", password)
+        .status()
+        .expect("pg_dump must spawn");
+    assert!(
+        dump_status.success(),
+        "pg_dump exited non-zero: {dump_status:?}"
+    );
+
+    // Truncate src so the data-only restore is a real round-trip:
+    // every row that comes back has to have travelled through the
+    // dump file, not just been left behind from the seed.
+    driver
+        .execute_query(DB, &format!("TRUNCATE {SCHEMA}.{src_table}"))
+        .await
+        .expect("truncate src");
+
+    let restore_status = Command::new("pg_restore")
+        .arg("-h")
+        .arg(host)
+        .arg("-p")
+        .arg(port)
+        .arg("-U")
+        .arg(user)
+        .arg("-d")
+        .arg(database)
+        .arg("--data-only")
+        .arg(&dump_path)
+        .env("PGPASSWORD", password)
+        .status()
+        .expect("pg_restore must spawn");
+    assert!(
+        restore_status.success(),
+        "pg_restore exited non-zero: {restore_status:?}"
+    );
+
+    // Verify cardinality survives a full round-trip.
+    let count_q = driver
+        .execute_query(
+            DB,
+            &format!("SELECT COUNT(*)::BIGINT AS n FROM {SCHEMA}.{src_table}"),
+        )
+        .await
+        .expect("count after restore");
+    let n = count_q
+        .rows
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.as_i64())
+        .expect("count column");
+    assert_eq!(
+        n, BIG_DATA_ROWS,
+        "round-trip lost rows: expected {BIG_DATA_ROWS}, got {n}"
+    );
+
+    pg_drop_table_silent(&driver, &src_table).await;
+}
