@@ -376,15 +376,22 @@ impl DatabaseDriver for TidbDriver {
         // in milliseconds (forced float division). `DIGEST` is a 64-char hex
         // string and won't fit in an `i64`, so `queryid` stays None and the
         // UI keys off the digest text.
+        //
+        // Rows: TiDB's STATEMENTS_SUMMARY only exposes `AVG_*`/`MAX_*`/
+        // `MIN_*` aggregates for rows — no `SUM_*` column. We multiply
+        // `EXEC_COUNT * AVG_RESULT_ROWS` to recover the total result rows
+        // (analog to MySQL's `SUM_ROWS_SENT`). `AVG_RESULT_ROWS` lands in
+        // TiDB v6.5+; the workspace image is `pingcap/tidb:latest`, so this
+        // is fine on supported versions.
         let sql = "SELECT \
-                COALESCE(DIGEST_TEXT, '')                       AS query, \
-                COALESCE(SCHEMA_NAME, '')                       AS user, \
-                CAST(EXEC_COUNT AS SIGNED)                      AS calls, \
-                (SUM_LATENCY / 1000000.0)                       AS total_exec_time_ms, \
-                (AVG_LATENCY / 1000000.0)                       AS mean_exec_time_ms, \
-                (MIN_LATENCY / 1000000.0)                       AS min_exec_time_ms, \
-                (MAX_LATENCY / 1000000.0)                       AS max_exec_time_ms, \
-                CAST(SUM_AFFECTED_ROWS AS SIGNED)               AS rows_affected \
+                COALESCE(DIGEST_TEXT, '')                            AS query, \
+                COALESCE(SCHEMA_NAME, '')                            AS user, \
+                CAST(EXEC_COUNT AS SIGNED)                           AS calls, \
+                (SUM_LATENCY / 1000000.0)                            AS total_exec_time_ms, \
+                (AVG_LATENCY / 1000000.0)                            AS mean_exec_time_ms, \
+                (MIN_LATENCY / 1000000.0)                            AS min_exec_time_ms, \
+                (MAX_LATENCY / 1000000.0)                            AS max_exec_time_ms, \
+                CAST(EXEC_COUNT * AVG_RESULT_ROWS AS SIGNED)         AS rows_returned \
             FROM INFORMATION_SCHEMA.STATEMENTS_SUMMARY \
             WHERE DIGEST_TEXT IS NOT NULL \
             ORDER BY SUM_LATENCY DESC \
@@ -403,7 +410,7 @@ impl DatabaseDriver for TidbDriver {
                 mean_exec_time_ms: r.try_get::<f64, _>("mean_exec_time_ms").unwrap_or(0.0),
                 min_exec_time_ms: r.try_get::<f64, _>("min_exec_time_ms").unwrap_or(0.0),
                 max_exec_time_ms: r.try_get::<f64, _>("max_exec_time_ms").unwrap_or(0.0),
-                rows: r.try_get::<i64, _>("rows_affected").unwrap_or(0),
+                rows: r.try_get::<i64, _>("rows_returned").unwrap_or(0),
                 shared_blks_hit: 0,
                 shared_blks_read: 0,
                 cache_hit_ratio: 0.0,
