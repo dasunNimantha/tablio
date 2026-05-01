@@ -506,6 +506,18 @@
   border-bottom: none;
 }
 
+/* The .tree-root border-bottom above is meant as a divider between
+ * consecutive ungrouped connections. The last ungrouped connection
+ * has nothing below it, so the trailing border reads as a stray hr
+ * (especially obvious with a single connection). Drop it.
+ *
+ * Pairs cleanly with #90: once that adds padding-bottom on
+ * .sidebar-content, this rule still does the right thing because
+ * the last child remains border-less either way. */
+.sidebar-content > .tree-root:last-child {
+  border-bottom: none;
+}
+
 .connection-group .tree-root-header > .connection-dot {
   margin-left: 22px;
 }
