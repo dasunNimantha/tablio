@@ -60,8 +60,40 @@ jobs:
       - name: TypeScript type check
         run: npx tsc --noEmit
 
-      - name: Run tests
-        run: npm run test
+      # Run vitest with v8 coverage. The lcov + json-summary reporters power
+      # the artifact upload below and the PR job-summary block; the html
+      # reporter gives reviewers a browsable report when they download the
+      # artifact locally.
+      - name: Run tests with coverage
+        run: npm run test -- --coverage
+
+      - name: Frontend coverage summary
+        if: always()
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            {
+              echo "## Frontend coverage (vitest / v8)"
+              echo
+              echo "| Metric | Covered | Total | Pct |"
+              echo "| --- | --- | --- | --- |"
+              node -e '
+                const s = require("./coverage/coverage-summary.json").total;
+                for (const k of ["lines","statements","functions","branches"]) {
+                  const m = s[k];
+                  console.log(`| ${k} | ${m.covered} | ${m.total} | ${m.pct.toFixed(2)}% |`);
+                }
+              '
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload frontend coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-frontend
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: ignore
 
   fmt-and-clippy:
     name: Format & Clippy
@@ -89,6 +121,68 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+  # Backend code coverage via cargo-llvm-cov. Scoped to the lib + the SQLite
+  # integration suite (the only one that doesn't need an external service);
+  # the per-engine integration jobs cover the driver-specific paths and
+  # could feed lcov into a merge step in a follow-up. Coverage is a signal,
+  # not a gate — no thresholds today.
+  coverage-backend:
+    name: Backend Coverage
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      # Single coverage run; emit lcov for the artifact, then re-render the
+      # already-collected profraw data as a summary table for the PR job
+      # summary. `report` does not re-execute tests.
+      - name: Run coverage (lib + sqlite)
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml \
+            --lib --test sqlite_integration \
+            --no-report
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml report \
+            --lcov --output-path lcov.info
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo "## Backend coverage (cargo-llvm-cov, lib + sqlite)"
+            echo
+            echo '```'
+            cargo llvm-cov --manifest-path src-tauri/Cargo.toml report \
+              --summary-only 2>/dev/null || echo "(no coverage data collected)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload backend coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-backend
+          path: lcov.info
+          retention-days: 14
+          if-no-files-found: ignore
 
   test-postgres:
     name: Postgres ${{ matrix.pg_version }}

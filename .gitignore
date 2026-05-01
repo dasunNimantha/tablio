@@ -9,6 +9,10 @@ src-tauri/target/
 test-results/
 playwright-report/
 
+# Coverage reports (vitest v8, cargo-llvm-cov)
+coverage/
+lcov.info
+
 # Frontend build output, but keep dist/aur/ and dist/flatpak/
 dist/*
 !dist/aur/
