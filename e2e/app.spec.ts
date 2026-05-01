@@ -59,7 +59,12 @@ test.describe("Connection dialog", () => {
     await dialog.locator("label", { hasText: "Host" }).locator("..").locator("input").fill("localhost");
 
     await page.locator(".btn-test-conn").click();
-    await expect(page.locator(".btn-test-conn")).toContainText("Connected", { timeout: 5000 });
+    // Post-redesign: the action button keeps its label ("Test again")
+    // and a separate `.connection-test-status` chip surfaces success/failure.
+    await expect(page.locator(".connection-test-status--success")).toContainText(
+      "Connected",
+      { timeout: 5000 },
+    );
   });
 
   test("closes on cancel", async ({ page }) => {
