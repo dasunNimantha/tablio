@@ -714,29 +714,52 @@ jobs:
         id: version
         run: echo "version=$(grep '^version' source/src-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
 
-      - name: Download packages from release
+      - name: Wait for current release's package assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TAG="v${VERSION}"
-          echo "Looking for packages in release $TAG..."
+          echo "Waiting for .deb / .rpm assets to appear on $TAG..."
           for i in $(seq 1 30); do
             ASSETS=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' 2>/dev/null || true)
             if echo "$ASSETS" | grep -qE '\.(deb|rpm)$'; then
-              echo "Found package assets:"
+              echo "Found package assets on $TAG:"
               echo "$ASSETS" | grep -E '\.(deb|rpm)$'
               break
             fi
             echo "Waiting for package assets... (attempt $i/30)"
             sleep 30
           done
-          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.deb" --dir gh-pages/apt/pool --clobber
-          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.rpm" --dir gh-pages/rpm/packages --clobber
-          echo "Downloaded APT:"
-          ls -la gh-pages/apt/pool/
-          echo "Downloaded RPM:"
-          ls -la gh-pages/rpm/packages/
+
+      - name: Download packages from every release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # We rewrite metadata to point at GitHub Releases asset URLs, so the
+          # binaries never end up committed to gh-pages — but dpkg-scanpackages
+          # and createrepo_c still need every package locally to compute hashes
+          # and assemble the index. Pull every release's .deb / .rpm into the
+          # scratch dir; tolerate releases without Linux assets (early versions).
+          mkdir -p gh-pages/apt/pool gh-pages/rpm/packages
+          TAGS=$(gh release list --repo "${{ github.repository }}" --limit 200 --json tagName --jq '.[].tagName')
+          if [ -z "$TAGS" ]; then
+            echo "No releases found — nothing to index" >&2
+            exit 1
+          fi
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "::group::Downloading assets for $tag"
+            gh release download "$tag" --repo "${{ github.repository }}" --pattern "*.deb" \
+              --dir gh-pages/apt/pool --clobber 2>&1 || echo "  (no .deb on $tag)"
+            gh release download "$tag" --repo "${{ github.repository }}" --pattern "*.rpm" \
+              --dir gh-pages/rpm/packages --clobber 2>&1 || echo "  (no .rpm on $tag)"
+            echo "::endgroup::"
+          done <<<"$TAGS"
+          echo "APT pool:"
+          ls -la gh-pages/apt/pool/ || true
+          echo "RPM packages:"
+          ls -la gh-pages/rpm/packages/ || true
 
       - name: Import GPG key
         run: |
@@ -755,13 +778,31 @@ jobs:
           gpg --armor --export "$GPG_KEY_ID" > gh-pages/apt/key.gpg
           cp gh-pages/apt/key.gpg gh-pages/rpm/key.gpg
 
-      - name: Generate APT metadata and sign
+      - name: Generate APT metadata, rewrite URLs, and sign
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          REPO_SLUG: ${{ github.repository }}
         run: |
           cd gh-pages/apt
 
+          # Index every .deb that landed in pool/.
           dpkg-scanpackages --multiversion pool > dists/stable/main/binary-amd64/Packages
+
+          # Rewrite each `Filename: pool/Tablio_X.Y.Z_amd64.deb` to point at the
+          # corresponding GitHub Releases asset, so apt fetches binaries from
+          # Releases (no per-release size cap) instead of from this gh-pages
+          # branch. The version is encoded in the filename, so the regex
+          # backreference produces the matching release tag.
+          sed -i -E "s|^Filename: pool/(Tablio_([0-9]+\.[0-9]+\.[0-9]+)_amd64\.deb)\$|Filename: https://github.com/${REPO_SLUG}/releases/download/v\\2/\\1|" \
+            dists/stable/main/binary-amd64/Packages
+
+          # Sanity-check: every Filename must now be an absolute https URL.
+          if grep -E '^Filename: ' dists/stable/main/binary-amd64/Packages | grep -vqE '^Filename: https://'; then
+            echo "::error::Found non-absolute Filename entries after rewrite:"
+            grep -E '^Filename: ' dists/stable/main/binary-amd64/Packages | grep -vE '^Filename: https://' >&2
+            exit 1
+          fi
+
           gzip -k -f dists/stable/main/binary-amd64/Packages
 
           printf '%s\n' \
@@ -774,6 +815,8 @@ jobs:
             "Description: Tablio APT repository" \
             > dists/stable/Release
 
+          # apt-ftparchive hashes the rewritten Packages / Packages.gz files,
+          # so the Release file's checksums automatically pin the new content.
           apt-ftparchive release dists/stable >> dists/stable/Release
 
           echo "$GPG_PASSPHRASE" > /tmp/gpg-pass
@@ -790,18 +833,125 @@ jobs:
           ls -la dists/stable/
           ls -la dists/stable/main/binary-amd64/
 
-      - name: Generate RPM metadata and sign
+      - name: Generate RPM metadata, rewrite URLs, and sign
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          REPO_SLUG: ${{ github.repository }}
         run: |
           cd gh-pages/rpm
-          createrepo_c --update .
 
+          # `--no-database` skips the legacy SQLite copies (primary.sqlite.bz2
+          # etc.). Modern dnf/zypper read primary.xml.gz directly; skipping the
+          # SQLite avoids having to keep a parallel rewriter for it.
+          createrepo_c --no-database --update .
+
+          # Rewrite <location href="packages/Tablio-X.Y.Z-1.x86_64.rpm"/> in
+          # primary.xml.gz to the matching GitHub Releases asset URL, then
+          # rename the file to its new content-addressed name and patch the
+          # <data type="primary"> stanza in repomd.xml so the chain still
+          # validates client-side.
+          python3 - <<'PY'
+          import gzip
+          import hashlib
+          import re
+          import sys
+          from pathlib import Path
+
+          repo_slug = "${{ github.repository }}"
+          repodata = Path("repodata")
+
+          primary_candidates = sorted(repodata.glob("*-primary.xml.gz"))
+          if len(primary_candidates) != 1:
+              sys.exit(f"expected exactly one *-primary.xml.gz, found: {primary_candidates}")
+          old_primary = primary_candidates[0]
+
+          with gzip.open(old_primary, "rb") as f:
+              text = f.read().decode("utf-8")
+
+          location_re = re.compile(
+              r'<location\s+href="packages/(Tablio-(\d+\.\d+\.\d+)-1\.x86_64\.rpm)"\s*/>'
+          )
+
+          rewritten_count = 0
+          def repl(m):
+              global rewritten_count
+              rewritten_count += 1
+              fname, version = m.group(1), m.group(2)
+              return (
+                  f'<location href="https://github.com/{repo_slug}'
+                  f'/releases/download/v{version}/{fname}"/>'
+              )
+
+          new_text = location_re.sub(repl, text)
+          if rewritten_count == 0:
+              sys.exit("no <location> entries rewritten — regex / filenames out of sync")
+          if location_re.search(new_text):
+              sys.exit("relative <location> still present after rewrite")
+          print(f"Rewrote {rewritten_count} <location> entries to absolute URLs")
+
+          new_open = new_text.encode("utf-8")
+          open_size = len(new_open)
+          open_sha = hashlib.sha256(new_open).hexdigest()
+
+          new_gz_path = Path("/tmp/primary.xml.gz")
+          # mtime=0 keeps the gzip header deterministic across re-runs.
+          with gzip.GzipFile(filename=str(new_gz_path), mode="wb", compresslevel=9, mtime=0) as gz:
+              gz.write(new_open)
+          new_gz_bytes = new_gz_path.read_bytes()
+          closed_size = len(new_gz_bytes)
+          closed_sha = hashlib.sha256(new_gz_bytes).hexdigest()
+
+          new_primary_name = f"{closed_sha}-primary.xml.gz"
+          new_primary_path = repodata / new_primary_name
+          old_primary.unlink()
+          new_gz_path.rename(new_primary_path)
+
+          repomd_path = repodata / "repomd.xml"
+          repomd = repomd_path.read_text()
+
+          def update_primary_block(m):
+              block = m.group(0)
+              block = re.sub(
+                  r'<checksum type="sha256">[^<]+</checksum>',
+                  f'<checksum type="sha256">{closed_sha}</checksum>',
+                  block, count=1)
+              block = re.sub(
+                  r'<open-checksum type="sha256">[^<]+</open-checksum>',
+                  f'<open-checksum type="sha256">{open_sha}</open-checksum>',
+                  block, count=1)
+              block = re.sub(
+                  r'<location href="repodata/[^"]+"/>',
+                  f'<location href="repodata/{new_primary_name}"/>',
+                  block, count=1)
+              block = re.sub(
+                  r'<size>\d+</size>',
+                  f'<size>{closed_size}</size>',
+                  block, count=1)
+              block = re.sub(
+                  r'<open-size>\d+</open-size>',
+                  f'<open-size>{open_size}</open-size>',
+                  block, count=1)
+              return block
+
+          new_repomd, n = re.subn(
+              r'<data type="primary">.*?</data>',
+              update_primary_block,
+              repomd,
+              count=1,
+              flags=re.DOTALL,
+          )
+          if n != 1:
+              sys.exit("could not locate <data type=\"primary\"> in repomd.xml")
+          repomd_path.write_text(new_repomd)
+          print(f"Patched repomd.xml -> primary={new_primary_name} size={closed_size} open_size={open_size}")
+          PY
+
+          # Re-sign repomd.xml AFTER the in-place patch above, otherwise the
+          # detached signature would be over the pre-rewrite bytes.
           echo "$GPG_PASSPHRASE" > /tmp/gpg-pass
-
+          rm -f repodata/repomd.xml.asc
           gpg --batch --yes --pinentry-mode loopback --passphrase-file /tmp/gpg-pass \
             --default-key "$GPG_KEY_ID" --detach-sign --armor repodata/repomd.xml
-
           rm -f /tmp/gpg-pass
 
           printf '%s\n' \
@@ -821,6 +971,15 @@ jobs:
         run: |
           cp source/install.sh gh-pages/install.sh
           chmod 0644 gh-pages/install.sh
+
+      - name: Drop binaries from gh-pages working tree
+        run: |
+          # The metadata above points at GitHub Releases for the actual .deb /
+          # .rpm bytes, so we never commit the binaries themselves. The first
+          # run after this change ships records the deletion of every
+          # historical apt/pool and rpm/packages file in one commit; later
+          # runs leave nothing to remove.
+          rm -rf gh-pages/apt/pool gh-pages/rpm/packages
 
       - name: Deploy to GitHub Pages
         run: |
