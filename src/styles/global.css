@@ -168,18 +168,25 @@ body,
   -webkit-user-select: none;
 }
 
-/* Chromium / WebView2 (Windows) doesn't expand a zoomed element's own
-   layout box, and `vh` units stay anchored to the unscaled viewport,
-   so `zoom < 100%` leaves an empty band along the bottom and right.
-   We zoom <body> there and compensate body's layout box by `1/zoom`,
-   so visual scaling brings rendered body back to exactly the viewport.
-   WebKit2GTK (Linux) auto-compensates when zoom is on <html>, so we
-   leave it alone there — applying these rules to WebKit would actually
-   break the layout. App.tsx adds `.zoom-compensated` to body on
-   Chromium only. */
+/* Chromium / WebView2 (Windows) doesn't grow body's own layout box
+   when `zoom` is applied to it — only its descendants get scaled,
+   `vh` units stay anchored to the unscaled viewport, and `100%` on
+   body keeps resolving against html's CSS dimensions. So `zoom < 100%`
+   leaves an empty band along the bottom and right (body painted
+   smaller than viewport).
+   At `zoom < 100%` we expand body by `1/zoom` so the painted box
+   covers the viewport. At `zoom >= 100%` we *don't* shrink body
+   (which would re-introduce the same band on the other side); we
+   pin it to 100% and let zoomed-up descendants overflow body's box,
+   which is clipped by `body { overflow: hidden }`. `max()` covers
+   both regimes in one rule.
+   WebKit2GTK (Linux) auto-compensates when zoom is on <html>, so
+   we leave it alone there — applying these rules to WebKit would
+   actually break the layout. App.tsx adds `.zoom-compensated` to
+   body on Chromium only. */
 body.zoom-compensated {
-  width: calc(100% / var(--app-zoom, 1));
-  height: calc(100% / var(--app-zoom, 1));
+  width: max(100%, calc(100% / var(--app-zoom, 1)));
+  height: max(100%, calc(100% / var(--app-zoom, 1)));
 }
 
 ::-webkit-scrollbar {
