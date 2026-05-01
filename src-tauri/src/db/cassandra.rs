@@ -921,6 +921,7 @@ impl DatabaseDriver for CassandraDriver {
     async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
         Ok(QueryStatsResponse {
             available: false,
+            kind: QueryStatsKind::EngineUnsupported,
             message: Some("Query statistics are not available for Cassandra/ScyllaDB".to_string()),
             entries: vec![],
         })

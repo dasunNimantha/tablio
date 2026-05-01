@@ -511,6 +511,7 @@ impl DatabaseDriver for CockroachdbDriver {
     async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
         Ok(QueryStatsResponse {
             available: false,
+            kind: QueryStatsKind::EngineUnsupported,
             message: Some(
                 "Query statistics (pg_stat_statements) are not available in CockroachDB. \
                 Use the CockroachDB Admin UI for query insights."

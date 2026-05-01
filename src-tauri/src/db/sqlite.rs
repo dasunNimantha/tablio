@@ -851,6 +851,7 @@ impl DatabaseDriver for SqliteDriver {
     async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
         Ok(QueryStatsResponse {
             available: false,
+            kind: QueryStatsKind::EngineUnsupported,
             message: Some("Query statistics are not supported for SQLite.".to_string()),
             entries: vec![],
         })

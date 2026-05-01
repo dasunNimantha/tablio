@@ -338,10 +338,79 @@ impl DatabaseDriver for TidbDriver {
     }
 
     async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
+        // TiDB exposes per-query digests via `INFORMATION_SCHEMA.STATEMENTS_SUMMARY`,
+        // gated on `tidb_enable_stmt_summary` (ON by default in 4.0+ but
+        // operators sometimes flip it off to save memory).
+        let enabled: Option<String> = sqlx::query_scalar("SELECT @@tidb_enable_stmt_summary")
+            .fetch_optional(&self.pool)
+            .await?;
+        let on = enabled
+            .as_deref()
+            .map(|s| {
+                let t = s.trim();
+                t == "1" || t.eq_ignore_ascii_case("ON")
+            })
+            .unwrap_or(false);
+        if !on {
+            return Ok(QueryStatsResponse {
+                available: false,
+                kind: QueryStatsKind::TidbStmtSummaryDisabled,
+                message: Some(
+                    "Statement summary is disabled. To enable query statistics:\n\n\
+                     SET GLOBAL tidb_enable_stmt_summary = ON;\n\n\
+                     Then re-run the queries you want to inspect — TiDB only \
+                     records statements after the variable flips on."
+                        .to_string(),
+                ),
+                entries: vec![],
+            });
+        }
+
+        // `*_LATENCY` columns are nanoseconds; divide by 1_000_000.0 to land
+        // in milliseconds (forced float division). `DIGEST` is a 64-char hex
+        // string and won't fit in an `i64`, so `queryid` stays None and the
+        // UI keys off the digest text.
+        let sql = "SELECT \
+                COALESCE(DIGEST_TEXT, '')                       AS query, \
+                COALESCE(SCHEMA_NAME, '')                       AS user, \
+                CAST(EXEC_COUNT AS SIGNED)                      AS calls, \
+                (SUM_LATENCY / 1000000.0)                       AS total_exec_time_ms, \
+                (AVG_LATENCY / 1000000.0)                       AS mean_exec_time_ms, \
+                (MIN_LATENCY / 1000000.0)                       AS min_exec_time_ms, \
+                (MAX_LATENCY / 1000000.0)                       AS max_exec_time_ms, \
+                CAST(SUM_AFFECTED_ROWS AS SIGNED)               AS rows_affected \
+            FROM INFORMATION_SCHEMA.STATEMENTS_SUMMARY \
+            WHERE DIGEST_TEXT IS NOT NULL \
+            ORDER BY SUM_LATENCY DESC \
+            LIMIT 200";
+
+        let rows = sqlx::query(sql).fetch_all(&self.pool).await?;
+
+        let entries = rows
+            .iter()
+            .map(|r| QueryStatEntry {
+                query: r.try_get::<String, _>("query").unwrap_or_default(),
+                queryid: None,
+                user: r.try_get::<String, _>("user").unwrap_or_default(),
+                calls: r.try_get::<i64, _>("calls").unwrap_or(0),
+                total_exec_time_ms: r.try_get::<f64, _>("total_exec_time_ms").unwrap_or(0.0),
+                mean_exec_time_ms: r.try_get::<f64, _>("mean_exec_time_ms").unwrap_or(0.0),
+                min_exec_time_ms: r.try_get::<f64, _>("min_exec_time_ms").unwrap_or(0.0),
+                max_exec_time_ms: r.try_get::<f64, _>("max_exec_time_ms").unwrap_or(0.0),
+                rows: r.try_get::<i64, _>("rows_affected").unwrap_or(0),
+                shared_blks_hit: 0,
+                shared_blks_read: 0,
+                cache_hit_ratio: 0.0,
+                total_plan_time_ms: None,
+                mean_plan_time_ms: None,
+            })
+            .collect();
+
         Ok(QueryStatsResponse {
-            available: false,
-            message: Some("Query statistics are not available in TiDB. Use the TiDB Dashboard for query insights.".to_string()),
-            entries: vec![],
+            available: true,
+            kind: QueryStatsKind::Available,
+            message: None,
+            entries,
         })
     }
 }

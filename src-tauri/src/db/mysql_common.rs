@@ -1052,11 +1052,89 @@ pub async fn my_get_server_config(pool: &MySqlPool) -> Result<Vec<ServerConfigEn
         .collect())
 }
 
-pub async fn my_get_query_stats(_pool: &MySqlPool) -> Result<QueryStatsResponse> {
+/// Per-query stats sourced from the always-on (since MySQL 5.6 / MariaDB 10.0)
+/// `performance_schema.events_statements_summary_by_digest` view.
+///
+/// Failure modes the UI cares about (all surface as
+/// `kind = MysqlPerfSchemaDisabled`):
+/// - performance_schema is compiled-out or `performance_schema = OFF`,
+/// - the `*_summary_by_digest` instrument / consumer is disabled,
+/// - the connecting user lacks `SELECT` on `performance_schema`.
+///
+/// Time fields in `performance_schema` are reported in **picoseconds**, so we
+/// divide by `1_000_000_000` to land in milliseconds for the shared
+/// `QueryStatEntry` shape.
+///
+/// MySQL has no shared-buffer / cache-hit equivalent, so `shared_blks_*` and
+/// `cache_hit_ratio` are reported as honest zeros rather than fabricated
+/// numbers. Plan times are `None` for the same reason. The 32-byte hex
+/// `DIGEST` column doesn't fit in `i64`, so `queryid` stays `None` — the
+/// `query` text is the de-facto identifier in the UI.
+pub async fn my_get_query_stats(pool: &MySqlPool) -> Result<QueryStatsResponse> {
+    if let Err(e) =
+        sqlx::query("SELECT 1 FROM performance_schema.events_statements_summary_by_digest LIMIT 1")
+            .fetch_optional(pool)
+            .await
+    {
+        return Ok(QueryStatsResponse {
+            available: false,
+            kind: QueryStatsKind::MysqlPerfSchemaDisabled,
+            message: Some(format!(
+                "Performance Schema digest table is not readable: {e}.\n\n\
+                 To enable query statistics:\n\n\
+                 1. In your my.cnf / my.ini under [mysqld]:\n   performance_schema = ON\n\n\
+                 2. Restart the server.\n\n\
+                 3. Grant the connecting user read access:\n   \
+                 GRANT SELECT ON performance_schema.* TO '<user>'@'<host>';"
+            )),
+            entries: vec![],
+        });
+    }
+
+    // `1000000000.0` (vs `1000000000`) forces float division — without it MySQL
+    // truncates to integer milliseconds and we lose sub-ms precision on cheap
+    // queries.
+    let sql = "SELECT \
+            COALESCE(DIGEST_TEXT, '')                            AS query, \
+            COALESCE(SCHEMA_NAME, '')                            AS user, \
+            CAST(COUNT_STAR AS SIGNED)                           AS calls, \
+            (SUM_TIMER_WAIT / 1000000000.0)                      AS total_exec_time_ms, \
+            (AVG_TIMER_WAIT / 1000000000.0)                      AS mean_exec_time_ms, \
+            (MIN_TIMER_WAIT / 1000000000.0)                      AS min_exec_time_ms, \
+            (MAX_TIMER_WAIT / 1000000000.0)                      AS max_exec_time_ms, \
+            CAST(SUM_ROWS_SENT AS SIGNED)                        AS rows_sent \
+         FROM performance_schema.events_statements_summary_by_digest \
+         WHERE DIGEST_TEXT IS NOT NULL \
+         ORDER BY SUM_TIMER_WAIT DESC \
+         LIMIT 200";
+
+    let rows = sqlx::query(sql).fetch_all(pool).await?;
+
+    let entries = rows
+        .iter()
+        .map(|r| QueryStatEntry {
+            query: r.try_get::<String, _>("query").unwrap_or_default(),
+            queryid: None,
+            user: r.try_get::<String, _>("user").unwrap_or_default(),
+            calls: r.try_get::<i64, _>("calls").unwrap_or(0),
+            total_exec_time_ms: r.try_get::<f64, _>("total_exec_time_ms").unwrap_or(0.0),
+            mean_exec_time_ms: r.try_get::<f64, _>("mean_exec_time_ms").unwrap_or(0.0),
+            min_exec_time_ms: r.try_get::<f64, _>("min_exec_time_ms").unwrap_or(0.0),
+            max_exec_time_ms: r.try_get::<f64, _>("max_exec_time_ms").unwrap_or(0.0),
+            rows: r.try_get::<i64, _>("rows_sent").unwrap_or(0),
+            shared_blks_hit: 0,
+            shared_blks_read: 0,
+            cache_hit_ratio: 0.0,
+            total_plan_time_ms: None,
+            mean_plan_time_ms: None,
+        })
+        .collect();
+
     Ok(QueryStatsResponse {
-        available: false,
-        message: Some("Query statistics are not supported for MySQL. Use performance_schema for similar functionality.".to_string()),
-        entries: vec![],
+        available: true,
+        kind: QueryStatsKind::Available,
+        message: None,
+        entries,
     })
 }
 
