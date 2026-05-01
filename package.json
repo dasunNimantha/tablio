@@ -42,5 +42,9 @@
     "typescript": "^6.0.2",
     "vite": "^8.0.6",
     "vitest": "^4.1.3"
-  }
+  },
+  "overrides": {
+    "dompurify": "^3.4.0"
+  },
+  "//overrides": "dompurify is forced to >=3.4.0 transitively (monaco-editor pins 3.2.7) to close 8 medium GHSA alerts (XSS / prototype-pollution / sanitizer bypass family). DOMPurify.sanitize() is API-stable across 3.x, so monaco's usage is unaffected."
 }

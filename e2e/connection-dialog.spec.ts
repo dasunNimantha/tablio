@@ -211,10 +211,11 @@ test.describe("Connection dialog — SSH tunnel section", () => {
 
   test("SSH section is visible for postgres and hidden for sqlite", async ({ page }) => {
     await openDialogSection(page, "SSH Tunnel");
+    // Post-redesign: the SSH enable toggle lives in the section heading
+    // (`SectionCard`'s `action` slot), labelled "Enabled"/"Disabled" rather
+    // than "Use SSH tunneling".
     await expect(
-      page.locator(".ssh-tunnel-section .security-toggle__label", {
-        hasText: "Use SSH tunneling",
-      }),
+      page.locator(".connection-section-heading__action .security-toggle"),
     ).toBeVisible();
 
     await openDialogSection(page, "General");
@@ -226,10 +227,9 @@ test.describe("Connection dialog — SSH tunnel section", () => {
 
   test("toggling SSH on reveals tunnel host / port / username inputs", async ({ page }) => {
     await openDialogSection(page, "SSH Tunnel");
+    // SSH enable toggle now lives in the section heading's action slot.
     const tunnelToggle = page
-      .locator(".ssh-tunnel-section .security-toggle")
-      .first()
-      .locator(".security-toggle__input");
+      .locator(".connection-section-heading__action .security-toggle__input");
     await expect(
       page.locator(".ssh-tunnel-section label", { hasText: "Tunnel host" }),
     ).not.toBeVisible();
@@ -237,8 +237,10 @@ test.describe("Connection dialog — SSH tunnel section", () => {
     await expect(
       page.locator(".ssh-tunnel-section label", { hasText: "Tunnel host" }),
     ).toBeVisible();
+    // The Tunnel-port input was relabelled to just "Port" during the
+    // 86b384c connection-dialog tightening pass.
     await expect(
-      page.locator(".ssh-tunnel-section label", { hasText: "Tunnel port" }),
+      page.locator(".ssh-tunnel-section label", { hasText: /^Port$/ }),
     ).toBeVisible();
     await expect(
       page.locator(".ssh-tunnel-section label", { hasText: "SSH username" }),
@@ -248,9 +250,7 @@ test.describe("Connection dialog — SSH tunnel section", () => {
   test("auth toggle swaps Password input <-> Identity file picker", async ({ page }) => {
     await openDialogSection(page, "SSH Tunnel");
     const tunnelToggle = page
-      .locator(".ssh-tunnel-section .security-toggle")
-      .first()
-      .locator(".security-toggle__input");
+      .locator(".connection-section-heading__action .security-toggle__input");
     await tunnelToggle.check({ force: true });
 
     // Default = Password: password field visible, identity file hidden.
@@ -275,30 +275,30 @@ test.describe("Connection dialog — SSH tunnel section", () => {
     await expect(
       page.locator(".ssh-tunnel-section label", { hasText: /^Password$/ }),
     ).not.toBeVisible();
-    // Prompt-for-passphrase nested toggle becomes available.
+    // The prompt-for-passphrase nested toggle was relabelled
+    // "Ask when connecting" during the SSH section tightening pass.
     await expect(
       page.locator(".ssh-tunnel-section .security-toggle__label", {
-        hasText: "Prompt for passphrase?",
+        hasText: "Ask when connecting",
       }),
     ).toBeVisible();
   });
 
-  test("'Prompt for passphrase' hides the passphrase input", async ({ page }) => {
+  test("'Ask when connecting' hides the passphrase input", async ({ page }) => {
     await openDialogSection(page, "SSH Tunnel");
     const tunnelToggle = page
-      .locator(".ssh-tunnel-section .security-toggle")
-      .first()
-      .locator(".security-toggle__input");
+      .locator(".connection-section-heading__action .security-toggle__input");
     await tunnelToggle.check({ force: true });
     await page
       .locator(".ssh-auth-toggle__btn", { hasText: "Identity file" })
       .click();
     const promptToggle = page
-      .locator(".ssh-tunnel-section .security-toggle--nested .security-toggle__input");
+      .locator(".ssh-tunnel-section .security-toggle--inline .security-toggle__input");
     await promptToggle.check({ force: true });
-    await expect(
-      page.locator(".ssh-tunnel-section label", { hasText: "Key passphrase" }),
-    ).not.toBeVisible();
+    // The "Key passphrase" label intentionally stays put (it shares the
+    // row with the toggle); the input itself is what disappears, since
+    // the passphrase will be prompted at connect time instead of stored.
+    await expect(page.locator("#ssh-password")).not.toBeVisible();
   });
 
   test("validation flags missing tunnel host / username on test", async ({ page }) => {
@@ -311,9 +311,7 @@ test.describe("Connection dialog — SSH tunnel section", () => {
 
     await openDialogSection(page, "SSH Tunnel");
     const tunnelToggle = page
-      .locator(".ssh-tunnel-section .security-toggle")
-      .first()
-      .locator(".security-toggle__input");
+      .locator(".connection-section-heading__action .security-toggle__input");
     await tunnelToggle.check({ force: true });
     await page.locator(".btn-test-conn").click();
 
@@ -346,9 +344,7 @@ test.describe("Connection dialog — SSH tunnel section", () => {
 
     await openDialogSection(page, "SSH Tunnel");
     const tunnelToggle = page
-      .locator(".ssh-tunnel-section .security-toggle")
-      .first()
-      .locator(".security-toggle__input");
+      .locator(".connection-section-heading__action .security-toggle__input");
     await tunnelToggle.check({ force: true });
     const warning = page.locator(".ssh-tunnel-warning", {
       hasText: "SSL hostname verification will fail",
@@ -370,9 +366,7 @@ test.describe("Connection dialog — SSH tunnel section", () => {
     await page.locator(".db-dropdown-item", { hasText: "Cassandra" }).click();
     await openDialogSection(page, "SSH Tunnel");
     const tunnelToggle = page
-      .locator(".ssh-tunnel-section .security-toggle")
-      .first()
-      .locator(".security-toggle__input");
+      .locator(".connection-section-heading__action .security-toggle__input");
     await tunnelToggle.check({ force: true });
     await expect(
       page.locator(".ssh-tunnel-warning", {
@@ -384,9 +378,7 @@ test.describe("Connection dialog — SSH tunnel section", () => {
   test("warns when an identity-file passphrase will be persisted to disk", async ({ page }) => {
     await openDialogSection(page, "SSH Tunnel");
     const tunnelToggle = page
-      .locator(".ssh-tunnel-section .security-toggle")
-      .first()
-      .locator(".security-toggle__input");
+      .locator(".connection-section-heading__action .security-toggle__input");
     await tunnelToggle.check({ force: true });
     await page
       .locator(".ssh-auth-toggle__btn", { hasText: "Identity file" })
@@ -398,17 +390,16 @@ test.describe("Connection dialog — SSH tunnel section", () => {
     });
     await expect(warning).not.toBeVisible();
 
-    await page
-      .locator(".ssh-tunnel-section label", { hasText: "Key passphrase" })
-      .locator("..")
-      .locator("input")
-      .fill("hunter2");
+    // The passphrase input shares its row with the "Ask when connecting"
+    // toggle, so target it by its stable `id="ssh-password"` rather than
+    // walking up from the label (which would hit the toggle's checkbox).
+    await page.locator("#ssh-password").fill("hunter2");
     await expect(warning).toBeVisible();
 
-    // Enabling the prompt-for-passphrase toggle replaces the persisted
+    // Enabling the "Ask when connecting" toggle replaces the persisted
     // passphrase with a runtime prompt, so the notice must disappear.
     const promptToggle = page
-      .locator(".ssh-tunnel-section .security-toggle--nested .security-toggle__input");
+      .locator(".ssh-tunnel-section .security-toggle--inline .security-toggle__input");
     await promptToggle.check({ force: true });
     await expect(warning).not.toBeVisible();
   });
