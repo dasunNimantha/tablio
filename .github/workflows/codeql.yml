@@ -65,10 +65,13 @@ jobs:
       - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
-          # `default` query suite matches what default setup was using;
-          # `security-extended` is also available but produces noisier
-          # findings that we don't currently triage.
-          queries: default
+          # No `queries:` input — that's the right way to ask for the
+          # action's standard suite per language (which is what default
+          # setup was running). The literal string `default` is not a
+          # valid pack reference in codeql-action v4 and made every run
+          # fail with: "A fatal error occurred: Query pack `default`
+          # cannot be found." If we ever want broader coverage, set
+          # `queries: security-extended` here.
 
       - uses: github/codeql-action/autobuild@v4
 
