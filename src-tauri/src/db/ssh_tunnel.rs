@@ -247,8 +247,25 @@ pub async fn open(config: &ConnectionConfig) -> Result<SshTunnel> {
     let handler = KnownHostsHandler::new(known_hosts, config.ssh_host.clone(), config.ssh_port);
     let mismatch_slot = handler.mismatch.clone();
 
+    // Liveness policy:
+    //
+    // * `inactivity_timeout = None` — a quiet but live SQL session must not
+    //   be torn down just because no bytes flowed for a minute. The
+    //   previous `Some(60s)` killed idle pool connections silently.
+    // * `keepalive_interval = 30s` + `keepalive_max = 4` — send an SSH
+    //   keepalive every 30s and close the session if the server fails to
+    //   respond to four in a row (~2 minutes of dead network). This
+    //   mirrors OpenSSH's `ServerAliveInterval=30` / `ServerAliveCountMax=3`
+    //   convention and protects long-lived pools across NAT timeouts and
+    //   bastion-side idle disconnects.
+    //
+    // Auto-reconnect (re-establish the session and replay listeners after
+    // a forced disconnect) is tracked separately; today we tear the
+    // tunnel down and the user reconnects via the UI.
     let ssh_config = Arc::new(client::Config {
-        inactivity_timeout: Some(Duration::from_secs(60)),
+        inactivity_timeout: None,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        keepalive_max: 4,
         ..Default::default()
     });
 
@@ -327,6 +344,7 @@ async fn authenticate(
                 .await
                 .context("SSH public key authentication failed")?
         }
+        SshAuthMethod::Agent => return authenticate_with_agent(session, &user).await,
     };
 
     match auth {
@@ -338,6 +356,99 @@ async fn authenticate(
             remaining_methods
         )),
     }
+}
+
+/// Authenticate via the local ssh-agent.
+///
+/// Tries every identity the agent has loaded, in order, until one succeeds.
+/// Returns a clear error if the agent is unreachable, has no identities
+/// loaded, or the bastion rejects every identity.
+async fn authenticate_with_agent(
+    session: &mut Handle<KnownHostsHandler>,
+    user: &str,
+) -> Result<()> {
+    let mut agent = connect_agent()
+        .await
+        .context("Could not connect to ssh-agent")?;
+
+    let identities = agent
+        .request_identities()
+        .await
+        .context("ssh-agent did not return its identity list")?;
+
+    if identities.is_empty() {
+        return Err(anyhow!(
+            "ssh-agent has no identities loaded. Run `ssh-add <key>` and try again."
+        ));
+    }
+
+    let mut last_failure: Option<String> = None;
+    for key in identities {
+        let res = session
+            .authenticate_publickey_with(user, key.clone(), Some(HashAlg::Sha256), &mut agent)
+            .await;
+        match res {
+            Ok(AuthResult::Success) => return Ok(()),
+            Ok(AuthResult::Failure {
+                remaining_methods, ..
+            }) => {
+                last_failure = Some(format!(
+                    "agent key {} rejected (server still allows: {:?})",
+                    key.fingerprint(HashAlg::Sha256),
+                    remaining_methods
+                ));
+                log::debug!(
+                    "ssh-agent key {} rejected by {}",
+                    key.fingerprint(HashAlg::Sha256),
+                    user
+                );
+            }
+            Err(e) => {
+                last_failure = Some(format!(
+                    "agent key {} signing/auth error: {}",
+                    key.fingerprint(HashAlg::Sha256),
+                    e
+                ));
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "SSH authentication via ssh-agent failed: every loaded identity was rejected. {}",
+        last_failure.unwrap_or_default()
+    ))
+}
+
+/// Connect to the local ssh-agent.
+///
+/// On Linux / macOS this resolves `SSH_AUTH_SOCK`. On Windows it falls
+/// back to Pageant. Returns a friendly error if no agent is reachable so
+/// the UI can suggest enabling an agent / loading a key.
+#[cfg(not(target_os = "windows"))]
+async fn connect_agent() -> Result<russh::keys::agent::client::AgentClient<tokio::net::UnixStream>>
+{
+    if std::env::var_os("SSH_AUTH_SOCK").is_none() {
+        return Err(anyhow!(
+            "SSH_AUTH_SOCK is not set; start ssh-agent (or pick a different authentication method)"
+        ));
+    }
+    russh::keys::agent::client::AgentClient::connect_env()
+        .await
+        .map_err(|e| anyhow!("Failed to talk to ssh-agent at SSH_AUTH_SOCK: {}", e))
+}
+
+#[cfg(target_os = "windows")]
+async fn connect_agent(
+) -> Result<russh::keys::agent::client::AgentClient<tokio::net::windows::named_pipe::NamedPipeClient>>
+{
+    russh::keys::agent::client::AgentClient::connect_pageant()
+        .await
+        .map_err(|e| {
+            anyhow!(
+                "Failed to talk to Pageant: {}. Is Pageant running and a key loaded?",
+                e
+            )
+        })
 }
 
 async fn load_secret_key(path: &str, passphrase: &str) -> Result<russh::keys::PrivateKey> {
@@ -600,6 +711,38 @@ CUrE7QRAvdVpD5e3zKH/MZjilWrMOm6cyI1LKBCssLztPyvOALtroLAPlp7WYWfu\n\
             info.fingerprint
         );
         assert_eq!(info.known_hosts_path, kh.to_string_lossy());
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn agent_auth_reports_missing_auth_sock() {
+        // When `SSH_AUTH_SOCK` is unset on Linux/macOS we must surface a
+        // clear, actionable error rather than letting the russh
+        // connector fail with a cryptic `connection refused`.
+        // We can't mutate process env safely in a multi-threaded test
+        // runner, so call `connect_agent` directly with the env we want.
+        let prev = std::env::var("SSH_AUTH_SOCK").ok();
+        // SAFETY: the `unsafe` here is a quirk of the std API in newer
+        // Rust editions; in-test-only mutation is acceptable because the
+        // scope is tightly controlled and each test asserts and restores.
+        unsafe {
+            std::env::remove_var("SSH_AUTH_SOCK");
+        }
+        let err = connect_agent()
+            .await
+            .err()
+            .expect("missing SSH_AUTH_SOCK must surface an error");
+        assert!(
+            err.to_string().contains("SSH_AUTH_SOCK"),
+            "error should mention SSH_AUTH_SOCK; got {err}"
+        );
+        // Restore the env var so other tests in the same process see the
+        // same shell-inherited state they expect.
+        if let Some(v) = prev {
+            unsafe {
+                std::env::set_var("SSH_AUTH_SOCK", v);
+            }
+        }
     }
 
     #[test]

@@ -286,8 +286,10 @@ export function normalizeConnectionForm(form: ConnectionConfig): ConnectionConfi
     ssh_auth_method: sshEnabled ? sshAuth : "password",
     // Identity-file path only meaningful with identityfile auth.
     ssh_key_path: sshEnabled && sshAuth === "identityfile" ? (form.ssh_key_path ?? "").trim() : "",
-    // Don't persist a passphrase the user opted out of saving.
-    ssh_password: sshEnabled && !promptPassphrase ? form.ssh_password ?? "" : "",
+    // ssh-agent never reads a password / passphrase; clear any stored value
+    // so it isn't accidentally persisted across an auth-method switch.
+    ssh_password:
+      sshEnabled && sshAuth !== "agent" && !promptPassphrase ? form.ssh_password ?? "" : "",
     ssh_prompt_passphrase: promptPassphrase,
   };
 }
@@ -334,10 +336,13 @@ export function validateConnectionForm(
       if (!normalized.ssh_key_path) {
         errors.ssh_key_path = "Identity file path is required.";
       }
+    } else if (normalized.ssh_auth_method === "agent") {
+      // ssh-agent supplies the credential at connect time; nothing to
+      // validate here. The backend surfaces a clear error if SSH_AUTH_SOCK
+      // is unset or the agent has no identities loaded.
     } else if (!normalized.ssh_password) {
-      // Only require a password when the user opted to store it.
-      // (For identity-file auth, ssh_password is the *passphrase* and may
-      // be intentionally empty for unencrypted keys.)
+      // Password auth: require a password (only when the user opted to
+      // store it).
       errors.ssh_password = "SSH password is required.";
     }
   }
@@ -580,6 +585,11 @@ function SshTunnelSection({
   const authMethod: SshAuthMethod = form.ssh_auth_method ?? "password";
   const promptPassphrase = !!form.ssh_prompt_passphrase;
   const isIdentity = authMethod === "identityfile";
+  const isAgent = authMethod === "agent";
+  // The password / passphrase field is only relevant for password auth and
+  // for identity-file auth where the user opted to persist the passphrase.
+  // ssh-agent never reads either, so the field is hidden entirely.
+  const showPasswordField = !isAgent && !(isIdentity && promptPassphrase);
 
   const browseForKey = async () => {
     try {
@@ -591,6 +601,83 @@ function SshTunnelSection({
       if (typeof path === "string" && path) updateField("ssh_key_path", path);
     } catch {
       // User cancelled — no-op.
+    }
+  };
+
+  // ssh-config import: read ~/.ssh/config and fill the SSH section from
+  // the matching Host block. Empty fields are filled; non-empty fields
+  // are left alone so the user's typed values aren't clobbered. We also
+  // surface a status message so the user can tell whether anything was
+  // applied.
+  const [sshConfigStatus, setSshConfigStatus] = useState<{
+    kind: "info" | "success" | "warning" | "error";
+    message: string;
+  } | null>(null);
+  const applySshConfig = async () => {
+    const alias = (form.ssh_host ?? "").trim();
+    if (!alias) {
+      setSshConfigStatus({
+        kind: "info",
+        message: "Type the alias from your ~/.ssh/config first, then press Apply.",
+      });
+      return;
+    }
+    try {
+      const resolved = await api.sshConfigLookup(alias);
+      if (!resolved) {
+        setSshConfigStatus({
+          kind: "info",
+          message: `No matching Host block for "${alias}" in ~/.ssh/config.`,
+        });
+        return;
+      }
+      const filled: string[] = [];
+      if (resolved.hostName && !form.ssh_host?.trim().includes(".")) {
+        // Replace the alias with the resolved hostname so subsequent
+        // connect attempts hit the real bastion. Tracked so the status
+        // message can mention what changed.
+        updateField("ssh_host", resolved.hostName);
+        filled.push("host");
+      }
+      if (
+        resolved.port &&
+        (form.ssh_port == null || form.ssh_port === 22 || form.ssh_port === 0)
+      ) {
+        updateField("ssh_port", resolved.port);
+        filled.push("port");
+      }
+      if (resolved.user && !(form.ssh_user ?? "").trim()) {
+        updateField("ssh_user", resolved.user);
+        filled.push("user");
+      }
+      if (resolved.identityFile && !(form.ssh_key_path ?? "").trim()) {
+        updateField("ssh_key_path", resolved.identityFile);
+        if (form.ssh_auth_method !== "identityfile") {
+          updateField("ssh_auth_method", "identityfile");
+        }
+        filled.push("identity file");
+      }
+      if (filled.length === 0) {
+        setSshConfigStatus({
+          kind: "info",
+          message: `Matched ${resolved.alias}, but every relevant field already has a value.`,
+        });
+      } else if (resolved.hasUnsupportedDirectives) {
+        setSshConfigStatus({
+          kind: "warning",
+          message: `Applied ${filled.join(", ")}. Note: this Host block uses ProxyJump / Match / Include — Tablio does not follow those, so the auto-fill may be incomplete.`,
+        });
+      } else {
+        setSshConfigStatus({
+          kind: "success",
+          message: `Applied ${filled.join(", ")} from ${resolved.alias}.`,
+        });
+      }
+    } catch (err) {
+      setSshConfigStatus({
+        kind: "error",
+        message: `Could not read ~/.ssh/config: ${err instanceof Error ? err.message : String(err)}`,
+      });
     }
   };
 
@@ -665,15 +752,34 @@ function SshTunnelSection({
               className={`form-group flex-1${getFieldError("ssh_host") ? " form-group--error" : ""}`}
             >
               <label>Tunnel host</label>
-              <input
-                value={form.ssh_host ?? ""}
-                onChange={(e) => updateField("ssh_host", e.target.value)}
-                onBlur={() => touchField("ssh_host")}
-                placeholder="bastion.example.com"
-                aria-invalid={!!getFieldError("ssh_host")}
-              />
+              <div className="ssh-file-picker">
+                <input
+                  value={form.ssh_host ?? ""}
+                  onChange={(e) => updateField("ssh_host", e.target.value)}
+                  onBlur={() => touchField("ssh_host")}
+                  placeholder="bastion.example.com (or an alias from ~/.ssh/config)"
+                  aria-invalid={!!getFieldError("ssh_host")}
+                />
+                <button
+                  type="button"
+                  className="btn-secondary ssh-file-picker__browse"
+                  onClick={applySshConfig}
+                  title="Look up the current host in ~/.ssh/config and fill empty fields"
+                >
+                  Apply ~/.ssh/config
+                </button>
+              </div>
               {getFieldError("ssh_host") && (
                 <div className="field-error">{getFieldError("ssh_host")}</div>
+              )}
+              {sshConfigStatus && (
+                <div
+                  className={`form-field-description ssh-config-status ssh-config-status--${sshConfigStatus.kind}`}
+                  role={sshConfigStatus.kind === "error" ? "alert" : undefined}
+                  style={{ marginTop: 6 }}
+                >
+                  {sshConfigStatus.message}
+                </div>
               )}
             </div>
             <div
@@ -720,8 +826,8 @@ function SshTunnelSection({
               <button
                 type="button"
                 role="radio"
-                aria-checked={!isIdentity}
-                className={`ssh-auth-toggle__btn${!isIdentity ? " ssh-auth-toggle__btn--active" : ""}`}
+                aria-checked={authMethod === "password"}
+                className={`ssh-auth-toggle__btn${authMethod === "password" ? " ssh-auth-toggle__btn--active" : ""}`}
                 onClick={() => updateField("ssh_auth_method", "password")}
               >
                 <Lock size={14} />
@@ -737,7 +843,24 @@ function SshTunnelSection({
                 <Key size={14} />
                 Identity file
               </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={isAgent}
+                className={`ssh-auth-toggle__btn${isAgent ? " ssh-auth-toggle__btn--active" : ""}`}
+                onClick={() => updateField("ssh_auth_method", "agent")}
+                title="Use the local ssh-agent (SSH_AUTH_SOCK on Linux/macOS, Pageant on Windows)"
+              >
+                <Key size={14} />
+                ssh-agent
+              </button>
             </div>
+            {isAgent && (
+              <div className="form-field-description" style={{ marginTop: 6 }}>
+                Tablio will offer every identity loaded in your local ssh-agent
+                until one is accepted. No passphrase is read or stored.
+              </div>
+            )}
           </div>
 
           {isIdentity && (
@@ -769,7 +892,7 @@ function SshTunnelSection({
             </div>
           )}
 
-          {!(isIdentity && promptPassphrase) && (
+          {showPasswordField && (
             <div className="form-row">
               <div
                 className={`form-group flex-1${getFieldError("ssh_password") ? " form-group--error" : ""}`}

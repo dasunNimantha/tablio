@@ -59,6 +59,12 @@ pub enum SshAuthMethod {
     Password,
     #[serde(rename = "identityfile", alias = "identity_file")]
     IdentityFile,
+    /// Use the local ssh-agent (Linux / macOS read `SSH_AUTH_SOCK`,
+    /// Windows tries Pageant). The agent is asked for the list of loaded
+    /// identities and each one is offered to the bastion in turn. No
+    /// passphrase is ever read by Tablio in this mode.
+    #[serde(rename = "agent")]
+    Agent,
 }
 
 fn default_ssh_port() -> u16 {
@@ -693,6 +699,10 @@ mod tests {
             serde_json::to_string(&SshAuthMethod::IdentityFile).unwrap(),
             r#""identityfile""#
         );
+        assert_eq!(
+            serde_json::to_string(&SshAuthMethod::Agent).unwrap(),
+            r#""agent""#
+        );
     }
 
     #[test]
@@ -705,6 +715,12 @@ mod tests {
     fn ssh_auth_method_accepts_legacy_identity_file_alias() {
         let m: SshAuthMethod = serde_json::from_str(r#""identity_file""#).unwrap();
         assert_eq!(m, SshAuthMethod::IdentityFile);
+    }
+
+    #[test]
+    fn ssh_auth_method_deserializes_agent() {
+        let m: SshAuthMethod = serde_json::from_str(r#""agent""#).unwrap();
+        assert_eq!(m, SshAuthMethod::Agent);
     }
 
     #[test]

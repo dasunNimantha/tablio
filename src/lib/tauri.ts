@@ -140,6 +140,23 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       );
       return undefined as T;
     }
+    case "ssh_config_lookup": {
+      const alias = (args?.alias as string)?.trim() ?? "";
+      // Mock a single well-known alias so the connection dialog's
+      // "Apply ~/.ssh/config" button can be exercised in mock mode and
+      // E2E without a real config file.
+      if (alias === "prod-bastion") {
+        return {
+          alias: "prod-bastion",
+          hostName: "10.0.0.5",
+          port: 2222,
+          user: "admin",
+          identityFile: "/home/u/.ssh/prod_ed25519",
+          hasUnsupportedDirectives: false,
+        } as T;
+      }
+      return null as T;
+    }
     default:
       throw new Error(`Unknown mock command: ${cmd}`);
   }
@@ -173,7 +190,7 @@ export interface ConnectionConfig {
   ssh_prompt_passphrase?: boolean;
 }
 
-export type SshAuthMethod = "password" | "identityfile";
+export type SshAuthMethod = "password" | "identityfile" | "agent";
 
 export interface DatabaseInfo {
   name: string;
@@ -847,4 +864,28 @@ export const api = {
     fingerprint: string,
   ): Promise<void> =>
     invoke("forget_known_host", { host, port, fingerprint }),
+
+  /**
+   * Look up `alias` in the user's `~/.ssh/config` and return the
+   * resolved HostName/Port/User/IdentityFile (each optional). Returns
+   * `null` when the file doesn't exist or no Host block matches.
+   *
+   * Backed by `ssh_config_lookup` in `commands::ssh_config` — the
+   * parser supports glob patterns and negated patterns but does *not*
+   * follow ProxyJump / Match / Include directives. The resolved entry
+   * carries `hasUnsupportedDirectives = true` when the matching block
+   * referenced one of those, so the dialog can warn the user.
+   */
+  sshConfigLookup: (alias: string): Promise<ResolvedSshHost | null> =>
+    invoke("ssh_config_lookup", { alias }),
 };
+
+/** Resolved subset of a `~/.ssh/config` entry returned by [`api.sshConfigLookup`]. */
+export interface ResolvedSshHost {
+  alias: string;
+  hostName?: string | null;
+  port?: number | null;
+  user?: string | null;
+  identityFile?: string | null;
+  hasUnsupportedDirectives: boolean;
+}

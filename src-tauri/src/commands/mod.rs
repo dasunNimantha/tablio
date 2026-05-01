@@ -7,4 +7,5 @@ pub mod query;
 pub mod roles;
 pub mod saved_queries;
 pub mod schema;
+pub mod ssh_config;
 pub mod system;

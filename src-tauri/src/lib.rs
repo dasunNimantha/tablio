@@ -12,6 +12,7 @@ use commands::query::*;
 use commands::roles::*;
 use commands::saved_queries::*;
 use commands::schema::*;
+use commands::ssh_config::*;
 use commands::system::*;
 use db::pool::PoolManager;
 use std::sync::Arc;
@@ -74,6 +75,7 @@ pub fn run() {
             dump_and_restore,
             list_known_hosts,
             forget_known_host,
+            ssh_config_lookup,
             get_app_resource_usage,
         ])
         .run(tauri::generate_context!())
