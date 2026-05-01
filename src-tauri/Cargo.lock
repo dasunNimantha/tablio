@@ -5851,6 +5851,7 @@ dependencies = [
  "chrono",
  "dirs",
  "log",
+ "pageant",
  "proptest",
  "russh",
  "rust_decimal",

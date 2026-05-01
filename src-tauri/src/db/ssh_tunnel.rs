@@ -444,8 +444,7 @@ async fn connect_agent() -> Result<russh::keys::agent::client::AgentClient<tokio
 }
 
 #[cfg(target_os = "windows")]
-async fn connect_agent(
-) -> Result<russh::keys::agent::client::AgentClient<tokio::net::windows::named_pipe::NamedPipeClient>>
+async fn connect_agent() -> Result<russh::keys::agent::client::AgentClient<pageant::PageantStream>>
 {
     russh::keys::agent::client::AgentClient::connect_pageant()
         .await
