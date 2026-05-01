@@ -34,7 +34,7 @@ Most database GUIs are either bloated, expensive, or locked to a single engine. 
 ## Features
 
 ### Multi-Database Support
-Connect to PostgreSQL, MySQL, MariaDB, SQL Server, CockroachDB, TiDB, SQLite, and Cassandra/ScyllaDB from one application. Each database has a dedicated driver with engine-specific optimizations. Save, organize, and color-code your connections. Supports SSL/TLS with configurable certificate validation and SSH tunnels.
+Connect to PostgreSQL, MySQL, MariaDB, SQL Server, CockroachDB, TiDB, SQLite, and Cassandra/ScyllaDB from one application. Each database has a dedicated driver with engine-specific optimizations. Save, organize, and color-code your connections. Supports SSL/TLS with configurable certificate validation and SSH tunnels with password / identity-file / agent auth, host-key fingerprint confirmation, persistent known-hosts, and `~/.ssh/config` import.
 
 ### Data Browsing and Inline Editing
 - Paginated, sortable, and filterable data grid powered by AG Grid
@@ -60,13 +60,13 @@ Connect to PostgreSQL, MySQL, MariaDB, SQL Server, CockroachDB, TiDB, SQLite, an
 
 ### Server Administration
 - Live activity dashboard with active sessions, locks, and server configuration
-- Query performance statistics from pg_stat_statements
+- Per-query performance statistics for PostgreSQL (`pg_stat_statements`), MySQL/MariaDB (`performance_schema`), SQL Server (`sys.dm_exec_query_stats`), and TiDB (`INFORMATION_SCHEMA.STATEMENTS_SUMMARY`), with engine-specific setup guidance when the source view is unavailable
 - Role management: create, alter, and drop database roles
 - Application resource usage in the status bar
 
 ### Data Import and Export
-- Export to CSV, JSON, or SQL INSERT statements
-- Import data from files
+- Export to CSV, JSON, SQL INSERT statements, or Excel (`.xlsx`) with native type fidelity (numbers, booleans, and ISO-8601 datetimes round-trip)
+- Import from CSV and Excel (`.xlsx`, `.xls`) with multi-sheet picker, per-column type inference, and column mapping
 - Backup and restore databases with cross-connection support
 - Uses native tools (pg_dump, mysqldump) when available
 
@@ -206,7 +206,7 @@ tablio/
 
 | Layer | Stack |
 |-------|-------|
-| Backend | Rust, sqlx, tiberius, scylla, Tokio, Tauri 2 |
+| Backend | Rust, sqlx, tiberius, scylla, russh, rust_xlsxwriter, calamine, Tokio, Tauri 2 |
 | Frontend | React, TypeScript, AG Grid, Monaco Editor, Chart.js |
 | State | Zustand with localStorage persistence |
 | IPC | Tauri invoke commands |
