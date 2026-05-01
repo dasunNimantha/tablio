@@ -383,9 +383,15 @@ async fn authenticate_with_agent(
     }
 
     let mut last_failure: Option<String> = None;
-    for key in identities {
+    for identity in identities {
+        // russh 0.60 wraps each agent identity in an `AgentIdentity`
+        // enum (PublicKey vs Certificate). The auth API still wants a
+        // bare `ssh_key::PublicKey`, so unwrap the Cow here. For
+        // certificates this clones the cert's underlying public key,
+        // which is what we want — the agent itself signs with the cert.
+        let pk = identity.public_key().into_owned();
         let res = session
-            .authenticate_publickey_with(user, key.clone(), Some(HashAlg::Sha256), &mut agent)
+            .authenticate_publickey_with(user, pk.clone(), Some(HashAlg::Sha256), &mut agent)
             .await;
         match res {
             Ok(AuthResult::Success) => return Ok(()),
@@ -394,19 +400,19 @@ async fn authenticate_with_agent(
             }) => {
                 last_failure = Some(format!(
                     "agent key {} rejected (server still allows: {:?})",
-                    key.fingerprint(HashAlg::Sha256),
+                    pk.fingerprint(HashAlg::Sha256),
                     remaining_methods
                 ));
                 log::debug!(
                     "ssh-agent key {} rejected by {}",
-                    key.fingerprint(HashAlg::Sha256),
+                    pk.fingerprint(HashAlg::Sha256),
                     user
                 );
             }
             Err(e) => {
                 last_failure = Some(format!(
                     "agent key {} signing/auth error: {}",
-                    key.fingerprint(HashAlg::Sha256),
+                    pk.fingerprint(HashAlg::Sha256),
                     e
                 ));
             }
