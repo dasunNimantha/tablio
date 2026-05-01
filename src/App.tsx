@@ -151,6 +151,10 @@ export default function App() {
       /Windows/i.test(navigator.userAgent) || /^Win/i.test(navigator.platform);
     return isWindows ? 100 : 110;
   });
+  // Mirror of `zoom` for the keyboard / wheel handler closures so they
+  // can read the current value without us having to call `setZoom` from
+  // inside an updater function (impure under React StrictMode).
+  const zoomRef = useRef(zoom);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem("tablio-sidebar-width");
     return saved ? parseInt(saved, 10) : 270;
@@ -257,6 +261,7 @@ export default function App() {
 
   const applyZoom = useCallback((level: number) => {
     const clamped = Math.min(200, Math.max(50, Math.round(level)));
+    zoomRef.current = clamped;
     setZoom(clamped);
     localStorage.setItem("tablio-zoom", String(clamped));
     // Cross-webview zoom: see src/lib/zoom.ts for the full rationale.
@@ -282,32 +287,35 @@ export default function App() {
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
+      // Ignore OS key auto-repeat — holding the key down would otherwise
+      // fire our zoom step every ~33ms, causing surprise multi-step jumps.
+      if (e.repeat) return;
       if (e.key === "?" && e.ctrlKey) {
         e.preventDefault();
         setShowShortcuts((prev) => !prev);
+        return;
       }
       if (e.ctrlKey && (e.key === "=" || e.key === "+")) {
         e.preventDefault();
-        setZoom((prev) => { const n = Math.min(200, prev + 10); applyZoom(n); return n; });
+        applyZoom(zoomRef.current + 10);
+        return;
       }
       if (e.ctrlKey && e.key === "-") {
         e.preventDefault();
-        setZoom((prev) => { const n = Math.max(50, prev - 10); applyZoom(n); return n; });
+        applyZoom(zoomRef.current - 10);
+        return;
       }
       if (e.ctrlKey && e.key === "0") {
         e.preventDefault();
         applyZoom(110);
+        return;
       }
     };
     const handleWheel = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
-      setZoom((prev) => {
-        const delta = e.deltaY > 0 ? -10 : 10;
-        const n = Math.min(200, Math.max(50, prev + delta));
-        applyZoom(n);
-        return n;
-      });
+      const delta = e.deltaY > 0 ? -10 : 10;
+      applyZoom(zoomRef.current + delta);
     };
     window.addEventListener("keydown", handleKey);
     window.addEventListener("wheel", handleWheel, { passive: false });
