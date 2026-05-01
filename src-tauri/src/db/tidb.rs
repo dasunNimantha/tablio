@@ -341,9 +341,15 @@ impl DatabaseDriver for TidbDriver {
         // TiDB exposes per-query digests via `INFORMATION_SCHEMA.STATEMENTS_SUMMARY`,
         // gated on `tidb_enable_stmt_summary` (ON by default in 4.0+ but
         // operators sometimes flip it off to save memory).
-        let enabled: Option<String> = sqlx::query_scalar("SELECT @@tidb_enable_stmt_summary")
-            .fetch_optional(&self.pool)
-            .await?;
+        //
+        // The session variable comes back as BIGINT (0/1), not a string —
+        // forcing a CAST to CHAR sidesteps both the BIGINT-decode surprise
+        // we tripped on in CI and any future TiDB build that flips the
+        // representation back to "ON"/"OFF".
+        let enabled: Option<String> =
+            sqlx::query_scalar("SELECT CAST(@@tidb_enable_stmt_summary AS CHAR)")
+                .fetch_optional(&self.pool)
+                .await?;
         let on = enabled
             .as_deref()
             .map(|s| {
