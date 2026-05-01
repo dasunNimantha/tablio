@@ -45,6 +45,14 @@ log = "0.4"
 rust_xlsxwriter = { version = "0.94", features = ["chrono"] }
 calamine = { version = "0.34", features = ["dates"] }
 
+# Windows-only direct dep so we can name `pageant::PageantStream` in the
+# return type of `connect_agent()` on Windows. russh 0.60 already pulls
+# pageant 0.2 in transitively (its `AgentClient::connect_pageant()` returns
+# `AgentClient<pageant::PageantStream>`), but doesn't re-export the type, so
+# we declare it explicitly here.
+[target.'cfg(windows)'.dependencies]
+pageant = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 which = "8"
