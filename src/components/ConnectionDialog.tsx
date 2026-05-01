@@ -150,6 +150,41 @@ function getFirstInvalidSection(
   return sections.find((section) => getSectionErrorCount(section.id, errors) > 0)?.id ?? null;
 }
 
+function formatConnectionTestError(error: unknown, form: ConnectionConfig): string {
+  const raw = String(error).trim();
+  const dbInfo = DB_TYPES.find((d) => d.value === form.db_type);
+  const dbLabel = dbInfo?.label ?? "database";
+  const user = form.user?.trim();
+
+  const passwordFailure = raw.match(/password authentication failed for user "([^"]+)"/i);
+  if (passwordFailure) {
+    return `Database authentication failed for ${dbLabel} user "${passwordFailure[1]}". Check the username and password in Authentication.`;
+  }
+
+  if (/error returned from database:/i.test(raw)) {
+    return `Database connection failed: ${raw.replace(/error returned from database:\s*/i, "")}`;
+  }
+
+  if (/ssh|known host|host key|agent|identity file|bastion/i.test(raw)) {
+    return `SSH tunnel failed${form.ssh_host ? ` for ${form.ssh_host}` : ""}: ${raw}`;
+  }
+
+  if (user && /authentication|login/i.test(raw)) {
+    return `Connection failed for ${dbLabel} user "${user}": ${raw}`;
+  }
+
+  return raw || "Connection test failed.";
+}
+
+function looksLikeSshConfigAlias(value: string): boolean {
+  const host = value.trim();
+  if (!host) return false;
+  if (host === "localhost") return false;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return false;
+  if (/^[\da-f:]+$/i.test(host) && host.includes(":")) return false;
+  return !host.includes(".");
+}
+
 function FormField({
   label,
   error,
@@ -182,16 +217,23 @@ function SectionCard({
   title,
   description,
   children,
+  action,
 }: {
   title: string;
   description: string;
   children: ReactNode;
+  /** Optional control rendered on the right of the heading row, e.g.
+   *  the SSH section's enable toggle. */
+  action?: ReactNode;
 }) {
   return (
     <section className="connection-section-card" aria-label={title}>
       <div className="connection-section-heading">
-        <h3>{title}</h3>
-        <p>{description}</p>
+        <div className="connection-section-heading__text">
+          <h3>{title}</h3>
+          <p>{description}</p>
+        </div>
+        {action && <div className="connection-section-heading__action">{action}</div>}
       </div>
       <div className="connection-section-fields">{children}</div>
     </section>
@@ -586,6 +628,8 @@ function SshTunnelSection({
   const promptPassphrase = !!form.ssh_prompt_passphrase;
   const isIdentity = authMethod === "identityfile";
   const isAgent = authMethod === "agent";
+  const sshHost = (form.ssh_host ?? "").trim();
+  const shouldSuggestSshConfig = looksLikeSshConfigAlias(sshHost);
   // The password / passphrase field is only relevant for password auth and
   // for identity-file auth where the user opted to persist the passphrase.
   // ssh-agent never reads either, so the field is hidden entirely.
@@ -618,7 +662,7 @@ function SshTunnelSection({
     if (!alias) {
       setSshConfigStatus({
         kind: "info",
-        message: "Type the alias from your ~/.ssh/config first, then press Apply.",
+        message: "Type a Host alias from ~/.ssh/config first, then import it.",
       });
       return;
     }
@@ -627,7 +671,9 @@ function SshTunnelSection({
       if (!resolved) {
         setSshConfigStatus({
           kind: "info",
-          message: `No matching Host block for "${alias}" in ~/.ssh/config.`,
+          message: looksLikeSshConfigAlias(alias)
+            ? `No matching Host block for "${alias}" in ~/.ssh/config.`
+            : `"${alias}" looks like a direct host, so no SSH config entry was applied.`,
         });
         return;
       }
@@ -699,25 +745,21 @@ function SshTunnelSection({
     !!form.ssh_password &&
     form.ssh_password.length > 0;
 
-  return (
-    <div className="security-options ssh-tunnel-section" aria-label="SSH tunnel">
-      <label className={`security-toggle${enabled ? " security-toggle--active" : ""}`}>
-        <span className="security-toggle__control">
-          <input
-            className="security-toggle__input"
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => updateField("ssh_enabled", e.target.checked)}
-          />
-          <span className="security-toggle__slider" aria-hidden="true" />
-        </span>
-        <span className="security-toggle__text">
-          <span className="security-toggle__label">Use SSH tunneling</span>
-        </span>
-      </label>
+  if (!enabled) {
+    // The enable toggle now lives in the section heading, so when the
+    // tunnel is off the body is intentionally a brief explainer rather
+    // than an empty card.
+    return (
+      <div className="connection-section-note">
+        Tunnel database traffic through an SSH bastion. Turn on the toggle in
+        the heading to configure the host, port and authentication.
+      </div>
+    );
+  }
 
-      {enabled && (
-        <div className="ssh-tunnel-fields">
+  return (
+    <div className="ssh-tunnel-section ssh-tunnel-section--enabled" aria-label="SSH tunnel">
+      <div className="ssh-tunnel-fields ssh-tunnel-fields--flush">
           {tlsVerifyConflict && (
             <div className="ssh-tunnel-warning" role="alert">
               <AlertCircle size={14} />
@@ -766,7 +808,7 @@ function SshTunnelSection({
                   onClick={applySshConfig}
                   title="Look up the current host in ~/.ssh/config and fill empty fields"
                 >
-                  Apply ~/.ssh/config
+                  Import config
                 </button>
               </div>
               {getFieldError("ssh_host") && (
@@ -781,12 +823,17 @@ function SshTunnelSection({
                   {sshConfigStatus.message}
                 </div>
               )}
+              {!sshConfigStatus && shouldSuggestSshConfig && (
+                <div className="form-field-description ssh-config-hint">
+                  Looks like an SSH config alias. Import config can fill host, user, port and identity file.
+                </div>
+              )}
             </div>
             <div
               className={`form-group${getFieldError("ssh_port") ? " form-group--error" : ""}`}
-              style={{ width: 100 }}
+              style={{ width: 112 }}
             >
-              <label>Tunnel port</label>
+              <label>Port</label>
               <input
                 type="number"
                 value={form.ssh_port ?? 22}
@@ -802,9 +849,12 @@ function SshTunnelSection({
             </div>
           </div>
 
-          <div className="form-row">
+          {/* Username and auth method share a row: usernames are short and
+             the auth toggle is `fit-content`, so this puts both fields on
+             a single line and avoids the previous “tall thin column”. */}
+          <div className="form-row form-row--ssh-identity">
             <div
-              className={`form-group flex-1${getFieldError("ssh_user") ? " form-group--error" : ""}`}
+              className={`form-group${getFieldError("ssh_user") ? " form-group--error" : ""}`}
             >
               <label>SSH username</label>
               <input
@@ -818,50 +868,51 @@ function SshTunnelSection({
                 <div className="field-error">{getFieldError("ssh_user")}</div>
               )}
             </div>
+
+            <div className="form-group">
+              <label>Authentication</label>
+              <div className="ssh-auth-toggle" role="radiogroup" aria-label="SSH authentication">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={authMethod === "password"}
+                  className={`ssh-auth-toggle__btn${authMethod === "password" ? " ssh-auth-toggle__btn--active" : ""}`}
+                  onClick={() => updateField("ssh_auth_method", "password")}
+                >
+                  <Lock size={14} />
+                  Password
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={isIdentity}
+                  className={`ssh-auth-toggle__btn${isIdentity ? " ssh-auth-toggle__btn--active" : ""}`}
+                  onClick={() => updateField("ssh_auth_method", "identityfile")}
+                >
+                  <Key size={14} />
+                  Identity file
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={isAgent}
+                  className={`ssh-auth-toggle__btn${isAgent ? " ssh-auth-toggle__btn--active" : ""}`}
+                  onClick={() => updateField("ssh_auth_method", "agent")}
+                  title="Use the local ssh-agent (SSH_AUTH_SOCK on Linux/macOS, Pageant on Windows)"
+                >
+                  <Key size={14} />
+                  SSH agent
+                </button>
+              </div>
+            </div>
           </div>
 
-          <div className="form-group">
-            <label>Authentication</label>
-            <div className="ssh-auth-toggle" role="radiogroup" aria-label="SSH authentication">
-              <button
-                type="button"
-                role="radio"
-                aria-checked={authMethod === "password"}
-                className={`ssh-auth-toggle__btn${authMethod === "password" ? " ssh-auth-toggle__btn--active" : ""}`}
-                onClick={() => updateField("ssh_auth_method", "password")}
-              >
-                <Lock size={14} />
-                Password
-              </button>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={isIdentity}
-                className={`ssh-auth-toggle__btn${isIdentity ? " ssh-auth-toggle__btn--active" : ""}`}
-                onClick={() => updateField("ssh_auth_method", "identityfile")}
-              >
-                <Key size={14} />
-                Identity file
-              </button>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={isAgent}
-                className={`ssh-auth-toggle__btn${isAgent ? " ssh-auth-toggle__btn--active" : ""}`}
-                onClick={() => updateField("ssh_auth_method", "agent")}
-                title="Use the local ssh-agent (SSH_AUTH_SOCK on Linux/macOS, Pageant on Windows)"
-              >
-                <Key size={14} />
-                ssh-agent
-              </button>
+          {isAgent && (
+            <div className="form-field-description">
+              Tablio will offer every identity loaded in your local ssh-agent
+              until one is accepted. No passphrase is read or stored.
             </div>
-            {isAgent && (
-              <div className="form-field-description" style={{ marginTop: 6 }}>
-                Tablio will offer every identity loaded in your local ssh-agent
-                until one is accepted. No passphrase is read or stored.
-              </div>
-            )}
-          </div>
+          )}
 
           {isIdentity && (
             <div className="form-row">
@@ -892,13 +943,41 @@ function SshTunnelSection({
             </div>
           )}
 
-          {showPasswordField && (
-            <div className="form-row">
-              <div
-                className={`form-group flex-1${getFieldError("ssh_password") ? " form-group--error" : ""}`}
-              >
-                <label>{isIdentity ? "Key passphrase" : "Password"}</label>
+          {(showPasswordField || isIdentity) && (
+            <div
+              className={`form-group${getFieldError("ssh_password") ? " form-group--error" : ""}`}
+            >
+              {/* For identity-file auth the passphrase label shares its
+                 row with the "Ask when connecting" toggle so we don't
+                 burn an extra row of vertical space on a single check. */}
+              <div className="ssh-passphrase-header">
+                <label htmlFor="ssh-password">
+                  {isIdentity ? "Key passphrase" : "Password"}
+                </label>
+                {isIdentity && (
+                  <label
+                    className={`security-toggle security-toggle--inline${
+                      promptPassphrase ? " security-toggle--active" : ""
+                    }`}
+                  >
+                    <span className="security-toggle__control">
+                      <input
+                        className="security-toggle__input"
+                        type="checkbox"
+                        checked={promptPassphrase}
+                        onChange={(e) => updateField("ssh_prompt_passphrase", e.target.checked)}
+                      />
+                      <span className="security-toggle__slider" aria-hidden="true" />
+                    </span>
+                    <span className="security-toggle__text">
+                      <span className="security-toggle__label">Ask when connecting</span>
+                    </span>
+                  </label>
+                )}
+              </div>
+              {showPasswordField && (
                 <input
+                  id="ssh-password"
                   type="password"
                   value={form.ssh_password ?? ""}
                   onChange={(e) => updateField("ssh_password", e.target.value)}
@@ -906,10 +985,10 @@ function SshTunnelSection({
                   placeholder={isIdentity ? "(leave blank if key is unencrypted)" : ""}
                   aria-invalid={!!getFieldError("ssh_password")}
                 />
-                {getFieldError("ssh_password") && (
-                  <div className="field-error">{getFieldError("ssh_password")}</div>
-                )}
-              </div>
+              )}
+              {showPasswordField && getFieldError("ssh_password") && (
+                <div className="field-error">{getFieldError("ssh_password")}</div>
+              )}
             </div>
           )}
 
@@ -923,35 +1002,12 @@ function SshTunnelSection({
                 <strong>Passphrase will be saved to disk.</strong>
                 <span>
                   Tablio stores connection details in plain text. Enable
-                  <em> Prompt for passphrase?</em> below to be asked at
-                  connect time instead.
+                  <em> Ask when connecting</em> to avoid saving it.
                 </span>
               </div>
             </div>
           )}
-
-          {isIdentity && (
-            <label
-              className={`security-toggle security-toggle--nested${
-                promptPassphrase ? " security-toggle--active" : ""
-              }`}
-            >
-              <span className="security-toggle__control">
-                <input
-                  className="security-toggle__input"
-                  type="checkbox"
-                  checked={promptPassphrase}
-                  onChange={(e) => updateField("ssh_prompt_passphrase", e.target.checked)}
-                />
-                <span className="security-toggle__slider" aria-hidden="true" />
-              </span>
-              <span className="security-toggle__text">
-                <span className="security-toggle__label">Prompt for passphrase?</span>
-              </span>
-            </label>
-          )}
-        </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -1107,7 +1163,7 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
       setTestResult("success");
     } catch (e) {
       setTestResult("error");
-      setTestError(String(e));
+      setTestError(formatConnectionTestError(e, normalized));
     } finally {
       testingRef.current = false;
       setTesting(false);
@@ -1155,6 +1211,30 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
             <SectionCard
               title={activeSectionMeta.label}
               description={activeSectionMeta.description}
+              action={
+                activeSection === "ssh" && !isSqlite ? (
+                  <label
+                    className={`security-toggle${
+                      form.ssh_enabled ? " security-toggle--active" : ""
+                    }`}
+                  >
+                    <span className="security-toggle__control">
+                      <input
+                        className="security-toggle__input"
+                        type="checkbox"
+                        checked={!!form.ssh_enabled}
+                        onChange={(e) => updateField("ssh_enabled", e.target.checked)}
+                      />
+                      <span className="security-toggle__slider" aria-hidden="true" />
+                    </span>
+                    <span className="security-toggle__text">
+                      <span className="security-toggle__label">
+                        {form.ssh_enabled ? "Enabled" : "Disabled"}
+                      </span>
+                    </span>
+                  </label>
+                ) : undefined
+              }
             >
               {activeSection === "general" && (
                 <>
@@ -1362,32 +1442,48 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
               )}
             </SectionCard>
 
-            {testError && <div className="connection-form-error">{testError}</div>}
+            {testError && (
+              <div className="connection-form-error" role="alert" aria-live="polite">
+                <AlertCircle size={14} />
+                <span>{testError}</span>
+              </div>
+            )}
           </div>
         </div>
 
         <div className="dialog-footer">
-          <button
-            className={`btn-test-conn ${testing ? "btn-test-conn--testing" : ""} ${!testing && testResult === "success" ? "btn-test-conn--success" : ""} ${!testing && testResult === "error" ? "btn-test-conn--error" : ""}`}
-            onClick={handleTest}
-          >
-            {testing ? (
-              <><Loader2 size={14} className="spin" /> Testing…</>
-            ) : testResult === "success" ? (
-              <><CheckCircle size={14} /> Connected</>
-            ) : testResult === "error" ? (
-              <><XCircle size={14} /> Failed</>
-            ) : (
-              "Test Connection"
+          <div className="dialog-footer-left">
+            <button
+              className={`btn-test-conn ${testing ? "btn-test-conn--testing" : ""}`}
+              onClick={handleTest}
+              disabled={testing}
+            >
+              {testing ? (
+                <><Loader2 size={14} className="spin" /> Testing…</>
+              ) : testResult ? (
+                "Test again"
+              ) : (
+                "Test Connection"
+              )}
+            </button>
+            {testResult === "success" && (
+              <span className="connection-test-status connection-test-status--success" role="status">
+                <CheckCircle size={14} /> Connected
+              </span>
             )}
-          </button>
+            {testResult === "error" && (
+              <span className="connection-test-status connection-test-status--error" role="status">
+                <XCircle size={14} /> Failed
+              </span>
+            )}
+          </div>
           <div className="dialog-footer-right">
             <button className="btn-secondary" onClick={onClose}>
               Cancel
             </button>
             <button className="btn-primary" onClick={handleSave} disabled={saving}>
               {saving ? <Loader2 size={14} className="spin" /> : null}
-              {isEdit ? "Save Changes" : "Save"}
+              {testResult === "error" ? "Save Anyway" : isEdit ? "Save Changes" : "Save"}
             </button>
           </div>
         </div>

@@ -6,7 +6,7 @@ import "./PassphrasePrompt.css";
 
 /**
  * Modal that appears when a connection requires its SSH key passphrase
- * at connect time (because the user enabled "Prompt for passphrase?" on
+ * at connect time (because the user enabled "Ask when connecting" on
  * the connection's SSH section). Subscribes to the connection store and
  * resolves the pending request when the user submits or cancels.
  *

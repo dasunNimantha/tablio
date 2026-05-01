@@ -23,7 +23,11 @@
 .connection-dialog {
   width: min(840px, calc(100vw - 32px));
   min-width: min(760px, calc(100vw - 32px));
-  max-height: min(86vh, 760px);
+  /* Fixed height so the dialog frame doesn't jump as the user moves
+     between sections or toggles SSH options. Sized to fit the tallest
+     section (SSH with identity file) without leaving large empty space
+     below; inner content scrolls when it overflows on small viewports. */
+  height: min(82vh, 640px);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -55,7 +59,7 @@
 
 .connection-dialog-body {
   flex: 1;
-  min-height: 480px;
+  min-height: 0;
   display: grid;
   grid-template-columns: 206px minmax(0, 1fr);
   gap: 0;
@@ -149,11 +153,16 @@
 
 .connection-dialog-content {
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   padding: 22px 24px;
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.connection-dialog-nav {
+  min-height: 0;
 }
 
 .connection-section-card {
@@ -169,10 +178,22 @@
 
 .connection-section-heading {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
   padding-bottom: 14px;
   border-bottom: 1px solid var(--border);
+}
+
+.connection-section-heading__text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.connection-section-heading__action {
+  flex-shrink: 0;
 }
 
 .connection-section-heading h3 {
@@ -268,6 +289,17 @@
   flex-shrink: 0;
 }
 
+.connection-dialog .dialog-footer {
+  justify-content: space-between;
+}
+
+.dialog-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
 .dialog-footer-right {
   display: flex;
   gap: 10px;
@@ -296,6 +328,11 @@
   background: var(--bg-active);
 }
 
+.btn-test-conn:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
 .btn-test-conn--testing {
   background: var(--bg-elevated);
   color: var(--text-muted);
@@ -303,24 +340,28 @@
   cursor: default;
 }
 
-.btn-test-conn--success {
+.connection-test-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.connection-test-status--success {
   background: rgba(22, 163, 74, 0.12);
   color: var(--success);
-  border-color: rgba(22, 163, 74, 0.4);
+  border: 1px solid rgba(22, 163, 74, 0.35);
 }
 
-.btn-test-conn--success:hover {
-  background: rgba(22, 163, 74, 0.18);
-}
-
-.btn-test-conn--error {
+.connection-test-status--error {
   background: rgba(239, 68, 68, 0.12);
   color: var(--error);
-  border-color: rgba(239, 68, 68, 0.4);
-}
-
-.btn-test-conn--error:hover {
-  background: rgba(239, 68, 68, 0.18);
+  border: 1px solid rgba(239, 68, 68, 0.35);
 }
 
 
@@ -336,6 +377,13 @@
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
+}
+
+.connection-dialog .form-group label {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .form-group input,
@@ -669,6 +717,10 @@
 }
 
 .connection-form-error {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  gap: 8px;
+  align-items: flex-start;
   padding: 10px 12px;
   border-radius: var(--radius-md);
   border: 1px solid rgba(239, 68, 68, 0.18);
@@ -676,6 +728,11 @@
   color: #ffb4b4;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.connection-form-error svg {
+  margin-top: 2px;
+  flex-shrink: 0;
 }
 
 
@@ -727,9 +784,16 @@
 .ssh-tunnel-fields {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   padding-left: 36px;
   /* Align with the toggle's text column above. */
+}
+
+/* Used when the enable toggle has been lifted out of the section body
+   and into the heading: there's no toggle above to align to, so drop
+   the indent. */
+.ssh-tunnel-fields--flush {
+  padding-left: 0;
 }
 
 .ssh-tunnel-warning {
@@ -813,6 +877,12 @@
   color: var(--text-primary);
 }
 
+.ssh-auth-toggle__btn:focus-visible,
+.ssh-file-picker__browse:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .ssh-auth-toggle__btn--active {
   color: var(--accent);
   background: var(--accent-muted);
@@ -831,6 +901,45 @@
 .ssh-file-picker__browse {
   flex-shrink: 0;
   white-space: nowrap;
+}
+
+.ssh-config-hint {
+  margin-top: 6px;
+}
+
+/* SSH username + auth method share a row via grid so they stay paired
+   even at narrow dialog widths (flex-wrap would push the auth toggle
+   onto its own line and waste vertical space). The auth column sizes
+   to its content; the username column flexes. */
+.form-row--ssh-identity {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px 16px;
+}
+
+@media (max-width: 600px) {
+  .form-row--ssh-identity {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Header row that pairs the passphrase label with the "Ask when
+   connecting" toggle so they share one line instead of stacking. */
+.ssh-passphrase-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 22px;
+}
+
+.ssh-passphrase-header > label {
+  margin: 0;
+}
+
+.security-toggle--inline {
+  margin: 0;
 }
 
 .group-input-wrapper {
@@ -917,6 +1026,20 @@
 
   .connection-dialog-content {
     padding: 16px;
+  }
+
+  .dialog-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dialog-footer-left,
+  .dialog-footer-right {
+    width: 100%;
+  }
+
+  .dialog-footer-right > button {
+    flex: 1;
   }
 
   .form-row {
