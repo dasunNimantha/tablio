@@ -800,7 +800,7 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     const e = event.event as MouseEvent;
     if (!e) return;
     e.preventDefault();
-    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    const z = parseFloat(document.body.style.zoom || "100") / 100;
     setRowContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx });
   }, []);
 
@@ -1348,7 +1348,7 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
           style={{ left: rowContextMenu.x, top: rowContextMenu.y }}
           ref={(el) => {
             if (!el) return;
-            const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+            const z = parseFloat(document.body.style.zoom || "100") / 100;
             const cssVh = window.innerHeight / z;
             const cssVw = window.innerWidth / z;
             if (rowContextMenu.y + el.offsetHeight > cssVh) {

@@ -822,7 +822,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   const handleContextMenu = (e: React.MouseEvent, node: TreeNode) => {
     e.preventDefault();
     e.stopPropagation();
-    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    const z = parseFloat(document.body.style.zoom || "100") / 100;
     setContextMenu({ x: e.clientX / z, y: e.clientY / z, node });
   };
 
@@ -1233,7 +1233,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           style={{ left: contextMenu.x, top: contextMenu.y }}
           ref={(el) => {
             if (!el) return;
-            const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+            const z = parseFloat(document.body.style.zoom || "100") / 100;
             const cssVh = window.innerHeight / z;
             const cssVw = window.innerWidth / z;
             if (contextMenu.y + el.offsetHeight > cssVh) {
@@ -1646,7 +1646,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                       onClick={() => !isRenaming && toggleGroup(groupName)}
                       onContextMenu={(e) => {
                         e.preventDefault();
-                        const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+                        const z = parseFloat(document.body.style.zoom || "100") / 100;
                         setGroupContextMenu({ x: e.clientX / z, y: e.clientY / z, group: groupName });
                       }}
                     >
@@ -1692,7 +1692,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                   style={{ left: groupContextMenu.x, top: groupContextMenu.y }}
                   ref={(el) => {
                     if (!el) return;
-                    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+                    const z = parseFloat(document.body.style.zoom || "100") / 100;
                     const cssVh = window.innerHeight / z;
                     const cssVw = window.innerWidth / z;
                     if (groupContextMenu.y + el.offsetHeight > cssVh) {

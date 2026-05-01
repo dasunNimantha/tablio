@@ -258,16 +258,23 @@ export default function App() {
     const clamped = Math.min(200, Math.max(50, Math.round(level)));
     setZoom(clamped);
     localStorage.setItem("tablio-zoom", String(clamped));
-    document.documentElement.style.zoom = `${clamped}%`;
-    document.documentElement.style.setProperty("--app-zoom", String(clamped / 100));
+    // Apply zoom on <body> rather than <html>. Chromium/WebView2 (Windows)
+    // shrinks the rendered children visually under `zoom` but doesn't
+    // expand the element's layout box, leaving an empty band when zoom
+    // drops below 100%. By zooming body and compensating its width/height
+    // to `calc(100% / var(--app-zoom))` in global.css, the layout box
+    // grows by 1/zoom, then visual scaling brings it back to exactly the
+    // viewport — no empty space on either webview.
+    document.body.style.zoom = `${clamped}%`;
+    document.body.style.setProperty("--app-zoom", String(clamped / 100));
     setShowZoom(true);
     if (zoomTimerRef.current) clearTimeout(zoomTimerRef.current);
     zoomTimerRef.current = setTimeout(() => setShowZoom(false), 1500);
   }, []);
 
   useEffect(() => {
-    document.documentElement.style.zoom = `${zoom}%`;
-    document.documentElement.style.setProperty("--app-zoom", String(zoom / 100));
+    document.body.style.zoom = `${zoom}%`;
+    document.body.style.setProperty("--app-zoom", String(zoom / 100));
   }, []);
 
   useEffect(() => {

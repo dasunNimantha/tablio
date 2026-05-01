@@ -711,7 +711,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
     const e = event.event as MouseEvent;
     if (!e) return;
     e.preventDefault();
-    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    const z = parseFloat(document.body.style.zoom || "100") / 100;
     setContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx });
   }, []);
 
@@ -940,7 +940,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
           style={{ left: contextMenu.x, top: contextMenu.y }}
           ref={(el) => {
             if (!el) return;
-            const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+            const z = parseFloat(document.body.style.zoom || "100") / 100;
             const cssVh = window.innerHeight / z;
             const cssVw = window.innerWidth / z;
             if (contextMenu.y + el.offsetHeight > cssVh) {

@@ -580,7 +580,7 @@ export function QueryConsole({ connectionId, database }: Props) {
     const container = consoleRef.current;
     if (!container) return;
     const totalH = container.getBoundingClientRect().height;
-    const zoom = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    const zoom = parseFloat(document.body.style.zoom || "100") / 100;
 
     const onMove = (ev: MouseEvent) => {
       if (!draggingRef.current) return;

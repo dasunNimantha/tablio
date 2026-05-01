@@ -168,6 +168,17 @@ body,
   -webkit-user-select: none;
 }
 
+/* Compensate for Chromium / WebView2 (Windows), where `zoom` shrinks
+   the rendered content but doesn't expand the element's layout box —
+   producing an empty band along the bottom and right when zoom drops
+   below 100%. Body's layout grows by 1/zoom, then visual scaling by
+   `zoom` brings it back to exactly the viewport. WebKit2GTK (Linux)
+   already auto-compensates, and at zoom = 1 this is a no-op. */
+body {
+  width: calc(100% / var(--app-zoom, 1));
+  height: calc(100% / var(--app-zoom, 1));
+}
+
 ::-webkit-scrollbar {
   width: 7px;
   height: 7px;
@@ -328,7 +339,10 @@ button {
 .app-root {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  /* `100%` (not `100vh`) so we inherit from the zoom-compensated body.
+     `100vh` resolves against the unscaled viewport on Chromium and
+     would re-introduce the empty band the body compensation removes. */
+  height: 100%;
   overflow: hidden;
 }
 

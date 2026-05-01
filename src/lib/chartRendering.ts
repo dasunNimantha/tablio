@@ -1,9 +1,9 @@
 /**
- * Chart.js draws to canvas. When the app uses CSS `zoom` on `html`, the bitmap is
+ * Chart.js draws to canvas. When the app uses CSS `zoom` on `body`, the bitmap is
  * scaled up without extra backing-store pixels, so axis labels and tooltips look jagged.
  */
 export function getUiZoomFactor(): number {
-  const raw = String(document.documentElement.style.zoom || "").trim().replace("%", "");
+  const raw = String(document.body.style.zoom || "").trim().replace("%", "");
   const z = parseFloat(raw || "100");
   return Number.isFinite(z) && z > 0 ? z / 100 : 1;
 }

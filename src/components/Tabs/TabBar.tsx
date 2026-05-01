@@ -30,7 +30,7 @@ export function TabBar() {
 
   const handleContextMenu = (e: React.MouseEvent, tabId: string) => {
     e.preventDefault();
-    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    const z = parseFloat(document.body.style.zoom || "100") / 100;
     setContextMenu({ x: e.clientX / z, y: e.clientY / z, tabId });
   };
 
@@ -120,7 +120,7 @@ export function TabBar() {
             style={{ left: contextMenu.x, top: contextMenu.y }}
             ref={(el) => {
               if (!el) return;
-              const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+              const z = parseFloat(document.body.style.zoom || "100") / 100;
               const cssVh = window.innerHeight / z;
               const cssVw = window.innerWidth / z;
               if (contextMenu.y + el.offsetHeight > cssVh) {
