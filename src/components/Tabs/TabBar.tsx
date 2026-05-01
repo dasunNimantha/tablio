@@ -2,6 +2,7 @@ import { useTabStore } from "../../stores/tabStore";
 import { useShallow } from "zustand/react/shallow";
 import { X, Table2, Terminal, Code, Activity, BarChart3, Shield, TrendingUp } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
+import { readZoomFactor } from "../../lib/zoom";
 import "./Tabs.css";
 
 export function TabBar() {
@@ -30,7 +31,7 @@ export function TabBar() {
 
   const handleContextMenu = (e: React.MouseEvent, tabId: string) => {
     e.preventDefault();
-    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    const z = readZoomFactor();
     setContextMenu({ x: e.clientX / z, y: e.clientY / z, tabId });
   };
 
@@ -120,7 +121,7 @@ export function TabBar() {
             style={{ left: contextMenu.x, top: contextMenu.y }}
             ref={(el) => {
               if (!el) return;
-              const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+              const z = readZoomFactor();
               const cssVh = window.innerHeight / z;
               const cssVw = window.innerWidth / z;
               if (contextMenu.y + el.offsetHeight > cssVh) {

@@ -12,6 +12,7 @@ import {
   ForeignKeyInfo,
   ExplainResult,
 } from "../../lib/tauri";
+import { readZoomFactor } from "../../lib/zoom";
 import { FilterBar } from "./FilterBar";
 import { RowDetailView } from "./RowDetailView";
 import { ExplainView } from "../QueryConsole/ExplainView";
@@ -800,7 +801,7 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     const e = event.event as MouseEvent;
     if (!e) return;
     e.preventDefault();
-    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    const z = readZoomFactor();
     setRowContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx });
   }, []);
 
@@ -1348,7 +1349,7 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
           style={{ left: rowContextMenu.x, top: rowContextMenu.y }}
           ref={(el) => {
             if (!el) return;
-            const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+            const z = readZoomFactor();
             const cssVh = window.innerHeight / z;
             const cssVw = window.innerWidth / z;
             if (rowContextMenu.y + el.offsetHeight > cssVh) {

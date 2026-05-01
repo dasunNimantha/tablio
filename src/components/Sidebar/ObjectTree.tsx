@@ -4,6 +4,7 @@ import { useConnectionStore } from "../../stores/connectionStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { useShallow } from "zustand/react/shallow";
 import { api, DatabaseInfo, SchemaInfo, TableInfo, FunctionInfo } from "../../lib/tauri";
+import { readZoomFactor } from "../../lib/zoom";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { ConnectionDialog } from "../ConnectionDialog";
 import {
@@ -822,7 +823,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   const handleContextMenu = (e: React.MouseEvent, node: TreeNode) => {
     e.preventDefault();
     e.stopPropagation();
-    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    const z = readZoomFactor();
     setContextMenu({ x: e.clientX / z, y: e.clientY / z, node });
   };
 
@@ -1233,7 +1234,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           style={{ left: contextMenu.x, top: contextMenu.y }}
           ref={(el) => {
             if (!el) return;
-            const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+            const z = readZoomFactor();
             const cssVh = window.innerHeight / z;
             const cssVw = window.innerWidth / z;
             if (contextMenu.y + el.offsetHeight > cssVh) {
@@ -1646,7 +1647,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                       onClick={() => !isRenaming && toggleGroup(groupName)}
                       onContextMenu={(e) => {
                         e.preventDefault();
-                        const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+                        const z = readZoomFactor();
                         setGroupContextMenu({ x: e.clientX / z, y: e.clientY / z, group: groupName });
                       }}
                     >
@@ -1692,7 +1693,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                   style={{ left: groupContextMenu.x, top: groupContextMenu.y }}
                   ref={(el) => {
                     if (!el) return;
-                    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+                    const z = readZoomFactor();
                     const cssVh = window.innerHeight / z;
                     const cssVw = window.innerWidth / z;
                     if (groupContextMenu.y + el.offsetHeight > cssVh) {

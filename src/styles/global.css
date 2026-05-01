@@ -168,6 +168,20 @@ body,
   -webkit-user-select: none;
 }
 
+/* Chromium / WebView2 (Windows) doesn't expand a zoomed element's own
+   layout box, and `vh` units stay anchored to the unscaled viewport,
+   so `zoom < 100%` leaves an empty band along the bottom and right.
+   We zoom <body> there and compensate body's layout box by `1/zoom`,
+   so visual scaling brings rendered body back to exactly the viewport.
+   WebKit2GTK (Linux) auto-compensates when zoom is on <html>, so we
+   leave it alone there — applying these rules to WebKit would actually
+   break the layout. App.tsx adds `.zoom-compensated` to body on
+   Chromium only. */
+body.zoom-compensated {
+  width: calc(100% / var(--app-zoom, 1));
+  height: calc(100% / var(--app-zoom, 1));
+}
+
 ::-webkit-scrollbar {
   width: 7px;
   height: 7px;
@@ -328,8 +342,16 @@ button {
 .app-root {
   display: flex;
   flex-direction: column;
+  /* Default to `100vh` for WebKit2GTK, where zoom on <html> auto-
+     compensates so `100vh` still resolves to the full window. The
+     Chromium override below switches to `100%` so `.app-root` inherits
+     from the compensated body rather than the unscaled viewport. */
   height: 100vh;
   overflow: hidden;
+}
+
+body.zoom-compensated .app-root {
+  height: 100%;
 }
 
 .app-layout {

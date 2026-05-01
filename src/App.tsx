@@ -21,6 +21,7 @@ import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick, ShieldCheck
 import { themes, getThemeById, applyTheme } from "./lib/themes";
 import { syncMonacoTheme } from "./lib/monacoTheme";
 import { api } from "./lib/tauri";
+import { getZoomTarget, isChromiumWebview } from "./lib/zoom";
 
 const SIDEBAR_WIDTH_MIN = 200;
 /** Keep at least this many pixels for the main editor / grid area. */
@@ -139,8 +140,21 @@ export default function App() {
   });
   const [zoom, setZoom] = useState<number>(() => {
     const saved = localStorage.getItem("tablio-zoom");
-    return saved ? parseFloat(saved) : 110;
+    if (saved) return parseFloat(saved);
+    // Windows defaults the OS scale to 125% on most 1080p laptops, so the
+    // app already lands at ~125% physical scale. Layering our 110% default
+    // on top of that compounds into ~137%, which feels visibly bigger
+    // than the same UI on Linux/macOS (both default to 100% OS scale).
+    // Default to 100% on Windows to keep visual size roughly platform-
+    // consistent; users can still adjust via Ctrl/Cmd+= and Ctrl/Cmd+-.
+    const isWindows =
+      /Windows/i.test(navigator.userAgent) || /^Win/i.test(navigator.platform);
+    return isWindows ? 100 : 110;
   });
+  // Mirror of `zoom` for the keyboard / wheel handler closures so they
+  // can read the current value without us having to call `setZoom` from
+  // inside an updater function (impure under React StrictMode).
+  const zoomRef = useRef(zoom);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem("tablio-sidebar-width");
     return saved ? parseInt(saved, 10) : 270;
@@ -247,48 +261,61 @@ export default function App() {
 
   const applyZoom = useCallback((level: number) => {
     const clamped = Math.min(200, Math.max(50, Math.round(level)));
+    zoomRef.current = clamped;
     setZoom(clamped);
     localStorage.setItem("tablio-zoom", String(clamped));
-    document.documentElement.style.zoom = `${clamped}%`;
-    document.documentElement.style.setProperty("--app-zoom", String(clamped / 100));
+    // Cross-webview zoom: see src/lib/zoom.ts for the full rationale.
+    // Chromium/WebView2 needs zoom on <body> + a `.zoom-compensated`
+    // layout-box compensation; WebKit2GTK keeps zoom on <html> so its
+    // built-in viewport auto-compensation kicks in.
+    const target = getZoomTarget();
+    target.style.zoom = `${clamped}%`;
+    target.style.setProperty("--app-zoom", String(clamped / 100));
     setShowZoom(true);
     if (zoomTimerRef.current) clearTimeout(zoomTimerRef.current);
     zoomTimerRef.current = setTimeout(() => setShowZoom(false), 1500);
   }, []);
 
   useEffect(() => {
-    document.documentElement.style.zoom = `${zoom}%`;
-    document.documentElement.style.setProperty("--app-zoom", String(zoom / 100));
+    if (isChromiumWebview()) {
+      document.body.classList.add("zoom-compensated");
+    }
+    const target = getZoomTarget();
+    target.style.zoom = `${zoom}%`;
+    target.style.setProperty("--app-zoom", String(zoom / 100));
   }, []);
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
+      // Ignore OS key auto-repeat — holding the key down would otherwise
+      // fire our zoom step every ~33ms, causing surprise multi-step jumps.
+      if (e.repeat) return;
       if (e.key === "?" && e.ctrlKey) {
         e.preventDefault();
         setShowShortcuts((prev) => !prev);
+        return;
       }
       if (e.ctrlKey && (e.key === "=" || e.key === "+")) {
         e.preventDefault();
-        setZoom((prev) => { const n = Math.min(200, prev + 10); applyZoom(n); return n; });
+        applyZoom(zoomRef.current + 10);
+        return;
       }
       if (e.ctrlKey && e.key === "-") {
         e.preventDefault();
-        setZoom((prev) => { const n = Math.max(50, prev - 10); applyZoom(n); return n; });
+        applyZoom(zoomRef.current - 10);
+        return;
       }
       if (e.ctrlKey && e.key === "0") {
         e.preventDefault();
         applyZoom(110);
+        return;
       }
     };
     const handleWheel = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
-      setZoom((prev) => {
-        const delta = e.deltaY > 0 ? -10 : 10;
-        const n = Math.min(200, Math.max(50, prev + delta));
-        applyZoom(n);
-        return n;
-      });
+      const delta = e.deltaY > 0 ? -10 : 10;
+      applyZoom(zoomRef.current + delta);
     };
     window.addEventListener("keydown", handleKey);
     window.addEventListener("wheel", handleWheel, { passive: false });
