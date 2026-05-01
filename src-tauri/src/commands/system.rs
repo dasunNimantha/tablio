@@ -234,6 +234,100 @@ mod tests {
         );
     }
 
+    /// Long-form stress harness — sequential AND concurrent. Not part
+    /// of the regular test suite (it's slow and noisy); invoke manually
+    /// with:
+    ///
+    /// ```text
+    /// cargo test --manifest-path src-tauri/Cargo.toml --lib \
+    ///     commands::system::tests::stress_fd_leak -- --ignored --nocapture
+    /// ```
+    ///
+    /// What it proves: a real per-call leak shows linear fd growth
+    /// (e.g. 5000 iterations → 5000+ extra fds). Anything sub-linear
+    /// is GitHub-runner / kernel jitter, not a leak we own.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[ignore]
+    async fn stress_fd_leak() {
+        const SEQ_ITERATIONS: usize = 5_000;
+        const CONCURRENT_TASKS: usize = 16;
+        const CONCURRENT_PER_TASK: usize = 500;
+        const SAMPLE_EVERY: usize = 500;
+
+        fn open_fd_count() -> usize {
+            std::fs::read_dir("/proc/self/fd")
+                .map(|d| d.count())
+                .unwrap_or(0)
+        }
+
+        // ───────────────────── warmup ─────────────────────
+        for _ in 0..10 {
+            let _ = get_app_resource_usage().await.unwrap();
+        }
+
+        // ─────────────── sequential phase ─────────────────
+        let baseline_seq = open_fd_count();
+        let mut samples: Vec<(usize, usize)> = Vec::new();
+        for i in 1..=SEQ_ITERATIONS {
+            let _ = get_app_resource_usage().await.unwrap();
+            if i % SAMPLE_EVERY == 0 {
+                samples.push((i, open_fd_count()));
+            }
+        }
+        let after_seq = open_fd_count();
+
+        eprintln!("\n[stress] sequential phase ({SEQ_ITERATIONS} calls)");
+        eprintln!("[stress]   baseline fds: {baseline_seq}");
+        for (i, fds) in &samples {
+            let growth = (*fds as i64) - baseline_seq as i64;
+            eprintln!("[stress]   after {i:>5} calls: fds={fds:>4} (Δ={growth:+})");
+        }
+        let seq_growth = (after_seq as i64) - baseline_seq as i64;
+        let seq_per_call = seq_growth as f64 / SEQ_ITERATIONS as f64;
+        eprintln!("[stress]   final: {after_seq} (Δ={seq_growth:+}, ≈{seq_per_call:.4} fd/call)");
+
+        // ─────────────── concurrent phase ─────────────────
+        let baseline_conc = open_fd_count();
+        let mut handles = Vec::with_capacity(CONCURRENT_TASKS);
+        for _ in 0..CONCURRENT_TASKS {
+            handles.push(tokio::spawn(async move {
+                for _ in 0..CONCURRENT_PER_TASK {
+                    let _ = get_app_resource_usage().await.unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let after_conc = open_fd_count();
+        let conc_calls = CONCURRENT_TASKS * CONCURRENT_PER_TASK;
+        let conc_growth = (after_conc as i64) - baseline_conc as i64;
+        let conc_per_call = conc_growth as f64 / conc_calls as f64;
+
+        eprintln!(
+            "\n[stress] concurrent phase ({} tasks × {} = {} calls)",
+            CONCURRENT_TASKS, CONCURRENT_PER_TASK, conc_calls
+        );
+        eprintln!("[stress]   baseline fds: {baseline_conc}");
+        eprintln!(
+            "[stress]   final: {after_conc} (Δ={conc_growth:+}, ≈{conc_per_call:.4} fd/call)"
+        );
+
+        // ─────────────── gate: per-call growth must be sublinear ───
+        // 0.01 fd/call ≅ ~50 leaked fds over 5000 calls. The original
+        // bug was ~0.66 fd/call (one /proc handle per ~1.5 calls in
+        // some kernels). Catching anything north of 0.05 is plenty.
+        assert!(
+            seq_per_call < 0.05,
+            "sequential leak rate too high: {seq_per_call:.4} fd/call (Δ={seq_growth} over {SEQ_ITERATIONS})"
+        );
+        assert!(
+            conc_per_call < 0.05,
+            "concurrent leak rate too high: {conc_per_call:.4} fd/call (Δ={conc_growth} over {conc_calls})"
+        );
+    }
+
     /// Linux fast-path parses /proc/self/stat correctly. The parser
     /// must split the line at the LAST `)` so that a `comm` field
     /// containing arbitrary characters (whitespace, more parens —
