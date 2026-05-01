@@ -139,7 +139,16 @@ export default function App() {
   });
   const [zoom, setZoom] = useState<number>(() => {
     const saved = localStorage.getItem("tablio-zoom");
-    return saved ? parseFloat(saved) : 110;
+    if (saved) return parseFloat(saved);
+    // Windows defaults the OS scale to 125% on most 1080p laptops, so the
+    // app already lands at ~125% physical scale. Layering our 110% default
+    // on top of that compounds into ~137%, which feels visibly bigger
+    // than the same UI on Linux/macOS (both default to 100% OS scale).
+    // Default to 100% on Windows to keep visual size roughly platform-
+    // consistent; users can still adjust via Ctrl/Cmd+= and Ctrl/Cmd+-.
+    const isWindows =
+      /Windows/i.test(navigator.userAgent) || /^Win/i.test(navigator.platform);
+    return isWindows ? 100 : 110;
   });
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem("tablio-sidebar-width");
