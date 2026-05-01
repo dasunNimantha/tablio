@@ -10,6 +10,7 @@ import { ChartView } from "../ChartView/ChartView";
 import { format as formatSQL } from "sql-formatter";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useToastStore } from "../../stores/toastStore";
+import { readZoomFactor } from "../../lib/zoom";
 import "./QueryConsole.css";
 
 interface Props {
@@ -580,7 +581,7 @@ export function QueryConsole({ connectionId, database }: Props) {
     const container = consoleRef.current;
     if (!container) return;
     const totalH = container.getBoundingClientRect().height;
-    const zoom = parseFloat(document.body.style.zoom || "100") / 100;
+    const zoom = readZoomFactor();
 
     const onMove = (ev: MouseEvent) => {
       if (!draggingRef.current) return;

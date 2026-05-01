@@ -21,6 +21,7 @@ import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick, ShieldCheck
 import { themes, getThemeById, applyTheme } from "./lib/themes";
 import { syncMonacoTheme } from "./lib/monacoTheme";
 import { api } from "./lib/tauri";
+import { getZoomTarget, isChromiumWebview } from "./lib/zoom";
 
 const SIDEBAR_WIDTH_MIN = 200;
 /** Keep at least this many pixels for the main editor / grid area. */
@@ -258,23 +259,25 @@ export default function App() {
     const clamped = Math.min(200, Math.max(50, Math.round(level)));
     setZoom(clamped);
     localStorage.setItem("tablio-zoom", String(clamped));
-    // Apply zoom on <body> rather than <html>. Chromium/WebView2 (Windows)
-    // shrinks the rendered children visually under `zoom` but doesn't
-    // expand the element's layout box, leaving an empty band when zoom
-    // drops below 100%. By zooming body and compensating its width/height
-    // to `calc(100% / var(--app-zoom))` in global.css, the layout box
-    // grows by 1/zoom, then visual scaling brings it back to exactly the
-    // viewport — no empty space on either webview.
-    document.body.style.zoom = `${clamped}%`;
-    document.body.style.setProperty("--app-zoom", String(clamped / 100));
+    // Cross-webview zoom: see src/lib/zoom.ts for the full rationale.
+    // Chromium/WebView2 needs zoom on <body> + a `.zoom-compensated`
+    // layout-box compensation; WebKit2GTK keeps zoom on <html> so its
+    // built-in viewport auto-compensation kicks in.
+    const target = getZoomTarget();
+    target.style.zoom = `${clamped}%`;
+    target.style.setProperty("--app-zoom", String(clamped / 100));
     setShowZoom(true);
     if (zoomTimerRef.current) clearTimeout(zoomTimerRef.current);
     zoomTimerRef.current = setTimeout(() => setShowZoom(false), 1500);
   }, []);
 
   useEffect(() => {
-    document.body.style.zoom = `${zoom}%`;
-    document.body.style.setProperty("--app-zoom", String(zoom / 100));
+    if (isChromiumWebview()) {
+      document.body.classList.add("zoom-compensated");
+    }
+    const target = getZoomTarget();
+    target.style.zoom = `${zoom}%`;
+    target.style.setProperty("--app-zoom", String(zoom / 100));
   }, []);
 
   useEffect(() => {
