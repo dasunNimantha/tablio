@@ -371,6 +371,20 @@ jobs:
             echo "Waiting for sshd... (attempt $i/30)"
             sleep 2
           done
+          # Mirror ci.yml: enable port forwarding so the russh
+          # `direct-tcpip` channels actually work.
+          docker exec sshd sh -c '
+            sed -i "s/^AllowTcpForwarding.*/AllowTcpForwarding yes/" /config/sshd/sshd_config
+            sed -i "s/^GatewayPorts.*/GatewayPorts yes/" /config/sshd/sshd_config
+            grep -E "^(AllowTcpForwarding|GatewayPorts)" /config/sshd/sshd_config
+            pkill -x sshd.pam || pkill -x sshd
+          '
+          for i in $(seq 1 15); do
+            if nc -z 127.0.0.1 2222; then
+              echo "sshd back up after reload"; break
+            fi
+            sleep 1
+          done
 
       - name: Install Linux dependencies
         run: |
@@ -382,6 +396,19 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+
+      - name: Start ssh-agent and load test key
+        id: sshagent
+        run: |
+          # Mirror ci.yml: exposes SSH_AUTH_SOCK + TEST_SSH_AGENT_AVAILABLE
+          # to the integration test step so the agent-auth branch is
+          # actually exercised by the release pipeline.
+          eval "$(ssh-agent -s)"
+          ssh-add "${{ steps.sshkey.outputs.key_path }}"
+          ssh-add -l
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          echo "TEST_SSH_AGENT_AVAILABLE=1" >> "$GITHUB_ENV"
 
       - name: Run SSH tunnel integration tests
         env:

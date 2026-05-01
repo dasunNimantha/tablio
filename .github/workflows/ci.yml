@@ -365,6 +365,26 @@ jobs:
             echo "Waiting for sshd... (attempt $i/30)"
             sleep 2
           done
+          # The linuxserver image ships with `AllowTcpForwarding no` in
+          # /config/sshd/sshd_config, which silently breaks every
+          # `-L`-style forward and any russh `direct-tcpip` channel —
+          # exactly what the integration suite exercises. Patch the
+          # config and bounce sshd so the bastion actually forwards.
+          docker exec sshd sh -c '
+            sed -i "s/^AllowTcpForwarding.*/AllowTcpForwarding yes/" /config/sshd/sshd_config
+            sed -i "s/^GatewayPorts.*/GatewayPorts yes/" /config/sshd/sshd_config
+            grep -E "^(AllowTcpForwarding|GatewayPorts)" /config/sshd/sshd_config
+            pkill -x sshd.pam || pkill -x sshd
+          '
+          # Give s6-overlay a moment to relaunch sshd before the test
+          # step starts hammering it.
+          for i in $(seq 1 15); do
+            if nc -z 127.0.0.1 2222; then
+              echo "sshd back up after reload"
+              break
+            fi
+            sleep 1
+          done
 
       - name: Install Linux dependencies
         run: |
@@ -376,6 +396,21 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+
+      - name: Start ssh-agent and load test key
+        id: sshagent
+        run: |
+          # Spawn a session-scoped ssh-agent and load the unencrypted key
+          # we provisioned earlier. Exporting SSH_AUTH_SOCK +
+          # TEST_SSH_AGENT_AVAILABLE into $GITHUB_ENV makes them visible
+          # to the cargo step below so the agent-auth integration tests
+          # actually run instead of skipping.
+          eval "$(ssh-agent -s)"
+          ssh-add "${{ steps.sshkey.outputs.key_path }}"
+          ssh-add -l
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          echo "TEST_SSH_AGENT_AVAILABLE=1" >> "$GITHUB_ENV"
 
       - name: Run SSH tunnel integration tests
         env:
@@ -393,6 +428,8 @@ jobs:
           TEST_POSTGRES_DB: testdb
           # Enables the identity-file branch of the integration suite.
           TEST_SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
+          # `SSH_AUTH_SOCK` and `TEST_SSH_AGENT_AVAILABLE` come in via
+          # $GITHUB_ENV from the previous step.
         run: cargo test --manifest-path src-tauri/Cargo.toml --test ssh_tunnel_integration -- --test-threads=1
 
       - name: Dump bastion logs on failure

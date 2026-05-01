@@ -271,6 +271,68 @@ async fn pg_dump_through_tunnel() {
     );
 }
 
+/// Build an ssh-agent-flavoured config from the same env. The caller
+/// must additionally have `SSH_AUTH_SOCK` set with the test identity
+/// loaded — gated behind `TEST_SSH_AGENT_AVAILABLE=1` so a misconfigured
+/// CI never silently passes the test as "skipped".
+fn ssh_agent_config() -> Option<ConnectionConfig> {
+    if env("TEST_SSH_AGENT_AVAILABLE").as_deref() != Some("1") {
+        return None;
+    }
+    if std::env::var_os("SSH_AUTH_SOCK").is_none() {
+        eprintln!("Skipping ssh-agent test: TEST_SSH_AGENT_AVAILABLE=1 but SSH_AUTH_SOCK is unset");
+        return None;
+    }
+    let mut cfg = ssh_test_config()?;
+    cfg.id = "ssh-int-test-agent".into();
+    cfg.name = "ssh-int-test-agent".into();
+    cfg.ssh_auth_method = SshAuthMethod::Agent;
+    cfg.ssh_password = String::new();
+    cfg.ssh_key_path = String::new();
+    Some(cfg)
+}
+
+#[tokio::test]
+async fn ssh_tunnel_open_with_agent() {
+    let Some(config) = ssh_agent_config() else {
+        eprintln!("Skipping ssh_tunnel_open_with_agent: TEST_SSH_AGENT_AVAILABLE!=1");
+        return;
+    };
+    let tunnel = ssh_tunnel::open(&config)
+        .await
+        .expect("ssh_tunnel::open with Agent auth must succeed");
+    let port = tunnel.local_port();
+    assert_ne!(port, 0, "tunnel must allocate a real local port");
+    let _stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("local tunnel endpoint must accept connections");
+}
+
+#[tokio::test]
+async fn pool_manager_connects_through_agent_tunnel() {
+    let Some(config) = ssh_agent_config() else {
+        eprintln!(
+            "Skipping pool_manager_connects_through_agent_tunnel: TEST_SSH_AGENT_AVAILABLE!=1"
+        );
+        return;
+    };
+    let pool = PoolManager::new();
+    pool.connect(config.clone())
+        .await
+        .expect("connect through agent-auth SSH tunnel should succeed");
+    let driver = pool
+        .get_driver(&config.id)
+        .await
+        .expect("driver should be present after connect");
+    assert!(driver
+        .test_connection()
+        .await
+        .expect("test_connection should not error"));
+    pool.disconnect(&config.id)
+        .await
+        .expect("disconnect should succeed");
+}
+
 #[tokio::test]
 async fn ssh_tunnel_open_rejects_bad_password() {
     let Some(mut config) = ssh_test_config() else {
