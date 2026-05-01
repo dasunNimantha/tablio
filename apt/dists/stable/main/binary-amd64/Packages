@@ -4,7 +4,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 34048
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.1.15_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.1.15/Tablio_0.1.15_amd64.deb
 Size: 16865414
 MD5sum: c13f066c833349bfbb085723b58f898c
 SHA1: 305ea29c85d8d69fb28e32c5925d29885b6c0ddc
@@ -19,7 +19,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 34051
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.1.16_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.1.16/Tablio_0.1.16_amd64.deb
 Size: 16890274
 MD5sum: c4fec5585838506537f5d538ae6f6075
 SHA1: b18f58e9d6918cda5db60cb7c627fe163765111d
@@ -34,7 +34,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 35672
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.1.17_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.1.17/Tablio_0.1.17_amd64.deb
 Size: 17553868
 MD5sum: a86a546713fff8c3dd88a75a6d21d576
 SHA1: 5788c52e6438113e9331cdb3b817bedc4940e97b
@@ -49,7 +49,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 35701
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.1.18_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.1.18/Tablio_0.1.18_amd64.deb
 Size: 17556416
 MD5sum: bab82cfbb2402ddb400444a7f881503d
 SHA1: 2f82276ea47e8a1cc4da4fadeddd87539751874f
@@ -64,7 +64,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 35702
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.1.19_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.1.19/Tablio_0.1.19_amd64.deb
 Size: 17569054
 MD5sum: ebf0246cd47e4619d3389b6482518127
 SHA1: b854c46436d8f5b97b3d86b9d15e9242638dbd51
@@ -79,7 +79,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 35701
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.1.20_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.1.20/Tablio_0.1.20_amd64.deb
 Size: 17577494
 MD5sum: 7184913d80eefd8501d177e1634a2e31
 SHA1: d6f2573ee66e71ef60ebd05016c3f2e53512d058
@@ -94,7 +94,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 35700
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.2.0_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.2.0/Tablio_0.2.0_amd64.deb
 Size: 17566380
 MD5sum: 22648237a68be895f4ac2831aeabaf29
 SHA1: 8b15c80f47881ae2ad80a32b482afa45c9dfe682
@@ -109,7 +109,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 35892
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.2.1_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.2.1/Tablio_0.2.1_amd64.deb
 Size: 17652158
 MD5sum: 1d527bc235ea17024cdc72ef484617d8
 SHA1: c483df16a0c03f6cb216a41d51d9238a4a45193f
@@ -124,7 +124,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 35892
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.2.2_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.2.2/Tablio_0.2.2_amd64.deb
 Size: 17666506
 MD5sum: fee323ac7afad0350ca2e82655328692
 SHA1: 16a9c2bcf88d5473d67e088ebd71054bfd3a65a8
@@ -139,7 +139,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 35891
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.2.3_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.2.3/Tablio_0.2.3_amd64.deb
 Size: 17660054
 MD5sum: ceda3afb2339af8d597533b0a6f05531
 SHA1: 4d2768072f4303527a1631f50fd79cc1d94df244
@@ -154,7 +154,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 35891
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.2.4_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.2.4/Tablio_0.2.4_amd64.deb
 Size: 17658812
 MD5sum: f5d2804c43f825f07ed89949fad0f6d8
 SHA1: 15304498bf08584a675b7a32070cb50403599df1
@@ -169,7 +169,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 35899
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.2.5_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.2.5/Tablio_0.2.5_amd64.deb
 Size: 17659676
 MD5sum: 57621015f79cc6dea4c905a228e69823
 SHA1: 76e1e9b40d55ec8575fb48489d3eb11637695b38
@@ -184,7 +184,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 35981
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.3.0_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.3.0/Tablio_0.3.0_amd64.deb
 Size: 17682014
 MD5sum: 95d39608e4f602143071171763e2f321
 SHA1: 25aa9acb48a3fba91b770036254306876982338a
@@ -199,7 +199,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 36032
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.3.1_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.3.1/Tablio_0.3.1_amd64.deb
 Size: 17694104
 MD5sum: 9e8a18cb07b89b74a39ddd9e8d7cdc41
 SHA1: e83da7ca39b6fcb498b93881e3db3efda13f0795
@@ -214,11 +214,26 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 36226
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.3.2_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.3.2/Tablio_0.3.2_amd64.deb
 Size: 17773270
 MD5sum: 2d0147c4f4b804d39c5573402ebeb8df
 SHA1: 1c32154e2c2242602cb88602bb097f7d6905fa0a
 SHA256: e7f7d2d759cf9cf58e310bc07b49aad20209b5c4103d40b0f0aaf1fd161334c4
+Priority: optional
+Description: (none)
+ (none)
+
+Package: tablio
+Version: 0.4.0
+Architecture: amd64
+Maintainer: tablio
+Installed-Size: 42564
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.4.0/Tablio_0.4.0_amd64.deb
+Size: 20188142
+MD5sum: 971f8856d71179443fb00479ed6dd1a8
+SHA1: 0359ca5082c0fb98d854b7bcbb07c2476dee8d68
+SHA256: 8b8948c7f160b591f1d99f7f1c4ca4100208f23ec882fe692a51c5dd9f8041cb
 Priority: optional
 Description: (none)
  (none)
@@ -229,7 +244,7 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 42561
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.4.1_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.4.1/Tablio_0.4.1_amd64.deb
 Size: 20197468
 MD5sum: dd431cd1417a80022d56ce7f2576043f
 SHA1: b7cb3fdfcad9ad1245a076d503288fb59591508e
@@ -244,11 +259,26 @@ Architecture: amd64
 Maintainer: tablio
 Installed-Size: 42562
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0
-Filename: pool/Tablio_0.4.2_amd64.deb
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.4.2/Tablio_0.4.2_amd64.deb
 Size: 20191296
 MD5sum: 1ecb40b4df833565cceebd815c1898a8
 SHA1: d1f327c4784ca26c189687b89febbd4d7a943449
 SHA256: 053fff8f1eea360190e24972eb999ce264466b120a2454206fba44000e64f02b
+Priority: optional
+Description: (none)
+ (none)
+
+Package: tablio
+Version: 0.4.3
+Architecture: amd64
+Maintainer: tablio
+Installed-Size: 42565
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0
+Filename: https://github.com/dasunNimantha/tablio/releases/download/v0.4.3/Tablio_0.4.3_amd64.deb
+Size: 20192816
+MD5sum: 0192c68b36daccf01670201e9fa7bf5b
+SHA1: fbd798231e1954544cf11b76ad68c17592e381fd
+SHA256: 3707626c443ee856aa2c473c8f4bea552bad79695ce23cbcfb85b567f3f56c61
 Priority: optional
 Description: (none)
  (none)
