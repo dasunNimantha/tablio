@@ -25,9 +25,10 @@
   min-width: min(760px, calc(100vw - 32px));
   /* Fixed height so the dialog frame doesn't jump as the user moves
      between sections or toggles SSH options. Sized to fit the tallest
-     section (SSH with identity file) without leaving large empty space
-     below; inner content scrolls when it overflows on small viewports. */
-  height: min(82vh, 640px);
+     section (SSH with identity file) plus the inline form-error banner
+     under it without clipping; inner content scrolls when it overflows
+     on small viewports. */
+  height: min(86vh, 700px);
   overflow: hidden;
   display: flex;
   flex-direction: column;
