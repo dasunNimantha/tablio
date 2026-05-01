@@ -62,7 +62,7 @@ jobs:
             libjavascriptcoregtk-4.1-dev librsvg2-dev \
             libayatana-appindicator3-dev patchelf
 
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           # `default` query suite matches what default setup was using;
@@ -70,8 +70,8 @@ jobs:
           # findings that we don't currently triage.
           queries: default
 
-      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/autobuild@v4
 
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"
