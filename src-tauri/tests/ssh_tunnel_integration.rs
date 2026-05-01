@@ -352,3 +352,129 @@ async fn ssh_tunnel_open_rejects_bad_password() {
         "expected an auth error, got: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Soak harness — nightly only
+// ---------------------------------------------------------------------------
+
+/// Best-effort fd count for the current process. Linux only — every
+/// other platform returns `0` and the soak test simply skips its
+/// growth assertion.
+fn open_fd_count() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_dir("/proc/self/fd")
+            .map(|d| d.count())
+            .unwrap_or(0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
+
+/// Long-running open→port-forward→query→close soak, gated by `#[ignore]`
+/// so it stays out of regular CI. The nightly workflow invokes it via
+///
+/// ```text
+/// cargo test --manifest-path src-tauri/Cargo.toml --test ssh_tunnel_integration \
+///     -- --ignored soak_open_close_loop --nocapture --test-threads=1
+/// ```
+///
+/// Why this exists: a per-iteration leak in russh, the local TCP
+/// listener, or PoolManager would manifest as linear fd / channel
+/// growth over many cycles. The regular integration tests open ~5
+/// tunnels and would never see it. This harness opens hundreds.
+///
+/// Threshold rationale: the same `0.05 fd/cycle` budget the resource-
+/// monitor stress test uses (`commands::system::tests::stress_fd_leak`).
+/// A real per-cycle leak shows linear growth; everything below that
+/// rate is kernel/runner jitter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn soak_open_close_loop() {
+    let Some(config) = ssh_test_config() else {
+        eprintln!("Skipping soak_open_close_loop: TEST_SSH_* env vars not set");
+        return;
+    };
+
+    // Tunable via env so the nightly workflow can dial intensity up
+    // or down without recompiling. Default is ~5 minutes of cycles
+    // on a typical CI runner (~200 cycles, each open+query+close).
+    let iterations: usize = std::env::var("SOAK_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
+    let sample_every: usize = (iterations / 10).max(1);
+
+    // Warm up the pool / russh internals so the first sample isn't
+    // skewed by lazy initialisation (rustls cipher tables, allocators,
+    // etc.).
+    {
+        let pool = PoolManager::new();
+        pool.connect(config.clone()).await.expect("warmup connect");
+        pool.disconnect(&config.id)
+            .await
+            .expect("warmup disconnect");
+    }
+
+    let baseline = open_fd_count();
+    let mut samples: Vec<(usize, usize)> = Vec::new();
+
+    for i in 1..=iterations {
+        let mut cfg = config.clone();
+        // Unique pool id per cycle so the PoolManager genuinely opens
+        // a fresh tunnel each time instead of reusing a cached driver.
+        cfg.id = format!("ssh-soak-{i}");
+        cfg.name = cfg.id.clone();
+        let pool = PoolManager::new();
+        pool.connect(cfg.clone())
+            .await
+            .expect("soak iteration connect");
+        let driver = pool
+            .get_driver(&cfg.id)
+            .await
+            .expect("soak iteration driver");
+        // Round-trip a real query through the tunnel so we exercise
+        // the channel path, not just session establishment.
+        assert!(
+            driver
+                .test_connection()
+                .await
+                .expect("soak test_connection"),
+            "iteration {i} test_connection returned false"
+        );
+        pool.disconnect(&cfg.id)
+            .await
+            .expect("soak iteration disconnect");
+        // Drop pool explicitly so any task-scoped guards run before we
+        // sample.
+        drop(pool);
+
+        if i % sample_every == 0 {
+            let fds = open_fd_count();
+            samples.push((i, fds));
+            eprintln!(
+                "[ssh-soak] after {i:>4} cycles: fds={fds:>4} (Δ={:+})",
+                fds as i64 - baseline as i64
+            );
+        }
+    }
+
+    let after = open_fd_count();
+    let growth = (after as i64) - (baseline as i64);
+    let per_cycle = growth as f64 / iterations as f64;
+    eprintln!(
+        "[ssh-soak] final: fds={after} (Δ={growth:+}, ≈{per_cycle:.4} fd/cycle over {iterations} cycles)"
+    );
+
+    // Skip the assertion on platforms where /proc/self/fd doesn't
+    // exist — the loop itself still proves the cycle doesn't error
+    // out, which is the more important guarantee.
+    if cfg!(target_os = "linux") && baseline > 0 {
+        assert!(
+            per_cycle < 0.05,
+            "ssh tunnel leak rate too high: {per_cycle:.4} fd/cycle (Δ={growth} over {iterations}); samples={samples:?}"
+        );
+    }
+}

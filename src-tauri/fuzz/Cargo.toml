@@ -1,0 +1,50 @@
+[package]
+name = "tablio-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Standard cargo-fuzz layout. The `cargo fuzz init` command would generate
+# something equivalent; we pin it manually so the workflow doesn't need to
+# rerun init on a fresh runner. To regenerate (or add a target):
+#   cargo +nightly fuzz add <target>
+# The nightly toolchain is required because libfuzzer-sys depends on
+# unstable LLVM sanitiser interfaces.
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.tablio_lib]
+path = ".."
+
+# Each fuzz target is its own bin so libfuzzer can link them with a custom
+# `_LLVMFuzzerTestOneInput` entry point. Keep the per-target sections
+# minimal — adding `test = false` and `doc = false` shaves a small but
+# noticeable chunk off cold-build time on CI.
+
+[[bin]]
+name = "ssh_config"
+path = "fuzz_targets/ssh_config.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "proc_self_stat"
+path = "fuzz_targets/proc_self_stat.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "sql_identifier"
+path = "fuzz_targets/sql_identifier.rs"
+test = false
+doc = false
+
+# We deliberately do NOT add `tablio-fuzz` to the workspace — cargo-fuzz
+# nests this crate under the parent so the `cargo fuzz` subcommand can
+# locate it via path conventions, but workspace membership would force
+# the libfuzzer-sys dep into the parent build's lockfile.
+[workspace]
