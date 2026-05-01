@@ -392,6 +392,7 @@ button {
 .sidebar-content {
   flex: 1;
   overflow-y: auto;
+  padding-bottom: 16px;
 }
 
 .empty-state {
