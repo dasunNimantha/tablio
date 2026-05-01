@@ -1849,11 +1849,16 @@ async fn pg_get_server_config_ok() {
 
 #[tokio::test]
 async fn pg_get_query_stats_ok_or_extension_message() {
+    use tablio_lib::models::QueryStatsKind;
     let driver = pg_driver!();
     let res = driver.get_query_stats().await;
     assert!(res.is_ok());
     let qs = res.unwrap();
-    if !qs.available {
+    if qs.available {
+        assert_eq!(qs.kind, QueryStatsKind::Available);
+        assert!(qs.message.is_none());
+    } else {
+        assert_eq!(qs.kind, QueryStatsKind::PgStatStatementsMissing);
         let msg = qs.message.as_deref().unwrap_or("");
         assert!(
             msg.contains("pg_stat_statements")

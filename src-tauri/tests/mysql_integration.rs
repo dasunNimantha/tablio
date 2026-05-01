@@ -1355,14 +1355,6 @@ async fn mysql_get_server_config() {
 }
 
 #[tokio::test]
-async fn mysql_get_query_stats() {
-    let (driver, _db) = mysql_driver!();
-    let qs = driver.get_query_stats().await.unwrap();
-    assert!(!qs.available);
-    assert!(qs.message.is_some());
-}
-
-#[tokio::test]
 async fn mysql_list_roles() {
     let (driver, _db) = mysql_driver!();
     let roles = driver.list_roles().await.unwrap();
@@ -1887,4 +1879,23 @@ async fn million_row_paginate() {
     );
 
     mysql_drop_table_silent(&driver, &db, &table).await;
+}
+
+#[tokio::test]
+async fn my_get_query_stats_ok_or_perf_schema_message() {
+    let (driver, _db) = mysql_driver!();
+    let res = driver.get_query_stats().await;
+    assert!(res.is_ok(), "get_query_stats returned: {:?}", res.err());
+    let qs = res.unwrap();
+    if qs.available {
+        assert_eq!(qs.kind, QueryStatsKind::Available);
+        assert!(qs.message.is_none());
+    } else {
+        assert_eq!(qs.kind, QueryStatsKind::MysqlPerfSchemaDisabled);
+        let msg = qs.message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("performance_schema") || msg.contains("Performance Schema"),
+            "unexpected unavailable message: {msg}"
+        );
+    }
 }

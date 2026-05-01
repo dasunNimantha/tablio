@@ -559,6 +559,7 @@ impl DatabaseDriver for PostgresDriver {
         if ext_check.is_none() {
             return Ok(QueryStatsResponse {
                 available: false,
+                kind: QueryStatsKind::PgStatStatementsMissing,
                 message: Some(
                     "The pg_stat_statements extension is not installed. To enable it:\n\n\
                      1. Add to postgresql.conf:\n   shared_preload_libraries = 'pg_stat_statements'\n\n\
@@ -637,6 +638,7 @@ impl DatabaseDriver for PostgresDriver {
 
         Ok(QueryStatsResponse {
             available: true,
+            kind: QueryStatsKind::Available,
             message: None,
             entries,
         })

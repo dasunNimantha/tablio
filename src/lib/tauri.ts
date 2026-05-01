@@ -126,7 +126,12 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
     case "get_server_config":
       return [] as T;
     case "get_query_stats":
-      return { available: false, message: "Mock mode", entries: [] } as T;
+      return {
+        available: false,
+        kind: "pg_stat_statements_missing",
+        message: "Mock mode",
+        entries: [],
+      } as T;
     case "get_app_resource_usage":
       return { memory_mb: 64.5, cpu_percent: 2.3 } as T;
     case "list_known_hosts":
@@ -436,8 +441,22 @@ export interface QueryStatEntry {
   mean_plan_time_ms: number | null;
 }
 
+/**
+ * Reason-keyed enum that lets the QueryStats UI pick the right "unavailable"
+ * copy and CTA without sniffing message strings. Wire format is snake_case
+ * to match the Rust `QueryStatsKind` enum (`#[serde(rename_all = "snake_case")]`).
+ */
+export type QueryStatsKind =
+  | "available"
+  | "pg_stat_statements_missing"
+  | "mysql_perf_schema_disabled"
+  | "mssql_missing_view_server_state"
+  | "tidb_stmt_summary_disabled"
+  | "engine_unsupported";
+
 export interface QueryStatsResponse {
   available: boolean;
+  kind: QueryStatsKind;
   message: string | null;
   entries: QueryStatEntry[];
 }

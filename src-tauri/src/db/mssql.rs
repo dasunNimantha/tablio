@@ -156,6 +156,30 @@ fn column_data_to_json(data: &ColumnData<'_>) -> serde_json::Value {
     }
 }
 
+/// Decode a `serde_json::Value` cell as `i64`, accepting integer numbers,
+/// floats with fractional part `.0`, and BIGINT-as-string (some drivers
+/// serialize BIGINT as a JSON string to avoid 53-bit precision loss).
+fn json_as_i64(v: &serde_json::Value) -> Option<i64> {
+    match v {
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok()))
+            .or_else(|| n.as_f64().map(|f| f as i64)),
+        serde_json::Value::String(s) => s.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+/// Decode a `serde_json::Value` cell as `f64`, with the same string-fallback
+/// the BIGINT case requires.
+fn json_as_f64(v: &serde_json::Value) -> Option<f64> {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
 fn rows_to_grid(rows: Vec<Row>) -> (Vec<String>, Vec<Vec<serde_json::Value>>) {
     if rows.is_empty() {
         return (vec![], vec![]);
@@ -1404,10 +1428,132 @@ impl DatabaseDriver for MssqlDriver {
     }
 
     async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
+        // `sys.dm_exec_query_stats` is always-on; the only realistic failure
+        // mode is the connecting login lacking `VIEW SERVER STATE`. A small
+        // probe lets us classify that into a structured `kind` rather than
+        // bubbling a raw error to the UI.
+        if let Err(e) = self
+            .run_select("SELECT TOP 1 1 AS probe FROM sys.dm_exec_query_stats")
+            .await
+        {
+            let msg = e.to_string();
+            let lower = msg.to_ascii_lowercase();
+            if lower.contains("view server state") || lower.contains("permission") {
+                return Ok(QueryStatsResponse {
+                    available: false,
+                    kind: QueryStatsKind::MssqlMissingViewServerState,
+                    message: Some(
+                        "The connecting login does not have VIEW SERVER STATE.\n\n\
+                         Ask a sysadmin to run:\n\
+                         \u{2003}GRANT VIEW SERVER STATE TO [<your_login>];\n\n\
+                         Without it, sys.dm_exec_query_stats is not readable."
+                            .to_string(),
+                    ),
+                    entries: vec![],
+                });
+            }
+            return Err(e);
+        }
+
+        // `*_worker_time` columns are microseconds; divide by 1000.0 (force
+        // float division) to land in milliseconds. `query_hash` is binary(8)
+        // and casts cleanly to BIGINT for an i64 `queryid`.
+        let sql = "SELECT TOP 200 \
+                SUBSTRING(t.text, (qs.statement_start_offset/2)+1, \
+                  ((CASE qs.statement_end_offset \
+                       WHEN -1 THEN DATALENGTH(t.text) \
+                       ELSE qs.statement_end_offset \
+                    END - qs.statement_start_offset)/2) + 1) AS query, \
+                CAST(qs.query_hash AS BIGINT)                AS queryid, \
+                qs.execution_count                           AS calls, \
+                (qs.total_worker_time / 1000.0)              AS total_exec_time_ms, \
+                ((qs.total_worker_time * 1.0 / NULLIF(qs.execution_count, 0)) / 1000.0) \
+                                                             AS mean_exec_time_ms, \
+                (qs.min_worker_time / 1000.0)                AS min_exec_time_ms, \
+                (qs.max_worker_time / 1000.0)                AS max_exec_time_ms, \
+                qs.total_rows                                AS rows_count, \
+                qs.total_logical_reads                       AS shared_blks_hit, \
+                qs.total_physical_reads                      AS shared_blks_read, \
+                CASE WHEN (qs.total_logical_reads + qs.total_physical_reads) > 0 \
+                     THEN qs.total_logical_reads * 100.0 / \
+                          (qs.total_logical_reads + qs.total_physical_reads) \
+                     ELSE 0 END                              AS cache_hit_ratio \
+            FROM sys.dm_exec_query_stats qs \
+            CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) t \
+            ORDER BY qs.total_worker_time DESC";
+
+        let (cols, rows) = self.run_select(sql).await?;
+
+        // Build a name -> index map so the row-decode loop is column-order
+        // agnostic and survives reordering of the SELECT list.
+        let idx = |name: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(name));
+        let i_query = idx("query");
+        let i_queryid = idx("queryid");
+        let i_calls = idx("calls");
+        let i_total = idx("total_exec_time_ms");
+        let i_mean = idx("mean_exec_time_ms");
+        let i_min = idx("min_exec_time_ms");
+        let i_max = idx("max_exec_time_ms");
+        let i_rows = idx("rows_count");
+        let i_hit = idx("shared_blks_hit");
+        let i_read = idx("shared_blks_read");
+        let i_ratio = idx("cache_hit_ratio");
+
+        let entries = rows
+            .into_iter()
+            .map(|row| QueryStatEntry {
+                query: i_query
+                    .and_then(|i| row.get(i))
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default(),
+                queryid: i_queryid.and_then(|i| row.get(i)).and_then(json_as_i64),
+                user: String::new(),
+                calls: i_calls
+                    .and_then(|i| row.get(i))
+                    .and_then(json_as_i64)
+                    .unwrap_or(0),
+                total_exec_time_ms: i_total
+                    .and_then(|i| row.get(i))
+                    .and_then(json_as_f64)
+                    .unwrap_or(0.0),
+                mean_exec_time_ms: i_mean
+                    .and_then(|i| row.get(i))
+                    .and_then(json_as_f64)
+                    .unwrap_or(0.0),
+                min_exec_time_ms: i_min
+                    .and_then(|i| row.get(i))
+                    .and_then(json_as_f64)
+                    .unwrap_or(0.0),
+                max_exec_time_ms: i_max
+                    .and_then(|i| row.get(i))
+                    .and_then(json_as_f64)
+                    .unwrap_or(0.0),
+                rows: i_rows
+                    .and_then(|i| row.get(i))
+                    .and_then(json_as_i64)
+                    .unwrap_or(0),
+                shared_blks_hit: i_hit
+                    .and_then(|i| row.get(i))
+                    .and_then(json_as_i64)
+                    .unwrap_or(0),
+                shared_blks_read: i_read
+                    .and_then(|i| row.get(i))
+                    .and_then(json_as_i64)
+                    .unwrap_or(0),
+                cache_hit_ratio: i_ratio
+                    .and_then(|i| row.get(i))
+                    .and_then(json_as_f64)
+                    .unwrap_or(0.0),
+                total_plan_time_ms: None,
+                mean_plan_time_ms: None,
+            })
+            .collect();
+
         Ok(QueryStatsResponse {
-            available: false,
-            message: Some("Query statistics are not wired for SQL Server yet".to_string()),
-            entries: vec![],
+            available: true,
+            kind: QueryStatsKind::Available,
+            message: None,
+            entries,
         })
     }
 
