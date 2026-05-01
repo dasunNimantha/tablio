@@ -1,0 +1,77 @@
+name: CodeQL
+
+# Why advanced setup instead of GitHub's default code-scanning?
+#
+#   * Default setup ALWAYS runs on every PR to the default branch.
+#     There's no knob in repo settings to turn that off — the only way
+#     to get push-only scanning is to disable default setup and supply
+#     this advanced-setup workflow.
+#   * PR scanning duplicates work the regular CI matrix already covers
+#     (clippy on Rust, eslint+vitest on TS, etc.) and adds 3-7 minutes
+#     to every PR for findings that almost never need to be addressed
+#     before merge.
+#   * Push-to-master + weekly schedule keeps the security tab
+#     populated without paying that PR-time tax.
+#
+# Languages match what default setup was configured for as of
+# 2026-04-30 ({"actions","javascript","javascript-typescript","rust",
+# "typescript"} — the `javascript` and `typescript` slots are aliases
+# of `javascript-typescript` so we collapse them here).
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    # Weekly Friday at 07:34 UTC. Randomised minute (not :00) keeps us
+    # off GitHub's hourly burst window so the queue stays warm.
+    - cron: "34 7 * * 5"
+  workflow_dispatch:
+
+# `security-events: write` is the only token scope CodeQL strictly
+# needs (to upload SARIF). `contents: read` for checkout, `actions: read`
+# for workflow analysis. Nothing else.
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, javascript-typescript, rust]
+    steps:
+      - uses: actions/checkout@v6
+
+      # Tauri's Rust crate needs the same system libs CI's other Rust
+      # jobs install — the autobuild step shells out to `cargo build`,
+      # which would otherwise fail on missing webkit2gtk headers.
+      - name: Install Linux deps (Rust autobuild prerequisite)
+        if: matrix.language == 'rust'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # `default` query suite matches what default setup was using;
+          # `security-extended` is also available but produces noisier
+          # findings that we don't currently triage.
+          queries: default
+
+      - uses: github/codeql-action/autobuild@v3
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
