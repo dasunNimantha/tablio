@@ -139,7 +139,7 @@ interface Props {
   result: QueryResult;
   resultMode: "results" | "explain" | "chart";
   onToggleChart: () => void;
-  onExport: (format: "csv" | "json" | "sql") => void;
+  onExport: (format: "csv" | "json" | "sql" | "xlsx") => void;
   connectionId: string;
   database: string;
   sourceTable: SourceTable | null;

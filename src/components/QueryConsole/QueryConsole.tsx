@@ -517,20 +517,21 @@ export function QueryConsole({ connectionId, database }: Props) {
 
   // ── Toolbar actions ──
 
-  const handleExportResult = useCallback(async (format: "csv" | "json" | "sql") => {
+  const handleExportResult = useCallback(async (format: "csv" | "json" | "sql" | "xlsx") => {
     if (!result || !result.is_select) return;
     try {
       const ext = format === "sql" ? "sql" : format;
+      const label = format === "xlsx" ? "Excel" : format.toUpperCase();
       const filePath = await save({
         defaultPath: `query_result.${ext}`,
-        filters: [{ name: format.toUpperCase(), extensions: [ext] }],
+        filters: [{ name: label, extensions: [ext] }],
       });
       if (!filePath) return;
       await api.exportQueryResultToFile({
         columns: result.columns, rows: result.rows as unknown[][],
         format, table_name: null,
       }, filePath);
-      addToast(`Exported query result as ${format.toUpperCase()}`);
+      addToast(`Exported query result as ${label}`);
     } catch (e) {
       addToast(String(e), "error");
     }

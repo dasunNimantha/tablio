@@ -9,3 +9,4 @@ pub mod saved_queries;
 pub mod schema;
 pub mod ssh_config;
 pub mod system;
+pub mod xlsx_import;

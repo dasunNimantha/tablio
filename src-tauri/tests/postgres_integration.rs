@@ -2494,3 +2494,128 @@ async fn dump_restore_roundtrip() {
 
     pg_drop_table_silent(&driver, &src_table).await;
 }
+
+// ---------------------------------------------------------------------------
+// xlsx round trip (issues #69 / #70)
+// ---------------------------------------------------------------------------
+
+/// Headline acceptance criterion for the xlsx import + export work:
+/// build typed rows, serialize them through `to_xlsx`, parse the
+/// resulting workbook via `parse_sheet_impl`, then INSERT the parsed
+/// rows into a fresh Postgres table via `import_data` and assert that
+/// numbers, booleans, dates, and nulls all round-trip without being
+/// stringified along the way.
+#[tokio::test]
+async fn pg_xlsx_round_trip_preserves_types() {
+    use tablio_lib::commands::xlsx_import::parse_sheet_impl;
+    use tablio_lib::export::to_xlsx;
+
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_xlsx_rt");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {}.\"{}\" (\
+                   id INT PRIMARY KEY, \
+                   amount NUMERIC(10,2), \
+                   active BOOLEAN, \
+                   note TEXT, \
+                   ts TIMESTAMP\
+                 )",
+                SCHEMA, tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let cols = vec![
+        "id".to_string(),
+        "amount".to_string(),
+        "active".to_string(),
+        "note".to_string(),
+        "ts".to_string(),
+    ];
+    let original_rows: Vec<Vec<serde_json::Value>> = vec![
+        vec![
+            serde_json::json!(1),
+            serde_json::json!(12.5),
+            serde_json::json!(true),
+            serde_json::json!("hello"),
+            serde_json::json!("2024-05-01T12:30:00"),
+        ],
+        vec![
+            serde_json::json!(2),
+            serde_json::Value::Null,
+            serde_json::json!(false),
+            serde_json::Value::Null,
+            serde_json::json!("2024-06-15T09:00:00"),
+        ],
+    ];
+
+    let bytes = to_xlsx(&cols, &original_rows, &tbl).expect("encode xlsx");
+    let payload = parse_sheet_impl(&bytes, &tbl).expect("parse xlsx");
+    let parsed = payload.rows;
+    assert_eq!(parsed.len(), 2, "round-trip lost rows: {parsed:?}");
+    assert_eq!(payload.headers, cols);
+    assert!(
+        matches!(&parsed[0][0], serde_json::Value::Number(_)),
+        "id should round-trip as a number, got {:?}",
+        parsed[0][0]
+    );
+    assert!(
+        matches!(&parsed[0][2], serde_json::Value::Bool(true)),
+        "active should round-trip as a bool, got {:?}",
+        parsed[0][2]
+    );
+    assert!(
+        matches!(&parsed[1][1], serde_json::Value::Null),
+        "null should round-trip as Null, got {:?}",
+        parsed[1][1]
+    );
+    assert!(
+        matches!(&parsed[0][4], serde_json::Value::String(s) if s.starts_with("2024-05-01")),
+        "datetime should round-trip as ISO string, got {:?}",
+        parsed[0][4]
+    );
+
+    let inserted = driver
+        .import_data(DB, SCHEMA, &tbl, &cols, &parsed)
+        .await
+        .expect("import");
+    assert_eq!(inserted, 2);
+
+    let data = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .await
+        .expect("fetch");
+    assert_eq!(data.total_rows, 2);
+
+    let by_id: std::collections::HashMap<i64, &Vec<serde_json::Value>> = data
+        .rows
+        .iter()
+        .map(|r| (r[0].as_i64().expect("id"), r))
+        .collect();
+
+    let r1 = by_id.get(&1).expect("id=1");
+    assert!(
+        r1[1].is_number(),
+        "amount stored as number, got: {:?}",
+        r1[1]
+    );
+    assert_eq!(r1[2], serde_json::json!(true), "active=true preserved");
+    assert_eq!(r1[3], serde_json::json!("hello"), "note preserved");
+    assert!(
+        r1[4].as_str().unwrap_or("").contains("2024-05-01"),
+        "ts preserved, got: {:?}",
+        r1[4]
+    );
+
+    let r2 = by_id.get(&2).expect("id=2");
+    assert!(r2[1].is_null(), "amount=NULL preserved, got: {:?}", r2[1]);
+    assert_eq!(r2[2], serde_json::json!(false), "active=false preserved");
+    assert!(r2[3].is_null(), "note=NULL preserved, got: {:?}", r2[3]);
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
