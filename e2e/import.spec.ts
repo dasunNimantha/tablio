@@ -9,7 +9,7 @@ test.describe("Import dialog", () => {
 
   test("opens via context menu and shows dialog", async ({ page }) => {
     await expect(page.locator(".import-dialog")).toBeVisible();
-    await expect(page.locator(".dialog-header h2")).toContainText("Import CSV");
+    await expect(page.locator(".dialog-header h2")).toContainText("Import Data");
   });
 
   test("shows target table name", async ({ page }) => {
@@ -17,9 +17,17 @@ test.describe("Import dialog", () => {
     await expect(page.locator(".import-target-input")).toHaveValue(/users/);
   });
 
-  test("file input is present", async ({ page }) => {
+  test("file input is present and accepts CSV + Excel", async ({ page }) => {
     await expect(page.locator(".import-file-label")).toBeVisible();
-    await expect(page.locator(".import-file-label")).toContainText("Choose a CSV file");
+    await expect(page.locator(".import-file-label")).toContainText(
+      /\.csv.*\.xlsx.*\.xls/,
+    );
+    const accept = await page
+      .locator('#csv-file-input')
+      .getAttribute("accept");
+    expect(accept).toMatch(/\.csv/);
+    expect(accept).toMatch(/\.xlsx/);
+    expect(accept).toMatch(/\.xls(?!x)/);
   });
 
   test("cancel button closes dialog", async ({ page }) => {

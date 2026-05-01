@@ -17,12 +17,13 @@ test.describe("Export menu", () => {
     await expect(page.locator(".export-menu-dropdown")).toBeVisible();
   });
 
-  test("dropdown shows CSV, JSON, SQL options", async ({ page }) => {
+  test("dropdown shows CSV, JSON, SQL, Excel options", async ({ page }) => {
     await page.locator(".export-menu-wrapper .btn-ghost").click();
     const dropdown = page.locator(".export-menu-dropdown");
     await expect(dropdown.locator("button", { hasText: "Export as CSV" })).toBeVisible();
     await expect(dropdown.locator("button", { hasText: "Export as JSON" })).toBeVisible();
     await expect(dropdown.locator("button", { hasText: "Export as SQL" })).toBeVisible();
+    await expect(dropdown.locator("button", { hasText: "Export as Excel" })).toBeVisible();
   });
 
   test("clicking outside closes dropdown", async ({ page }) => {

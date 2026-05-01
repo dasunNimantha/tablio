@@ -742,13 +742,14 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     }
   };
 
-  const handleExport = async (format: "csv" | "json" | "sql") => {
+  const handleExport = async (format: "csv" | "json" | "sql" | "xlsx") => {
     try {
       const ext = format === "sql" ? "sql" : format;
+      const label = format === "xlsx" ? "Excel" : format.toUpperCase();
       const filePath = await save({
         defaultPath: `${table}.${ext}`,
         filters: [{
-          name: format.toUpperCase(),
+          name: label,
           extensions: [ext],
         }],
       });
@@ -762,7 +763,7 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
         format,
         filter: activeFilter,
       }, filePath);
-      addToast(`Exported ${table} as ${format.toUpperCase()}`);
+      addToast(`Exported ${table} as ${label}`);
     } catch (e) {
       addToast(String(e), "error");
     }

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  api,
   parseSshHostKeyMismatch,
   SSH_HOST_KEY_MISMATCH_PREFIX,
 } from "./tauri";
@@ -61,5 +62,33 @@ describe("parseSshHostKeyMismatch", () => {
     expect(parseSshHostKeyMismatch(undefined)).toBeNull();
     expect(parseSshHostKeyMismatch(null)).toBeNull();
     expect(parseSshHostKeyMismatch(42)).toBeNull();
+  });
+});
+
+describe("xlsx mock-mode commands", () => {
+  // The dialog renders against these mocks during e2e and during
+  // vitest. Pin the contract so a future mock refactor doesn't quietly
+  // strip a field the dialog reads.
+
+  it("parseXlsxWorkbook returns sheet names + a populated default sheet", async () => {
+    const preview = await api.parseXlsxWorkbook(new Uint8Array([1, 2, 3]));
+    expect(preview.sheet_names.length).toBeGreaterThan(0);
+    expect(preview.default_sheet).toBe(preview.sheet_names[0]);
+    expect(preview.sheet.name).toBe(preview.default_sheet);
+    expect(preview.sheet.headers.length).toBeGreaterThan(0);
+    expect(preview.sheet.inferred_types.length).toBe(
+      preview.sheet.headers.length,
+    );
+  });
+
+  it("parseXlsxSheet echoes the requested sheet name + returns typed rows", async () => {
+    const payload = await api.parseXlsxSheet(new Uint8Array([0]), "Other");
+    expect(payload.name).toBe("Other");
+    expect(payload.headers.length).toBe(payload.inferred_types.length);
+    expect(payload.rows.length).toBeGreaterThan(0);
+    // Type fidelity sanity: numbers stay numbers, bools stay bools.
+    const first = payload.rows[0] as unknown[];
+    expect(typeof first[0]).toBe("number");
+    expect(typeof first[2]).toBe("boolean");
   });
 });
