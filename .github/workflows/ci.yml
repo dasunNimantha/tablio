@@ -9,6 +9,14 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Default to the minimum scope every job actually needs (read source +
+# upload artifacts). No CI job pushes commits, creates releases or
+# comments on PRs, so we don't need to grant any write scope. Closes
+# the `actions/missing-workflow-permissions` code-scanning alerts and
+# limits blast radius if a step gets compromised.
+permissions:
+  contents: read
+
 jobs:
   changes:
     name: Detect Changes
