@@ -126,7 +126,12 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
     case "get_server_config":
       return [] as T;
     case "get_query_stats":
-      return { available: false, message: "Mock mode", entries: [] } as T;
+      return {
+        available: false,
+        kind: "pg_stat_statements_missing",
+        message: "Mock mode",
+        entries: [],
+      } as T;
     case "get_app_resource_usage":
       return { memory_mb: 64.5, cpu_percent: 2.3 } as T;
     case "list_known_hosts":
