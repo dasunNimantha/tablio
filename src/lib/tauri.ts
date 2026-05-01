@@ -436,8 +436,22 @@ export interface QueryStatEntry {
   mean_plan_time_ms: number | null;
 }
 
+/**
+ * Reason-keyed enum that lets the QueryStats UI pick the right "unavailable"
+ * copy and CTA without sniffing message strings. Wire format is snake_case
+ * to match the Rust `QueryStatsKind` enum (`#[serde(rename_all = "snake_case")]`).
+ */
+export type QueryStatsKind =
+  | "available"
+  | "pg_stat_statements_missing"
+  | "mysql_perf_schema_disabled"
+  | "mssql_missing_view_server_state"
+  | "tidb_stmt_summary_disabled"
+  | "engine_unsupported";
+
 export interface QueryStatsResponse {
   available: boolean;
+  kind: QueryStatsKind;
   message: string | null;
   entries: QueryStatEntry[];
 }
