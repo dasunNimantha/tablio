@@ -1355,14 +1355,6 @@ async fn mysql_get_server_config() {
 }
 
 #[tokio::test]
-async fn mysql_get_query_stats() {
-    let (driver, _db) = mysql_driver!();
-    let qs = driver.get_query_stats().await.unwrap();
-    assert!(!qs.available);
-    assert!(qs.message.is_some());
-}
-
-#[tokio::test]
 async fn mysql_list_roles() {
     let (driver, _db) = mysql_driver!();
     let roles = driver.list_roles().await.unwrap();

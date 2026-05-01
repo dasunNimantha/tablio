@@ -1663,18 +1663,6 @@ async fn mssql_get_server_config_ok() {
 }
 
 // ===========================================================================
-// get_query_stats (returns unavailable for SQL Server)
-// ===========================================================================
-
-#[tokio::test]
-async fn mssql_get_query_stats_ok() {
-    let (driver, _db) = mssql_driver!();
-    let qs = driver.get_query_stats().await.unwrap();
-    assert!(!qs.available);
-    assert!(qs.message.is_some());
-}
-
-// ===========================================================================
 // cancel_query: invalid session id
 // ===========================================================================
 

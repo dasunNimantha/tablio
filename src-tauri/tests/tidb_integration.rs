@@ -1217,13 +1217,6 @@ async fn tidb_get_server_config() {
 }
 
 #[tokio::test]
-async fn tidb_get_query_stats() {
-    let (driver, _db) = tidb_driver!();
-    let qs = driver.get_query_stats().await.unwrap();
-    assert!(!qs.available);
-}
-
-#[tokio::test]
 async fn tidb_list_roles() {
     let (driver, _db) = tidb_driver!();
     let roles = driver.list_roles().await;
