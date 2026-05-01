@@ -388,8 +388,18 @@ jobs:
 
       - name: Install Linux dependencies
         run: |
+          # Match ci.yml: pull pg_dump from PGDG so the dump-through-tunnel
+          # test isn't blocked by the Ubuntu 24.04 postgresql-client v16
+          # vs postgres:17 server mismatch.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSLo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf postgresql-client
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf postgresql-client-17
+          pg_dump --version
 
       - uses: dtolnay/rust-toolchain@stable
 

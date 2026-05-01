@@ -151,10 +151,8 @@ pub fn resolve_target(content: &str, target: &str) -> Option<ResolvedSshHost> {
                 active_match = false;
                 resolved.has_unsupported_directives = true;
             }
-            "include" | "proxyjump" | "proxycommand" => {
-                if active_match {
-                    resolved.has_unsupported_directives = true;
-                }
+            "include" | "proxyjump" | "proxycommand" if active_match => {
+                resolved.has_unsupported_directives = true;
             }
             "hostname" if active_match && resolved.host_name.is_none() => {
                 resolved.host_name = Some(value.to_string());
