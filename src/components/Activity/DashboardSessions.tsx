@@ -1,8 +1,9 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { api, ServerActivity } from "../../lib/tauri";
 import { formatDuration, filterSessions } from "../../lib/dashboardUtils";
 import { Loader2, XCircle, Search, Users } from "lucide-react";
 import { ConfirmDialog } from "../ConfirmDialog";
+import { usePolling } from "../../hooks/usePolling";
 
 interface Props {
   connectionId: string;
@@ -15,7 +16,6 @@ export function DashboardSessions({ connectionId, paused }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [killTarget, setKillTarget] = useState<ServerActivity | null>(null);
   const [search, setSearch] = useState("");
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchActivity = useCallback(async () => {
     try {
@@ -29,22 +29,10 @@ export function DashboardSessions({ connectionId, paused }: Props) {
     }
   }, [connectionId]);
 
-  useEffect(() => {
-    fetchActivity();
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [fetchActivity]);
-
-  useEffect(() => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    if (!paused) {
-      intervalRef.current = setInterval(fetchActivity, 2000);
-    }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [paused, fetchActivity]);
+  // Visibility-aware, re-entrancy-safe polling (see usePolling).
+  // Replaces a hand-rolled setInterval that kept firing while the
+  // window was minimized, accumulating in-flight Tauri calls.
+  usePolling(fetchActivity, 2000, !paused);
 
   const handleKill = async () => {
     if (!killTarget) return;

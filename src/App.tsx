@@ -67,14 +67,41 @@ function ResourceMonitor() {
   const [usage, setUsage] = useState({ memory_mb: 0, cpu_percent: 0 });
   useEffect(() => {
     let alive = true;
+    let inFlight = false;
     const poll = () => {
-      api.getAppResourceUsage().then((r) => {
-        if (alive) setUsage(r);
-      }).catch(() => {});
+      // Two layers of defense, both motivated by the v0.3.1 freeze
+      // bug. (1) When the window is minimized / on another desktop,
+      // skip the IPC entirely — there's no point updating a status
+      // bar nobody can see, and on Linux/WebKitGTK background-tab
+      // throttling is weak so the IPC backlog used to grow
+      // unbounded over hours of idle. (2) Drop the tick if the
+      // previous response hasn't come back yet — even if a single
+      // call ever stalls, we won't queue another one behind it.
+      if (!alive || inFlight || (typeof document !== "undefined" && document.hidden)) return;
+      inFlight = true;
+      api
+        .getAppResourceUsage()
+        .then((r) => {
+          if (alive) setUsage(r);
+        })
+        .catch(() => {})
+        .finally(() => {
+          inFlight = false;
+        });
     };
     poll();
     const id = setInterval(poll, 3000);
-    return () => { alive = false; clearInterval(id); };
+    // Catch up immediately when the window comes back so the user
+    // doesn't see a stale "30s ago" reading after un-minimizing.
+    const onVisibility = () => {
+      if (!document.hidden) poll();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      alive = false;
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, []);
   return (
     <div className="statusbar-left">

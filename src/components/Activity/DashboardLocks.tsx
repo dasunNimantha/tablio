@@ -1,6 +1,7 @@
-import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { api, LockInfo } from "../../lib/tauri";
 import { Loader2, ChevronUp, ChevronDown, Search, Lock } from "lucide-react";
+import { usePolling } from "../../hooks/usePolling";
 
 interface Props {
   connectionId: string;
@@ -16,7 +17,6 @@ export function DashboardLocks({ connectionId, paused }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("granted");
   const [sortAsc, setSortAsc] = useState(true);
   const [search, setSearch] = useState("");
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchLocks = useCallback(async () => {
     try {
@@ -30,22 +30,10 @@ export function DashboardLocks({ connectionId, paused }: Props) {
     }
   }, [connectionId]);
 
-  useEffect(() => {
-    fetchLocks();
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [fetchLocks]);
-
-  useEffect(() => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    if (!paused) {
-      intervalRef.current = setInterval(fetchLocks, 2000);
-    }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [paused, fetchLocks]);
+  // Visibility-aware, re-entrancy-safe polling. See usePolling and
+  // DashboardSessions for context on why hand-rolled setInterval was
+  // dangerous when the window stayed minimized for hours.
+  usePolling(fetchLocks, 2000, !paused);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
