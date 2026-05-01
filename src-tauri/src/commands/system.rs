@@ -1,5 +1,7 @@
 use serde::Serialize;
+#[cfg(target_os = "linux")]
 use std::sync::Mutex;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 #[cfg(not(target_os = "linux"))]
 use sysinfo::ProcessRefreshKind;
@@ -23,13 +25,19 @@ pub struct AppResourceUsage {
 /// fell behind on Tauri IPC, the WebKit IPC socket's Recv-Q backed
 /// up, and the entire UI froze — recoverable only by restarting the
 /// app. See `fix/resource-monitor-fd-leak`.
+///
+/// Only the Linux fast path consumes this state; the macOS/Windows
+/// fallback in [`read_cpu_percent`] uses sysinfo's own back-to-back
+/// snapshot mechanism and doesn't carry any cached jiffy count, so we
+/// gate the cache (and its `Duration`/`Instant`/`Mutex` imports) to
+/// `target_os = "linux"` to keep non-Linux builds warning-free.
+#[cfg(target_os = "linux")]
 struct CpuSample {
     /// Last `(now, /proc/self/stat utime+stime in jiffies)` we observed.
-    /// Linux fast path only; other platforms always set this to `None`
-    /// and rely on the sysinfo fallback inside [`read_cpu_percent`].
     last: Option<(Instant, u64)>,
 }
 
+#[cfg(target_os = "linux")]
 static CPU_SAMPLE: std::sync::LazyLock<Mutex<CpuSample>> =
     std::sync::LazyLock::new(|| Mutex::new(CpuSample { last: None }));
 
