@@ -143,11 +143,13 @@ sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev \
 ```
 
 ```bash
-git clone https://github.com/dasunNimantha/tablio.git
+git clone --single-branch --branch master https://github.com/dasunNimantha/tablio.git
 cd tablio
 npm install
 npm run tauri build
 ```
+
+> **Note**: Always clone (or fork) with `--single-branch --branch master`. The `gh-pages` branch hosts the APT/RPM repositories and contains every released `.deb` and `.rpm` binary, so a default full clone pulls hundreds of megabytes of package history that you don't need to build the app.
 
 ---
 
