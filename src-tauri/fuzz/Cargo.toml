@@ -17,7 +17,12 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
-[dependencies.tablio_lib]
+# The parent crate publishes its package as `tablio` and its library as
+# `tablio_lib` (see `[package].name` and `[lib].name` in ../Cargo.toml).
+# Cargo path deps resolve by *package* name, so we depend on `tablio`
+# here; the targets still `use tablio_lib::…` because that is the lib's
+# public crate name.
+[dependencies.tablio]
 path = ".."
 
 # Each fuzz target is its own bin so libfuzzer can link them with a custom

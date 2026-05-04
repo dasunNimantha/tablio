@@ -39,14 +39,40 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install cargo-audit
+        # Use a prebuilt binary; building cargo-audit from source on
+        # every nightly is slow and keeps pulling fresh versions of
+        # `rustsec` whose Cargo.lock can drift in ways unrelated to us.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
       - name: Rust advisory check
         # Surfaces RUSTSEC IDs Dependabot does NOT raise PRs for
         # (yanked crates, unmaintained advisories, license drift).
         # Cargo manifest lives at src-tauri/, not the repo root.
-        uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: src-tauri
+        #
+        # Why inline `cargo audit` instead of `rustsec/audit-check`?
+        #   * The action requires `checks: write` permission, which
+        #     this workflow's read-only default does not grant.
+        #   * The action is still on Node 20 (deprecated June 2026).
+        #   * The action publishes a Check Run UI we don't use.
+        #
+        # The `--ignore` list below tracks advisories we cannot fix
+        # ourselves right now. Re-evaluate every release:
+        #   * RUSTSEC-2023-0071 — `rsa` Marvin timing sidechannel.
+        #     No patch upstream; pulled by sqlx-mysql.
+        #   * RUSTSEC-2026-0098 / 0099 / 0104 — `rustls-webpki 0.101.7`
+        #     vulnerabilities. Patched in 0.103.x; we still pull 0.101
+        #     transitively via tauri's HTTP plugin. Bumping rustls is
+        #     a separate, targeted dep update.
+        working-directory: src-tauri
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2026-0098 \
+            --ignore RUSTSEC-2026-0099 \
+            --ignore RUSTSEC-2026-0104
 
       - uses: actions/setup-node@v6
         with:
