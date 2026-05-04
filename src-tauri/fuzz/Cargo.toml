@@ -22,6 +22,18 @@ libfuzzer-sys = "0.4"
 # Cargo path deps resolve by *package* name, so we depend on `tablio`
 # here; the targets still `use tablio_lib::…` because that is the lib's
 # public crate name.
+#
+# This fuzz crate is intentionally outside the parent workspace (per
+# `[workspace]` below), which means it has its own dependency
+# resolution. To keep the resolved tauri / tauri-build / tauri-codegen
+# / tauri-runtime versions identical to what the parent compiles
+# against (otherwise the codegen + runtime drift across minor
+# releases — e.g. `ResolvedCommand` adding a `referenced_by` field —
+# breaks `tauri::generate_handler!` expansion), the committed
+# `Cargo.lock` next to this manifest pins the same versions the parent
+# uses. CI invokes `cargo fuzz run` which respects the lockfile;
+# regenerate via `cargo +nightly update` only after verifying the new
+# tauri family compiles in both crates.
 [dependencies.tablio]
 path = ".."
 

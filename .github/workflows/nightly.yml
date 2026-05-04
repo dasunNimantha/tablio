@@ -515,10 +515,19 @@ jobs:
         # statically linked libc, disable it using `-C
         # target-feature=-crt-static`". Forcing the GNU triple keeps the
         # sanitizer compatible.
+        # `--locked` is critical: the fuzz crate is intentionally outside
+        # the parent workspace, so it has its own resolver. Without the
+        # committed `src-tauri/fuzz/Cargo.lock`, CI re-resolves the tauri
+        # family on every run and can drift across the codegen/runtime
+        # boundary (`ResolvedCommand` field churn breaks
+        # `tauri::generate_handler!` expansion). `--locked` makes that
+        # resolution opt-out: builds fail loudly if the lockfile is
+        # missing or stale instead of silently picking new versions.
         run: |
           cargo +nightly fuzz run ${{ matrix.target }} \
             --fuzz-dir src-tauri/fuzz \
             --target x86_64-unknown-linux-gnu \
+            --locked \
             -- -max_total_time=300
 
       - name: Upload crash artifacts
