@@ -14,6 +14,12 @@ pub struct MysqlDriver {
 
 impl MysqlDriver {
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
+        // `DISABLED` (not `PREFERRED`) when the user opts out of SSL:
+        // `PREFERRED` still negotiates TLS if the server advertises it,
+        // and legacy MySQL 5.x servers advertise TLS 1.0/1.1 cipher
+        // suites that sqlx's rustls client refuses, producing
+        // `received fatal alert: HandshakeFailure` on every query.
+        // Unchecking "Use SSL" should mean plaintext, full stop.
         let ssl_mode = if config.ssl {
             if config.trust_server_cert {
                 "REQUIRED"
@@ -21,7 +27,7 @@ impl MysqlDriver {
                 "VERIFY_IDENTITY"
             }
         } else {
-            "PREFERRED"
+            "DISABLED"
         };
         let db_segment = if config.database.trim().is_empty() {
             String::new()
@@ -331,10 +337,16 @@ impl DatabaseDriver for MysqlDriver {
                 .unwrap_or(0)
         };
 
-        let ts_row = sqlx::query("SELECT CAST(UNIX_TIMESTAMP() * 1000 AS DOUBLE) AS ts")
-            .fetch_one(&self.pool)
-            .await?;
-        let timestamp_ms: f64 = ts_row.try_get::<f64, _>("ts").unwrap_or(0.0);
+        // Use the local wall clock instead of round-tripping through
+        // the server: the previous `CAST(... AS DOUBLE)` is rejected by
+        // MySQL 5.7 (`AS DOUBLE` is an 8.0 cast target) and the value
+        // is just "milliseconds since the epoch on this machine" —
+        // there is no DB-side correctness benefit to asking the server
+        // for it. Saves a round trip too.
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
 
         Ok(DatabaseStats {
             active_connections: active,

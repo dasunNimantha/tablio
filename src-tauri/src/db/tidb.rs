@@ -14,6 +14,10 @@ pub struct TidbDriver {
 
 impl TidbDriver {
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
+        // `DISABLED` (not `PREFERRED`) when the user opts out of SSL —
+        // see `db/mysql.rs::connect` for the full rationale. TiDB
+        // shares the MySQL wire protocol so it inherits the same
+        // legacy-TLS handshake hazard.
         let ssl_mode = if config.ssl {
             if config.trust_server_cert {
                 "REQUIRED"
@@ -21,7 +25,7 @@ impl TidbDriver {
                 "VERIFY_IDENTITY"
             }
         } else {
-            "PREFERRED"
+            "DISABLED"
         };
         let db_segment = if config.database.trim().is_empty() {
             String::new()
@@ -282,10 +286,12 @@ impl DatabaseDriver for TidbDriver {
                 .unwrap_or(0)
         };
 
-        let ts_row = sqlx::query("SELECT CAST(UNIX_TIMESTAMP() * 1000 AS DOUBLE) AS ts")
-            .fetch_one(&self.pool)
-            .await?;
-        let timestamp_ms: f64 = ts_row.try_get::<f64, _>("ts").unwrap_or(0.0);
+        // Local wall clock — see `db/mysql.rs::get_database_stats` for
+        // why we no longer ask the server for the timestamp.
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
 
         Ok(DatabaseStats {
             active_connections: active,

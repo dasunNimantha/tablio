@@ -711,11 +711,48 @@ pub async fn my_alter_table(
                 )
             }
             AlterTableOperation::RenameColumn { old_name, new_name } => {
+                // `RENAME COLUMN` is only available from MySQL 8.0.3
+                // onward; legacy 5.7 (still in our nightly matrix) and
+                // older MariaDB releases reject it. `CHANGE COLUMN`,
+                // which has been valid syntax since the dawn of MySQL,
+                // accomplishes the same rename but requires the full
+                // column definition. Reconstruct that definition from
+                // INFORMATION_SCHEMA so we preserve the type,
+                // nullability, and default across the rename.
+                let col_sql = "SELECT CAST(COLUMN_TYPE AS CHAR) AS COLUMN_TYPE, \
+                                       IS_NULLABLE, \
+                                       COLUMN_DEFAULT \
+                               FROM information_schema.COLUMNS \
+                               WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?";
+                let row = sqlx::query(col_sql)
+                    .bind(database)
+                    .bind(&current_table)
+                    .bind(old_name)
+                    .fetch_optional(pool)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow!("Column {} not found in table {}", old_name, current_table)
+                    })?;
+                let col_type: String = row.get("COLUMN_TYPE");
+                let is_nullable: String = row.get("IS_NULLABLE");
+                let default_value: Option<String> = row.try_get("COLUMN_DEFAULT").ok();
+                let null_part = if is_nullable.eq_ignore_ascii_case("NO") {
+                    " NOT NULL"
+                } else {
+                    ""
+                };
+                let default_part = match default_value {
+                    Some(d) if !d.is_empty() => format!(" DEFAULT {}", d),
+                    _ => String::new(),
+                };
                 format!(
-                    "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                    "ALTER TABLE {} CHANGE COLUMN {} {} {}{}{}",
                     table_ref,
                     quote_ident(old_name),
-                    quote_ident(new_name)
+                    quote_ident(new_name),
+                    col_type,
+                    null_part,
+                    default_part
                 )
             }
             AlterTableOperation::ChangeColumnType {
