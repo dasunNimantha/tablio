@@ -2,16 +2,18 @@ name: CodeQL
 
 # Why advanced setup instead of GitHub's default code-scanning?
 #
-#   * Default setup ALWAYS runs on every PR to the default branch.
-#     There's no knob in repo settings to turn that off — the only way
-#     to get push-only scanning is to disable default setup and supply
-#     this advanced-setup workflow.
-#   * PR scanning duplicates work the regular CI matrix already covers
-#     (clippy on Rust, eslint+vitest on TS, etc.) and adds 3-7 minutes
-#     to every PR for findings that almost never need to be addressed
-#     before merge.
-#   * Push-to-master + weekly schedule keeps the security tab
-#     populated without paying that PR-time tax.
+#   * Default setup ALWAYS runs on every PR to the default branch and
+#     on every push. There's no knob in repo settings to turn that off
+#     — the only way to scan on a custom schedule is to disable default
+#     setup and supply this advanced-setup workflow.
+#   * Per-push scanning duplicates work the regular CI matrix already
+#     covers (clippy on Rust, eslint+vitest on TS, etc.) and adds
+#     ~10 minutes per push for findings that almost never need to be
+#     addressed before merge.
+#   * A nightly schedule keeps the security tab fresh without paying
+#     that per-push tax. Findings introduced during the day surface in
+#     the next morning's run, which matches how we already triage
+#     advisory output from the Nightly workflow.
 #
 # Languages match what default setup was configured for as of
 # 2026-04-30 ({"actions","javascript","javascript-typescript","rust",
@@ -19,12 +21,11 @@ name: CodeQL
 # of `javascript-typescript` so we collapse them here).
 
 on:
-  push:
-    branches: [master]
   schedule:
-    # Weekly Friday at 07:34 UTC. Randomised minute (not :00) keeps us
-    # off GitHub's hourly burst window so the queue stays warm.
-    - cron: "34 7 * * 5"
+    # Nightly at 03:27 UTC. Off-the-hour minute keeps us out of GitHub's
+    # top-of-hour burst window, and 03:27 sits ~30 min before the main
+    # `nightly.yml` cron at 04:00 UTC so they don't compete for runners.
+    - cron: "27 3 * * *"
   workflow_dispatch:
 
 # `security-events: write` is the only token scope CodeQL strictly
