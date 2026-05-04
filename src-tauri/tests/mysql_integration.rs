@@ -1786,9 +1786,12 @@ async fn validate_query_empty_string() {
 
 const MYSQL_BIG_DATA_ROWS: i64 = 1_000_000;
 
-/// MySQL has no `generate_series`, so we materialise a million rows by
-/// chained joins on a CTE numbers table. Faster than a million round-trips
-/// and works on every supported MySQL/MariaDB version.
+/// MySQL has no `generate_series`, so we materialise a million rows by a
+/// 6-way cross-join on a small persistent digits helper table. This works
+/// identically on MySQL and MariaDB without depending on session-scoped
+/// state: the previous CTE-based approach issued
+/// `SET SESSION cte_max_recursion_depth` and the recursive `INSERT` on
+/// separate sqlx pool checkouts, so the bump never reached the recursion.
 async fn mysql_seed_million_rows(
     driver: &MysqlDriver,
     db: &str,
@@ -1803,26 +1806,34 @@ async fn mysql_seed_million_rows(
     );
     driver.execute_query(db, &create_sql).await?;
 
-    // Recursive CTE produces the integers 1..=N in a single statement.
-    // MySQL caps `cte_max_recursion_depth` at 1000 by default; bump it
-    // to N so we can fan out without partitioning the insert.
-    let bump = format!(
-        "SET SESSION cte_max_recursion_depth = {n}",
-        n = MYSQL_BIG_DATA_ROWS + 1
-    );
-    let _ = driver.execute_query(db, &bump).await; // ignored on MariaDB
+    // Persistent (non-temporary) helper table so the digits survive
+    // every pool-connection checkout. Six joins over 0..=9 generate the
+    // 1_000_000-row sequence in a single INSERT.
+    let digits_table = format!("`{db}`.`tablio_digits_seed_{table}`");
+    let drop_digits = format!("DROP TABLE IF EXISTS {digits_table}");
+    driver.execute_query(db, &drop_digits).await?;
+    let create_digits = format!("CREATE TABLE {digits_table} (d TINYINT NOT NULL PRIMARY KEY)");
+    driver.execute_query(db, &create_digits).await?;
+    let fill_digits =
+        format!("INSERT INTO {digits_table} (d) VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)");
+    driver.execute_query(db, &fill_digits).await?;
 
     let insert_sql = format!(
         "INSERT INTO `{db}`.`{table}` (id, payload) \
-         WITH RECURSIVE seq(n) AS ( \
-             SELECT 1 \
-             UNION ALL \
-             SELECT n + 1 FROM seq WHERE n < {n} \
-         ) \
-         SELECT n, CONCAT('row-', n) FROM seq",
+         SELECT n, CONCAT('row-', n) FROM ( \
+             SELECT (d6.d * 100000 + d5.d * 10000 + d4.d * 1000 \
+                     + d3.d * 100 + d2.d * 10 + d1.d) + 1 AS n \
+             FROM {dt} d1 \
+             CROSS JOIN {dt} d2 CROSS JOIN {dt} d3 \
+             CROSS JOIN {dt} d4 CROSS JOIN {dt} d5 CROSS JOIN {dt} d6 \
+         ) AS series \
+         WHERE n <= {n}",
+        dt = digits_table,
         n = MYSQL_BIG_DATA_ROWS
     );
     driver.execute_query(db, &insert_sql).await?;
+
+    driver.execute_query(db, &drop_digits).await?;
     Ok(())
 }
 

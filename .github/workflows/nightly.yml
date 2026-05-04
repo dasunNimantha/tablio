@@ -42,9 +42,11 @@ jobs:
       - name: Rust advisory check
         # Surfaces RUSTSEC IDs Dependabot does NOT raise PRs for
         # (yanked crates, unmaintained advisories, license drift).
+        # Cargo manifest lives at src-tauri/, not the repo root.
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: src-tauri
 
       - uses: actions/setup-node@v6
         with:
@@ -463,7 +465,15 @@ jobs:
             src-tauri/fuzz
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        # Use a prebuilt binary instead of `cargo install cargo-fuzz`.
+        # The published `cargo-fuzz 0.13.1` Cargo.lock pins a `rustix` that
+        # uses rustc-internal attributes the current nightly no longer
+        # accepts, so source builds fail. The prebuilt binary sidesteps
+        # the entire compile and the nightly toolchain is still used to
+        # actually run the fuzz target below.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
       - name: Fuzz ${{ matrix.target }} for 5 minutes
         # `-max_total_time=300` caps each target at 300s of mutation;
