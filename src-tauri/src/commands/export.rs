@@ -54,6 +54,8 @@ pub async fn export_table_to_file(
     request: ExportRequest,
     file_path: String,
 ) -> Result<(), String> {
+    let file_path = crate::util::path::expand_tilde(&file_path);
+
     let driver = pool
         .get_driver(&request.connection_id)
         .await
@@ -120,6 +122,8 @@ pub async fn export_query_result_to_file(
     request: ExportResultRequest,
     file_path: String,
 ) -> Result<(), String> {
+    let file_path = crate::util::path::expand_tilde(&file_path);
+
     let table_name = request
         .table_name
         .unwrap_or_else(|| "query_result".to_string());

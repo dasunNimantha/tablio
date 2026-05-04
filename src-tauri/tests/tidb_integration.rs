@@ -205,8 +205,8 @@ async fn tidb_list_indexes() {
     let idx = driver.list_indexes(&db, &db, &tbl).await.unwrap();
     let names: Vec<&str> = idx.iter().map(|i| i.name.as_str()).collect();
     assert!(names.contains(&"PRIMARY"));
-    assert!(names.iter().any(|n| *n == "idx_name"));
-    assert!(names.iter().any(|n| *n == "uq_id_name"));
+    assert!(names.contains(&"idx_name"));
+    assert!(names.contains(&"uq_id_name"));
 
     driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }

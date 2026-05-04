@@ -4,10 +4,44 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
     <title>Tablio</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!--
+      Critical-path styles + boot script that paint the saved theme's
+      background colour BEFORE the JS bundle loads. Without this the
+      cold start flashes white between the WebView's first paint and
+      the moment global.css + applyTheme() arrive (issue #78).
+
+      The style block uses just the two background colours we ship as
+      defaults; the rest of the palette comes from global.css and the
+      runtime theme. We only need to cover frame 1 → frame N (bundle
+      load), which is short enough that "approximately the right
+      colour" is indistinguishable from "exactly the right colour".
+    -->
+    <style>
+      html, body, #root { background-color: #1e1e22; }
+      html[data-theme="light"],
+      html[data-theme="light"] body,
+      html[data-theme="light"] #root { background-color: #ffffff; }
+    </style>
+    <script>
+      // Runs synchronously before <script type="module"> so the
+      // WebView never paints the default browser white background.
+      // Mirrors the heuristic in src/lib/themes.ts: every theme id we
+      // ship for the light group ends in "light" (light, github-light,
+      // solarized-light), which keeps this guard tiny and free of a
+      // duplicated theme list.
+      try {
+        var saved = localStorage.getItem("tablio-theme");
+        var isLight = typeof saved === "string" && /(?:^|[-])light$/.test(saved);
+        document.documentElement.setAttribute("data-theme", isLight ? "light" : "dark");
+      } catch (_) {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

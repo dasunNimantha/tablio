@@ -2,6 +2,7 @@ pub mod commands;
 pub mod db;
 pub mod export;
 pub mod models;
+pub mod util;
 
 use commands::backup::*;
 use commands::connection::*;

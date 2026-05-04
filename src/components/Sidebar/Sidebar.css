@@ -261,7 +261,12 @@
 
 .tree-label {
   flex: 1 1 auto;
-  min-width: 60px;
+  /* Allow the label to shrink all the way to zero on narrow sidebars
+     so ellipsis kicks in *before* the hover-action overlay starts to
+     clip the visible text. The previous 60px floor was holding the
+     label open and forcing the icons + name into the action buttons
+     (issue #92). */
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -320,6 +325,22 @@
   right: 4px;
   top: 0;
   height: 34px;
+  /* The actions overlay is a sibling of `.tree-node` (not a child),
+     so it can't inherit the row's hover background directly. The
+     hovered row paints `--bg-secondary` (from the sidebar) plus a
+     translucent `--bg-hover` layer on top. To make the overlay
+     visually identical to the rest of the row when revealed, we
+     stack the same two layers ourselves: a solid `--bg-secondary`
+     base for opacity (so it hides text behind it), and a
+     translucent `--bg-hover` "tint" on top to match the row's
+     composite colour (issue #92). The `mask-image` softens the
+     leading edge so the overlay fades into the row's content
+     instead of appearing as a hard rectangle. */
+  background-color: var(--bg-secondary);
+  background-image: linear-gradient(var(--bg-hover), var(--bg-hover));
+  padding-left: 16px;
+  -webkit-mask-image: linear-gradient(to right, transparent 0, black 14px);
+  mask-image: linear-gradient(to right, transparent 0, black 14px);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;

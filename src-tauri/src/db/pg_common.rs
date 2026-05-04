@@ -1625,8 +1625,8 @@ mod tests {
     }
     #[test]
     fn json_to_sql_float() {
-        let n = serde_json::Number::from_f64(3.14).unwrap();
-        assert_eq!(json_to_sql_literal(&serde_json::Value::Number(n)), "3.14");
+        let n = serde_json::Number::from_f64(7.25).unwrap();
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Number(n)), "7.25");
     }
     #[test]
     fn json_to_sql_string_simple() {

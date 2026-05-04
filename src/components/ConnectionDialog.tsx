@@ -648,6 +648,7 @@ function SshTunnelSection({
     }
   };
 
+
   // ssh-config import: read ~/.ssh/config and fill the SSH section from
   // the matching Host block. Empty fields are filled; non-empty fields
   // are left alone so the user's typed values aren't clobbered. We also
@@ -794,7 +795,7 @@ function SshTunnelSection({
               className={`form-group flex-1${getFieldError("ssh_host") ? " form-group--error" : ""}`}
             >
               <label>Tunnel host</label>
-              <div className="ssh-file-picker">
+              <div className="file-picker">
                 <input
                   value={form.ssh_host ?? ""}
                   onChange={(e) => updateField("ssh_host", e.target.value)}
@@ -804,7 +805,7 @@ function SshTunnelSection({
                 />
                 <button
                   type="button"
-                  className="btn-secondary ssh-file-picker__browse"
+                  className="btn-secondary file-picker__browse"
                   onClick={applySshConfig}
                   title="Look up the current host in ~/.ssh/config and fill empty fields"
                 >
@@ -920,7 +921,7 @@ function SshTunnelSection({
                 className={`form-group flex-1${getFieldError("ssh_key_path") ? " form-group--error" : ""}`}
               >
                 <label>Identity file</label>
-                <div className="ssh-file-picker">
+                <div className="file-picker">
                   <input
                     value={form.ssh_key_path ?? ""}
                     onChange={(e) => updateField("ssh_key_path", e.target.value)}
@@ -930,7 +931,7 @@ function SshTunnelSection({
                   />
                   <button
                     type="button"
-                    className="btn-secondary ssh-file-picker__browse"
+                    className="btn-secondary file-picker__browse"
                     onClick={browseForKey}
                   >
                     Browse…
@@ -1101,6 +1102,24 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
     setForm((prev) => ({ ...prev, [field]: value }));
     setTestResult(null);
     setTestError("");
+  };
+
+  const browseForSqliteFile = async () => {
+    try {
+      // No filters here on purpose: the `["*"]` "All files" pattern
+      // is interpreted differently across platforms (GTK matches only
+      // files with a dot, macOS NSOpenPanel handles it oddly), and
+      // SQLite databases don't all use the same extension. Users with
+      // an unusual filename can still type the path in the input.
+      const path = await openFileDialog({
+        multiple: false,
+        directory: false,
+        title: "Select SQLite database file",
+      });
+      if (typeof path === "string" && path) updateField("database", path);
+    } catch {
+      // User cancelled — no-op.
+    }
   };
 
   const validateBeforeSubmit = () => {
@@ -1279,15 +1298,24 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                     <FormField
                       label="Database File Path"
                       error={getFieldError("database")}
-                      description="SQLite connections use a local database file instead of a network host."
+                      description="SQLite connections use a local database file instead of a network host. Tilde paths like ~/database.db are supported."
                     >
-                      <input
-                        value={form.database}
-                        onChange={(e) => updateField("database", e.target.value)}
-                        onBlur={() => touchField("database")}
-                        placeholder="/path/to/database.db"
-                        aria-invalid={!!getFieldError("database")}
-                      />
+                      <div className="file-picker">
+                        <input
+                          value={form.database}
+                          onChange={(e) => updateField("database", e.target.value)}
+                          onBlur={() => touchField("database")}
+                          placeholder="~/database.db"
+                          aria-invalid={!!getFieldError("database")}
+                        />
+                        <button
+                          type="button"
+                          className="btn-secondary file-picker__browse"
+                          onClick={browseForSqliteFile}
+                        >
+                          Browse…
+                        </button>
+                      </div>
                     </FormField>
                   ) : (
                     <>

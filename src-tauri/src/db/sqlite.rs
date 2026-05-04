@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::db::DatabaseDriver;
 use crate::models::*;
+use crate::util::path::expand_tilde;
 
 pub struct SqliteDriver {
     pool: SqlitePool,
@@ -13,17 +14,55 @@ pub struct SqliteDriver {
 
 impl SqliteDriver {
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
-        let url = if config.database.starts_with("sqlite:") {
-            config.database.clone()
+        // The user-typed value can be either a bare filesystem path
+        // (most common, e.g. `~/database.db` or `./foo.db`) or an
+        // explicit `sqlite:` URL with query params or `sqlite::memory:`.
+        // Tilde-expand the path form so shell conventions work in the
+        // GUI; leave URLs alone because their syntax is sqlx's domain
+        // (apart from a tilde in the path component).
+        let (url, resolved_for_error) = if let Some(rest) = config.database.strip_prefix("sqlite:")
+        {
+            // Preserve `?mode=...` and similar URL params verbatim.
+            let (path_part, query_part) = match rest.find('?') {
+                Some(idx) => (&rest[..idx], &rest[idx..]),
+                None => (rest, ""),
+            };
+            let expanded = expand_tilde(path_part);
+            let url = format!("sqlite:{}{}", expanded, query_part);
+            (url, expanded)
         } else {
-            format!("sqlite:{}", config.database)
+            let resolved = expand_tilde(&config.database);
+            (format!("sqlite:{}", resolved), resolved)
         };
+
+        // Defer existence + permission checking to sqlx so we report
+        // the actual OS error (ENOENT, EACCES, network share offline,
+        // sandbox denial, etc.) instead of guessing. Wrap with the
+        // resolved path so users can tell whether tilde expansion
+        // worked, especially when the input differed from what was
+        // ultimately opened.
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .min_connections(0)
             .idle_timeout(Duration::from_secs(1800))
             .connect(&url)
-            .await?;
+            .await
+            .map_err(|e| {
+                if resolved_for_error != config.database {
+                    anyhow::anyhow!(
+                        "Failed to open SQLite database at {} (resolved from \"{}\"): {}",
+                        resolved_for_error,
+                        config.database,
+                        e
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "Failed to open SQLite database at {}: {}",
+                        resolved_for_error,
+                        e
+                    )
+                }
+            })?;
         Ok(Self { pool })
     }
 }
@@ -1185,5 +1224,223 @@ mod tests {
         assert!(sql_default_is_unsafe("'x'; DROP TABLE users"));
         assert!(sql_default_is_unsafe("'x' -- comment"));
         assert!(sql_default_is_unsafe("'x' /* comment */"));
+    }
+
+    // -----------------------------------------------------------------------
+    // SqliteDriver::connect — regression tests for issue #106
+    // (tilde paths and other path-form handling).
+    // -----------------------------------------------------------------------
+
+    fn sqlite_config(database: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: "test".into(),
+            db_type: DbType::Sqlite,
+            database: database.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Tests that mutate `$HOME` must run one at a time. cargo runs
+    /// tests in parallel by default and `dirs::home_dir()` reads the
+    /// env var lazily, so without serialisation a parallel test can
+    /// flip `$HOME` mid-`connect()` and break tilde resolution.
+    #[cfg(unix)]
+    fn home_env_lock() -> &'static tokio::sync::Mutex<()> {
+        use std::sync::OnceLock;
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// Run `body` with `$HOME` retargeted to `home_dir`, restoring the
+    /// previous value before returning. The lock guarantees no
+    /// sibling test can race on `$HOME` while we're inside.
+    #[cfg(unix)]
+    async fn with_home<F, Fut, T>(home_dir: &std::path::Path, body: F) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let _guard = home_env_lock().lock().await;
+        let original = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", home_dir);
+        }
+        let result = body().await;
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        result
+    }
+
+    /// Helper: open + run `SELECT 1` so we can assert connect+query
+    /// succeed without needing `Debug` on `SqliteDriver`.
+    async fn connect_and_select_one(cfg: &ConnectionConfig) -> Result<i64> {
+        let driver = SqliteDriver::connect(cfg).await?;
+        let row: (i64,) = sqlx::query_as("SELECT 1").fetch_one(&driver.pool).await?;
+        Ok(row.0)
+    }
+
+    /// `connect` opens an existing file when given an absolute path.
+    /// Establishes the baseline before exercising the path-rewriting
+    /// branches.
+    #[tokio::test]
+    async fn connect_opens_existing_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baseline.db");
+        // Touch the file so sqlx (with default `create_if_missing=false`)
+        // will find it.
+        std::fs::File::create(&path).unwrap();
+
+        let cfg = sqlite_config(path.to_str().unwrap());
+        let result = connect_and_select_one(&cfg).await;
+        match result {
+            Ok(v) => assert_eq!(v, 1),
+            Err(e) => panic!("should open existing absolute-path SQLite file: {e:#}"),
+        }
+    }
+
+    /// `connect` expands a leading `~/...` against `$HOME`. We retarget
+    /// `$HOME` to a tempdir so the test never touches the real home,
+    /// then assert that the file opens via the tilde path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_expands_tilde_home_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("tilde-home.db");
+        std::fs::File::create(&db_path).unwrap();
+
+        let result = with_home(dir.path(), || async {
+            let cfg = sqlite_config("~/tilde-home.db");
+            connect_and_select_one(&cfg).await
+        })
+        .await;
+
+        match result {
+            Ok(v) => assert_eq!(v, 1),
+            Err(e) => panic!("tilde path should expand and open: {e:#}"),
+        }
+    }
+
+    /// A non-existent path surfaces an error that mentions both the
+    /// resolved filesystem path and the original user input, so the
+    /// dialog can show a useful diagnostic.
+    #[tokio::test]
+    async fn connect_missing_file_error_mentions_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.db");
+
+        let cfg = sqlite_config(missing.to_str().unwrap());
+        let err = match SqliteDriver::connect(&cfg).await {
+            Ok(_) => panic!("missing file should fail to open"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to open SQLite database"),
+            "expected wrapped error, got: {msg}"
+        );
+        assert!(
+            msg.contains(missing.to_str().unwrap()),
+            "expected resolved path in error, got: {msg}"
+        );
+    }
+
+    /// When the input differs from the resolved path (e.g. a tilde was
+    /// expanded), the error must show *both* so the user can tell
+    /// whether shell-style expansion ran as expected.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_missing_tilde_path_error_shows_both_forms() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = with_home(dir.path(), || async {
+            let cfg = sqlite_config("~/never-created.db");
+            SqliteDriver::connect(&cfg).await
+        })
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("missing tilde path should fail"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("~/never-created.db"),
+            "error should echo original input, got: {msg}"
+        );
+        assert!(
+            msg.contains("never-created.db") && msg.contains("resolved from"),
+            "error should mention resolved path, got: {msg}"
+        );
+    }
+
+    /// `sqlite::memory:` URLs must continue to open in-memory databases
+    /// and not be mistaken for a non-existent file path.
+    #[tokio::test]
+    async fn connect_memory_url_opens_in_memory_db() {
+        let cfg = sqlite_config("sqlite::memory:");
+        let driver = match SqliteDriver::connect(&cfg).await {
+            Ok(d) => d,
+            Err(e) => panic!("in-memory SQLite URL should open: {e:#}"),
+        };
+        sqlx::query("CREATE TABLE t (x INTEGER)")
+            .execute(&driver.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t VALUES (1), (2)")
+            .execute(&driver.pool)
+            .await
+            .unwrap();
+        let row: (i64,) = sqlx::query_as("SELECT count(*) FROM t")
+            .fetch_one(&driver.pool)
+            .await
+            .unwrap();
+        assert_eq!(row.0, 2);
+    }
+
+    /// Query-string params on `sqlite:` URLs (e.g. `?mode=rwc`) must
+    /// reach sqlx untouched so users can opt into create-if-missing
+    /// or read-only behaviour.
+    #[tokio::test]
+    async fn connect_url_with_query_string_creates_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rwc.db");
+        // Note: file does NOT exist beforehand.
+        let url = format!("sqlite:{}?mode=rwc", path.to_string_lossy());
+
+        let cfg = sqlite_config(&url);
+        match connect_and_select_one(&cfg).await {
+            Ok(v) => assert_eq!(v, 1),
+            Err(e) => panic!("?mode=rwc should create the file: {e:#}"),
+        }
+        assert!(
+            path.exists(),
+            "?mode=rwc should have created the database file"
+        );
+    }
+
+    /// Tilde inside the path component of an `sqlite:` URL is also
+    /// expanded — we don't want the URL form to be a footgun where the
+    /// path form works but `sqlite:~/foo` doesn't.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_url_with_tilde_in_path_is_expanded() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("url-tilde.db");
+        std::fs::File::create(&db_path).unwrap();
+
+        let result = with_home(dir.path(), || async {
+            let cfg = sqlite_config("sqlite:~/url-tilde.db");
+            connect_and_select_one(&cfg).await
+        })
+        .await;
+
+        match result {
+            Ok(v) => assert_eq!(v, 1),
+            Err(e) => panic!("tilde inside sqlite: URL should expand and open: {e:#}"),
+        }
     }
 }

@@ -337,7 +337,11 @@ async fn authenticate(
             if config.ssh_key_path.trim().is_empty() {
                 return Err(anyhow!("SSH identity file path is empty"));
             }
-            let key = load_secret_key(&config.ssh_key_path, &config.ssh_password).await?;
+            // Users routinely type `~/.ssh/id_ed25519`; the value
+            // arrives here verbatim from the dialog, so expand the
+            // shell-style tilde before opening the file.
+            let key_path = crate::util::path::expand_tilde(config.ssh_key_path.trim());
+            let key = load_secret_key(&key_path, &config.ssh_password).await?;
             let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key), Some(HashAlg::Sha256));
             session
                 .authenticate_publickey(user, key_with_hash)

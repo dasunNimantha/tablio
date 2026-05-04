@@ -1659,7 +1659,7 @@ mod tests {
     #[test]
     fn json_to_mssql_literal_number() {
         assert_eq!(json_to_mssql_literal(&serde_json::json!(42)), "42");
-        assert_eq!(json_to_mssql_literal(&serde_json::json!(3.14)), "3.14");
+        assert_eq!(json_to_mssql_literal(&serde_json::json!(7.25)), "7.25");
     }
 
     #[test]
@@ -1747,8 +1747,8 @@ mod tests {
 
     #[test]
     fn column_data_to_json_f64() {
-        let val = column_data_to_json(&ColumnData::F64(Some(3.14)));
-        assert!((val.as_f64().unwrap() - 3.14).abs() < 0.001);
+        let val = column_data_to_json(&ColumnData::F64(Some(7.25)));
+        assert!((val.as_f64().unwrap() - 7.25).abs() < 0.001);
     }
 
     #[test]

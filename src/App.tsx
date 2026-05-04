@@ -17,7 +17,7 @@ import { KnownHostsDialog } from "./components/KnownHostsDialog";
 import { useConnectionStore } from "./stores/connectionStore";
 import { useTabStore } from "./stores/tabStore";
 import { loader } from "@monaco-editor/react";
-import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick, ShieldCheck } from "lucide-react";
+import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick, ShieldCheck, Settings } from "lucide-react";
 import { themes, getThemeById, applyTheme } from "./lib/themes";
 import { syncMonacoTheme } from "./lib/monacoTheme";
 import { api } from "./lib/tauri";
@@ -132,9 +132,11 @@ export default function App() {
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showZoom, setShowZoom] = useState(false);
   const [showThemePicker, setShowThemePicker] = useState(false);
+  const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [showKnownHosts, setShowKnownHosts] = useState(false);
   const zoomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const themePickerRef = useRef<HTMLDivElement>(null);
+  const settingsMenuRef = useRef<HTMLDivElement>(null);
   const [themeId, setThemeId] = useState<string>(() => {
     return localStorage.getItem("tablio-theme") || "dark";
   });
@@ -258,6 +260,18 @@ export default function App() {
     }
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showThemePicker]);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (settingsMenuRef.current && !settingsMenuRef.current.contains(e.target as Node)) {
+        setShowSettingsMenu(false);
+      }
+    };
+    if (showSettingsMenu) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showSettingsMenu]);
 
   const applyZoom = useCallback((level: number) => {
     const clamped = Math.min(200, Math.max(50, Math.round(level)));
@@ -442,12 +456,25 @@ export default function App() {
                       </button>
                     ))}
                   </div>
+                </div>
+              )}
+            </div>
+            <div className="theme-picker-wrapper" ref={settingsMenuRef}>
+              <button
+                className="btn-icon"
+                onClick={() => setShowSettingsMenu((p) => !p)}
+                title="Settings"
+              >
+                <Settings size={14} />
+              </button>
+              {showSettingsMenu && (
+                <div className="theme-picker-popover">
                   <div className="theme-picker-group">
                     <div className="theme-picker-group-label">Settings</div>
                     <button
                       className="theme-picker-item"
                       onClick={() => {
-                        setShowThemePicker(false);
+                        setShowSettingsMenu(false);
                         setShowKnownHosts(true);
                       }}
                     >

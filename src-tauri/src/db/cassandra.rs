@@ -1188,8 +1188,8 @@ mod tests {
     #[test]
     fn cql_value_to_json_double() {
         use scylla::value::CqlValue;
-        let val = cql_value_to_json("", &CqlValue::Double(3.14));
-        assert!((val.as_f64().unwrap() - 3.14).abs() < 0.001);
+        let val = cql_value_to_json("", &CqlValue::Double(7.25));
+        assert!((val.as_f64().unwrap() - 7.25).abs() < 0.001);
     }
 
     #[test]

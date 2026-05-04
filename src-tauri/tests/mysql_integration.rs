@@ -222,8 +222,8 @@ async fn mysql_list_indexes() {
     let idx = driver.list_indexes(&db, &db, &tbl).await.unwrap();
     let names: Vec<&str> = idx.iter().map(|i| i.name.as_str()).collect();
     assert!(names.contains(&"PRIMARY"));
-    assert!(names.iter().any(|n| *n == "idx_name"));
-    assert!(names.iter().any(|n| *n == "uq_id_name"));
+    assert!(names.contains(&"idx_name"));
+    assert!(names.contains(&"uq_id_name"));
 
     let idx_name = idx.iter().find(|i| i.name == "idx_name").unwrap();
     assert!(!idx_name.is_unique);

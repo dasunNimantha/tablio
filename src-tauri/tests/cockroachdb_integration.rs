@@ -316,10 +316,10 @@ async fn crdb_list_triggers_returns_empty_or_ok() {
         .await
         .unwrap();
 
-    let result = driver.list_triggers(&db, SCHEMA, &tbl).await;
-    match result {
-        Ok(triggers) => assert!(triggers.is_empty()),
-        Err(_) => {} // acceptable — CockroachDB may error on trigger queries
+    // An `Err` here is acceptable — CockroachDB historically rejected
+    // some trigger metadata queries that PostgreSQL accepts.
+    if let Ok(triggers) = driver.list_triggers(&db, SCHEMA, &tbl).await {
+        assert!(triggers.is_empty());
     }
 
     driver

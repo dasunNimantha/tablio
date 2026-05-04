@@ -50,6 +50,43 @@ test.describe("Connection dialog — DB type switching", () => {
     await expect(page.locator(".connection-nav-item", { hasText: "Authentication" })).not.toBeVisible();
   });
 
+  test("SQLite path field has a Browse button and accepts tilde paths", async ({ page }) => {
+    await page.locator(".db-dropdown-trigger").click();
+    await page.locator(".db-dropdown-item", { hasText: "SQLite" }).click();
+
+    // The Browse… button must be wired up next to the path input so
+    // users can avoid typing the full path. Issue #106 was filed
+    // because typed `~/database.db` paths weren't being expanded.
+    const pathField = dialogField(page, "Database File Path");
+    await expect(pathField).toBeVisible();
+    await expect(pathField).toHaveAttribute("placeholder", /^~/);
+    const browseButton = page
+      .locator(".dialog")
+      .locator("label", { hasText: "Database File Path" })
+      .locator("..")
+      .locator("button", { hasText: "Browse" });
+    await expect(browseButton).toBeVisible();
+
+    // The input accepts tilde-prefixed paths verbatim — backend
+    // expansion happens on connect. Just confirm the typed value
+    // round-trips through the input without any UI-side rewriting.
+    await pathField.fill("~/database.db");
+    await expect(pathField).toHaveValue("~/database.db");
+  });
+
+  test("Browse button is hidden for non-SQLite database types", async ({ page }) => {
+    // The new file picker is SQLite-specific; PostgreSQL and friends
+    // get the network host/port form instead. Make sure we didn't
+    // accidentally render it everywhere.
+    await expect(
+      page
+        .locator(".dialog")
+        .locator("label", { hasText: "Database File Path" })
+        .locator("..")
+        .locator("button", { hasText: "Browse" }),
+    ).not.toBeVisible();
+  });
+
   test("SQLite hides SSL toggles", async ({ page }) => {
     await page.locator(".db-dropdown-trigger").click();
     await page.locator(".db-dropdown-item", { hasText: "SQLite" }).click();

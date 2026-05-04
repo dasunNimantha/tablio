@@ -546,11 +546,11 @@ mod tests {
     #[test]
     fn csv_number_types() {
         let cols = ["int".to_string(), "float".to_string()];
-        let n = serde_json::Number::from_f64(3.14).unwrap();
+        let n = serde_json::Number::from_f64(7.25).unwrap();
         let rows = vec![vec![Value::Number(42i64.into()), Value::Number(n)]];
         let out = to_csv(&cols, &rows);
         assert!(out.contains("42"));
-        assert!(out.contains("3.14"));
+        assert!(out.contains("7.25"));
     }
 
     // ── xlsx ──────────────────────────────────────────────────────────
@@ -601,7 +601,7 @@ mod tests {
         ];
         let rows = vec![vec![
             Value::Number(42i64.into()),
-            Value::Number(serde_json::Number::from_f64(3.14).unwrap()),
+            Value::Number(serde_json::Number::from_f64(7.25).unwrap()),
             Value::Bool(true),
             Value::String("hello".into()),
             Value::String("2024-05-01T12:30:00".into()),
@@ -628,7 +628,7 @@ mod tests {
             data_row[0]
         );
         assert!(
-            matches!(data_row[1], Data::Float(f) if (*f - 3.14).abs() < 1e-9),
+            matches!(data_row[1], Data::Float(f) if (*f - 7.25).abs() < 1e-9),
             "float cell should survive as numeric, got {:?}",
             data_row[1]
         );

@@ -421,6 +421,18 @@ body.zoom-compensated .app-root {
 .sidebar-content {
   flex: 1;
   overflow-y: auto;
+  /* Reserve space at the bottom equal to the status bar so the last
+     row in the tree clears the bar without needing the user to
+     overscroll. Using --statusbar-height keeps the two in lockstep. */
+  padding-bottom: var(--statusbar-height);
+}
+
+/* The last expanded connection's bottom border was rendering at the
+   very edge of the scroll viewport, which made the rule look like an
+   accidental hairline above the status bar. Drop it on the last
+   child so the scroll area ends cleanly. */
+.sidebar-content > .tree-root:last-child {
+  border-bottom: none;
 }
 
 .empty-state {
