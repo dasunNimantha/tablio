@@ -180,7 +180,13 @@ jobs:
             version: "5.7"
             test: mysql_integration
             url_env: TEST_MYSQL_URL
-            url: "mysql://root:test@localhost:3306/testdb"
+            # `ssl-mode=DISABLED` is required for the 5.7 image: the
+            # default container ships with a self-signed cert + legacy
+            # TLS suite that sqlx's rustls client cannot negotiate
+            # (`received fatal alert: HandshakeFailure`). Plaintext is
+            # safe here because the server only listens on the runner's
+            # loopback inside the same job.
+            url: "mysql://root:test@localhost:3306/testdb?ssl-mode=DISABLED"
     services:
       postgres:
         image: ${{ matrix.engine == 'postgres' && format('postgres:{0}', matrix.version) || '' }}
