@@ -42,6 +42,21 @@ path = ".."
 # minimal — adding `test = false` and `doc = false` shaves a small but
 # noticeable chunk off cold-build time on CI.
 
+# cargo-fuzz appends `-Cdebug-assertions` to RUSTFLAGS, which only affects
+# *target* crates (the path that consumes `tauri::generate_context!()`).
+# Build-script deps and proc-macros are compiled via `build-override`,
+# which defaults to `debug-assertions = false`. `tauri-utils` gates the
+# `ResolvedCommand::referenced_by` field *and* the `ToTokens` impl that
+# materialises that field on `#[cfg(debug_assertions)]`. When the two
+# compilation contexts disagree, `tauri-build`'s codegen emits a struct
+# literal that omits `referenced_by` while the target-side struct
+# definition still requires it, producing
+#   error[E0063]: missing field `referenced_by` in initializer of `ResolvedCommand`
+# during fuzz builds. Forcing debug-assertions on for build-overrides
+# realigns the two contexts so the generated tokens match the struct shape.
+[profile.release.build-override]
+debug-assertions = true
+
 [[bin]]
 name = "ssh_config"
 path = "fuzz_targets/ssh_config.rs"
