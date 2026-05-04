@@ -505,9 +505,20 @@ jobs:
         # `-max_total_time=300` caps each target at 300s of mutation;
         # libFuzzer exits 0 on time-out (no crashes found) and non-zero
         # on a discovered crash, which is exactly the gate we want.
+        #
+        # `--target x86_64-unknown-linux-gnu` is required because the
+        # cargo-fuzz binary distributed via cargo-binstall is itself
+        # statically linked against musl, and cargo-fuzz infers its own
+        # triple as the default. AddressSanitizer (`-Zsanitizer=address`,
+        # used by libfuzzer-sys) is incompatible with statically linked
+        # libc, so the build fails with "sanitizer is incompatible with
+        # statically linked libc, disable it using `-C
+        # target-feature=-crt-static`". Forcing the GNU triple keeps the
+        # sanitizer compatible.
         run: |
           cargo +nightly fuzz run ${{ matrix.target }} \
             --fuzz-dir src-tauri/fuzz \
+            --target x86_64-unknown-linux-gnu \
             -- -max_total_time=300
 
       - name: Upload crash artifacts
