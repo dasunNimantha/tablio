@@ -1,14 +1,14 @@
 import { test, expect } from "@playwright/test";
 
 test.describe("SSH known hosts dialog", () => {
-  test("opens from the theme/settings menu and lists mock entries", async ({
+  test("opens from the settings menu and lists mock entries", async ({
     page,
   }) => {
     await page.goto("/");
 
-    // The menu lives in the status bar; the icon button has the Palette
-    // icon and tooltip "Change Theme".
-    await page.getByRole("button", { name: "Change Theme" }).click();
+    // The menu lives in the status bar; the icon button has the Settings
+    // (gear) icon and tooltip "Settings".
+    await page.getByRole("button", { name: "Settings" }).click();
 
     // The Settings group contains the entry that opens the dialog.
     await page.getByRole("button", { name: /SSH known hosts/i }).click();
@@ -33,7 +33,7 @@ test.describe("SSH known hosts dialog", () => {
 
   test("filter input narrows the visible rows", async ({ page }) => {
     await page.goto("/");
-    await page.getByRole("button", { name: "Change Theme" }).click();
+    await page.getByRole("button", { name: "Settings" }).click();
     await page.getByRole("button", { name: /SSH known hosts/i }).click();
     const dialog = page.getByRole("dialog", { name: /SSH known hosts/i });
     await expect(dialog).toBeVisible();
@@ -53,7 +53,7 @@ test.describe("SSH known hosts dialog", () => {
 
   test("Escape closes the dialog", async ({ page }) => {
     await page.goto("/");
-    await page.getByRole("button", { name: "Change Theme" }).click();
+    await page.getByRole("button", { name: "Settings" }).click();
     await page.getByRole("button", { name: /SSH known hosts/i }).click();
     const dialog = page.getByRole("dialog", { name: /SSH known hosts/i });
     await expect(dialog).toBeVisible();
