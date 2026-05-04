@@ -4,6 +4,114 @@ use std::time::Instant;
 
 use crate::models::*;
 
+/// Returns true when the server supports `ALTER TABLE ... RENAME COLUMN ... TO ...`.
+///
+/// This is the preferred rename syntax because it preserves every column
+/// attribute (`AUTO_INCREMENT`, `ON UPDATE CURRENT_TIMESTAMP`, generated
+/// expressions, character set, collation, comment) without us having to
+/// enumerate them. It became valid syntax on:
+///
+/// - MySQL 8.0.3 (released 2017-09)
+/// - MariaDB 10.5.2 (released 2020-07)
+/// - TiDB (all supported releases parse it)
+///
+/// Older servers — notably the MySQL 5.7 still in our nightly matrix and
+/// MariaDB 10.4 / earlier — reject it with a 1064 syntax error, so we
+/// detect the version once per call and fall back to `CHANGE COLUMN` only
+/// when we have to. We deliberately use `SELECT VERSION()` (universally
+/// supported) rather than `@@version_compile_id` or similar so this works
+/// on every flavour of the MySQL wire protocol.
+async fn rename_column_supported(pool: &MySqlPool) -> Result<bool> {
+    let row = sqlx::query("SELECT VERSION() AS v").fetch_one(pool).await?;
+    let version: String = row.try_get("v").unwrap_or_default();
+    Ok(version_supports_rename_column(&version))
+}
+
+/// Pure version-string check, split out so it is unit-testable without a
+/// live MySQL connection. `version` is whatever `SELECT VERSION()`
+/// returns, e.g. `"8.0.36"`, `"5.7.44"`, `"10.5.2-MariaDB"`, `"5.7.25-TiDB-v6.5.0"`.
+fn version_supports_rename_column(version: &str) -> bool {
+    // MariaDB always advertises itself in the version string after the
+    // first dash, e.g. `10.5.2-MariaDB-1:10.5.2+maria~focal`. We
+    // identify it on a case-insensitive substring match because the
+    // suffix has shifted across releases.
+    let is_mariadb = version.to_ascii_lowercase().contains("mariadb");
+
+    // TiDB encodes the upstream-MySQL-compatibility version at the
+    // start (`5.7.25-TiDB-v6.5.0`). Its parser accepts RENAME COLUMN
+    // regardless of that prefix, so short-circuit there.
+    if version.to_ascii_lowercase().contains("tidb") {
+        return true;
+    }
+
+    // Strip anything after the first non-version character (`-`, `_`,
+    // ` `) to leave just the dotted numeric prefix.
+    let numeric: String = version
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = numeric.split('.').filter_map(|p| p.parse::<u32>().ok());
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    let patch = parts.next().unwrap_or(0);
+
+    if is_mariadb {
+        // MariaDB 10.5.2+
+        (major, minor, patch) >= (10, 5, 2)
+    } else {
+        // MySQL 8.0.3+
+        (major, minor, patch) >= (8, 0, 3)
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::version_supports_rename_column as v;
+
+    #[test]
+    fn mysql_modern_supported() {
+        assert!(v("8.0.36"));
+        assert!(v("8.0.3"));
+        assert!(v("8.4.0"));
+        assert!(v("9.0.0"));
+    }
+
+    #[test]
+    fn mysql_legacy_unsupported() {
+        assert!(!v("5.7.44"));
+        assert!(!v("5.6.51"));
+        assert!(!v("8.0.2"));
+    }
+
+    #[test]
+    fn mariadb_modern_supported() {
+        assert!(v("10.5.2-MariaDB"));
+        assert!(v("10.6.16-MariaDB-1:10.6.16+maria~ubu2204"));
+        assert!(v("11.4.2-MariaDB"));
+    }
+
+    #[test]
+    fn mariadb_legacy_unsupported() {
+        assert!(!v("10.4.34-MariaDB"));
+        assert!(!v("10.5.1-MariaDB"));
+        assert!(!v("10.3.39-MariaDB"));
+    }
+
+    #[test]
+    fn tidb_always_supported() {
+        assert!(v("5.7.25-TiDB-v6.5.0"));
+        assert!(v("8.0.11-TiDB-v7.5.0"));
+    }
+
+    #[test]
+    fn empty_or_garbage_falls_back_to_change_column() {
+        // Unknown servers err on the side of the universally supported
+        // `CHANGE COLUMN` form rather than risking a 1064.
+        assert!(!v(""));
+        assert!(!v("not-a-version"));
+    }
+}
+
 pub fn mysql_row_to_json_values(
     row: &sqlx::mysql::MySqlRow,
     col_count: usize,
@@ -711,49 +819,71 @@ pub async fn my_alter_table(
                 )
             }
             AlterTableOperation::RenameColumn { old_name, new_name } => {
-                // `RENAME COLUMN` is only available from MySQL 8.0.3
-                // onward; legacy 5.7 (still in our nightly matrix) and
-                // older MariaDB releases reject it. `CHANGE COLUMN`,
-                // which has been valid syntax since the dawn of MySQL,
-                // accomplishes the same rename but requires the full
-                // column definition. Reconstruct that definition from
-                // INFORMATION_SCHEMA so we preserve the type,
-                // nullability, and default across the rename.
-                let col_sql = "SELECT CAST(COLUMN_TYPE AS CHAR) AS COLUMN_TYPE, \
-                                       IS_NULLABLE, \
-                                       COLUMN_DEFAULT \
-                               FROM information_schema.COLUMNS \
-                               WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?";
-                let row = sqlx::query(col_sql)
-                    .bind(database)
-                    .bind(&current_table)
-                    .bind(old_name)
-                    .fetch_optional(pool)
-                    .await?
-                    .ok_or_else(|| {
-                        anyhow!("Column {} not found in table {}", old_name, current_table)
-                    })?;
-                let col_type: String = row.get("COLUMN_TYPE");
-                let is_nullable: String = row.get("IS_NULLABLE");
-                let default_value: Option<String> = row.try_get("COLUMN_DEFAULT").ok();
-                let null_part = if is_nullable.eq_ignore_ascii_case("NO") {
-                    " NOT NULL"
+                // Choose the rename syntax based on what the server
+                // supports. `ALTER TABLE ... RENAME COLUMN ... TO ...`
+                // is the right tool because it preserves *every*
+                // column attribute (EXTRA: AUTO_INCREMENT / ON UPDATE
+                // CURRENT_TIMESTAMP, generated-column expressions,
+                // CHARACTER_SET, COLLATION, COMMENT) without us having
+                // to enumerate them. It is, however, only valid on:
+                //   - MySQL 8.0.3+
+                //   - MariaDB 10.5.2+
+                //   - TiDB (all supported releases)
+                // Older servers (notably MySQL 5.7 plus MariaDB 10.4
+                // and earlier) reject it with a 1064 syntax error, so
+                // we fall back to the universal
+                // `CHANGE COLUMN <old> <new> <type>` form there.
+                // `CHANGE COLUMN` requires us to spell the column
+                // definition out, so we capture what we can preserve
+                // from INFORMATION_SCHEMA. This is a best-effort
+                // fallback: EXTRA flags, comments, and generated
+                // expressions are intentionally not carried over —
+                // each requires bespoke escaping and the only servers
+                // that take this branch are EOL or near-EOL.
+                if rename_column_supported(pool).await? {
+                    format!(
+                        "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                        table_ref,
+                        quote_ident(old_name),
+                        quote_ident(new_name)
+                    )
                 } else {
-                    ""
-                };
-                let default_part = match default_value {
-                    Some(d) if !d.is_empty() => format!(" DEFAULT {}", d),
-                    _ => String::new(),
-                };
-                format!(
-                    "ALTER TABLE {} CHANGE COLUMN {} {} {}{}{}",
-                    table_ref,
-                    quote_ident(old_name),
-                    quote_ident(new_name),
-                    col_type,
-                    null_part,
-                    default_part
-                )
+                    let col_sql = "SELECT CAST(COLUMN_TYPE AS CHAR) AS COLUMN_TYPE, \
+                                           IS_NULLABLE, \
+                                           COLUMN_DEFAULT \
+                                   FROM information_schema.COLUMNS \
+                                   WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?";
+                    let row = sqlx::query(col_sql)
+                        .bind(database)
+                        .bind(&current_table)
+                        .bind(old_name)
+                        .fetch_optional(pool)
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow!("Column {} not found in table {}", old_name, current_table)
+                        })?;
+                    let col_type: String = row.get("COLUMN_TYPE");
+                    let is_nullable: String = row.get("IS_NULLABLE");
+                    let default_value: Option<String> = row.try_get("COLUMN_DEFAULT").ok();
+                    let null_part = if is_nullable.eq_ignore_ascii_case("NO") {
+                        " NOT NULL"
+                    } else {
+                        ""
+                    };
+                    let default_part = match default_value {
+                        Some(d) if !d.is_empty() => format!(" DEFAULT {}", d),
+                        _ => String::new(),
+                    };
+                    format!(
+                        "ALTER TABLE {} CHANGE COLUMN {} {} {}{}{}",
+                        table_ref,
+                        quote_ident(old_name),
+                        quote_ident(new_name),
+                        col_type,
+                        null_part,
+                        default_part
+                    )
+                }
             }
             AlterTableOperation::ChangeColumnType {
                 column_name,
