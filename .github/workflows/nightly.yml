@@ -465,7 +465,13 @@ jobs:
   cargo-fuzz:
     name: cargo-fuzz (${{ matrix.target }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Cold cache: the sanitizer-instrumented build pulls in the full
+    # `tablio` path dep (~14m on the GitHub-hosted runner) before the
+    # 5-minute mutation window starts, plus toolchain install and
+    # cargo-fuzz install. 20m used to hit the timeout by seconds; 30m
+    # leaves headroom for slow runners while still catching genuine
+    # hangs.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
