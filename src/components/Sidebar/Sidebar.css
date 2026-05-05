@@ -127,12 +127,27 @@
   margin: 1px 4px;
 }
 
-.tree-node:hover {
-  background: var(--bg-hover);
+/* Single source of truth for the hovered-row background. Anything
+   layered on top of a hovered row (e.g. `.tree-conn-actions`) reads
+   the same variable so its colour is byte-identical, with no alpha
+   compositing in between. A translucent rgba fill would composite
+   differently from any opaque match we tried on the overlay,
+   showing the overlay as a visibly darker rectangle (issue #92). */
+.sidebar {
+  --tree-row-hover-bg: color-mix(in srgb, var(--bg-secondary), white 7%);
 }
 
-.tree-node.leaf:hover {
-  background: var(--bg-hover);
+/* For active connections, the row body and the action-buttons
+   overlay are siblings inside `.tree-conn-row` — the overlay is the
+   topmost hit-test target, so `.tree-node:hover` doesn't fire while
+   the cursor sits on the buttons. The second selector paints the
+   connection's own row body from the wrapper's hover state instead.
+   The `> div > .tree-node` chain restricts the rule to the
+   connection's body only; without it, hovering the overlay would
+   paint every expanded descendant row in the subtree. */
+.tree-node:hover,
+.tree-conn-row:hover > div > .tree-node {
+  background: var(--tree-row-hover-bg);
 }
 
 /* Tables / views / functions only — keep folder & branch labels at base size */
@@ -325,22 +340,12 @@
   right: 4px;
   top: 0;
   height: 34px;
-  /* The actions overlay is a sibling of `.tree-node` (not a child),
-     so it can't inherit the row's hover background directly. The
-     hovered row paints `--bg-secondary` (from the sidebar) plus a
-     translucent `--bg-hover` layer on top. To make the overlay
-     visually identical to the rest of the row when revealed, we
-     stack the same two layers ourselves: a solid `--bg-secondary`
-     base for opacity (so it hides text behind it), and a
-     translucent `--bg-hover` "tint" on top to match the row's
-     composite colour (issue #92). The `mask-image` softens the
-     leading edge so the overlay fades into the row's content
-     instead of appearing as a hard rectangle. */
-  background-color: var(--bg-secondary);
-  background-image: linear-gradient(var(--bg-hover), var(--bg-hover));
-  padding-left: 16px;
-  -webkit-mask-image: linear-gradient(to right, transparent 0, black 14px);
-  mask-image: linear-gradient(to right, transparent 0, black 14px);
+  /* Read the same opaque pre-mixed colour as the hovered row so
+     the overlay's leading edge blends invisibly into the row
+     content. See `.sidebar` above for the variable definition and
+     the rationale (issue #92). */
+  background-color: var(--tree-row-hover-bg);
+  padding-left: 8px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
