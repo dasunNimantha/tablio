@@ -53,6 +53,56 @@ async fn sqlite_test_connection() {
     let _ = std::fs::remove_file(&path);
 }
 
+// Regression for issue #126: the bundled SQLite was 3.46.0 which is
+// missing several modern built-ins, notably `if(cond, a, b)` which
+// arrived in 3.48. Failure mode looked like
+// `error returned from database: no such function if`. Asserting both
+// the version floor and a positive `if()` call locks in the dep bump.
+#[tokio::test]
+async fn sqlite_bundled_engine_is_at_least_3_48() {
+    let (driver, path) = create_driver().await;
+    let result = driver.execute_query(DB, "SELECT sqlite_version()").await;
+    let _ = std::fs::remove_file(&path);
+    let result = result.expect("sqlite_version() query failed");
+    // sqlite_version() returns a single column with one row.
+    let row = result
+        .rows
+        .first()
+        .expect("sqlite_version() returned no rows");
+    let version_str = row
+        .first()
+        .and_then(|v| v.as_str())
+        .expect("sqlite_version() did not return a string");
+    let mut parts = version_str.split('.');
+    let major: u32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("could not parse major");
+    let minor: u32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("could not parse minor");
+    assert!(
+        (major, minor) >= (3, 48),
+        "bundled SQLite must be >= 3.48 (got {version_str}); see issue #126"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_if_function_works() {
+    let (driver, path) = create_driver().await;
+    // `if()` is the function the user's view in issue #126 depends on.
+    // Returns the second arg when the first is truthy, third otherwise.
+    let result = driver
+        .execute_query(DB, "SELECT if(1, 'yes', 'no') AS r")
+        .await;
+    let _ = std::fs::remove_file(&path);
+    let result = result.expect("`if()` query failed — bundled SQLite likely < 3.48");
+    let row = result.rows.first().expect("if() returned no rows");
+    let value = row.first().and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(value, "yes", "if(1, 'yes', 'no') should return 'yes'");
+}
+
 // ---------------------------------------------------------------------------
 // Catalog
 // ---------------------------------------------------------------------------

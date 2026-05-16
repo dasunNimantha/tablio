@@ -562,13 +562,21 @@ select option {
   animation: spin 1s linear infinite;
 }
 
-/* Re-enable text selection for content areas where copy is useful */
+/* Re-enable text selection for content areas where copy is useful.
+ *
+ * The app root is set to `user-select: none` above to avoid the
+ * shimmer-on-drag look in window chrome, but that cascade also
+ * silently blocked users from copying error messages — exactly the
+ * complaint in #126. Add every error / warning / banner / status
+ * surface to this whitelist so a frustrated user can always
+ * highlight + Ctrl-C the message they're stuck on.
+ *
+ * If you add a new error-bearing element anywhere in the app, add
+ * its class here too. */
 input,
 textarea,
 .cell-value,
 .cell-input,
-.query-error,
-.grid-error-banner,
 .dr-log-line,
 .json-tree,
 .info-table td,
@@ -576,7 +584,45 @@ textarea,
 .query-history-sql,
 .confirm-dialog p,
 .empty-state p,
-.cm-editor {
+.cm-editor,
+/* Error / warning / banner / status surfaces (issue #126) */
+.activity-error,
+.connection-form-error,
+.connection-nav-item__error,
+.ddl-error,
+.dr-banner,
+.dr-banner-sub,
+.ec-error,
+.erd-error,
+.field-error,
+.grid-error,
+.grid-error-banner,
+.json-inline-error,
+.json-inline-input-error,
+.known-hosts-dialog__error,
+.pv-error,
+.pv-warning,
+.pv-warnings,
+.qs-capture-banner,
+.qs-capture-banner-text,
+.qs-enable-error,
+.qs-error,
+.qs-samples-error,
+.qs-samples-unavailable,
+.qs-samples-warning,
+.qs-unavailable,
+.query-error,
+.role-error-banner,
+.role-form-error,
+.saved-queries-error,
+.ssh-tunnel-warning,
+.table-stats-error,
+.test-result.error,
+.text-error,
+.toast-message,
+.tree-warning,
+.tv-banner,
+.tv-banner-error {
   user-select: text;
   -webkit-user-select: text;
 }
