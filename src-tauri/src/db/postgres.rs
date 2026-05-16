@@ -328,7 +328,9 @@ impl DatabaseDriver for PostgresDriver {
         let pool = self.get_pool(database).await?;
         let start = Instant::now();
         let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", sql);
-        let row = sqlx::query(&explain_sql).fetch_one(&pool).await?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(&*explain_sql))
+            .fetch_one(&pool)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let raw_json: serde_json::Value = row.try_get(0)?;
@@ -405,7 +407,10 @@ impl DatabaseDriver for PostgresDriver {
              LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid"
         );
 
-        let row = sqlx::query(&agg_sql).bind(oid).fetch_one(&pool).await?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(&*agg_sql))
+            .bind(oid)
+            .fetch_one(&pool)
+            .await?;
 
         Ok(TableStats {
             table_name: relname,

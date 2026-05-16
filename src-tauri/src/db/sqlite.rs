@@ -261,7 +261,9 @@ impl DatabaseDriver for SqliteDriver {
         table: &str,
     ) -> Result<Vec<ColumnInfo>> {
         let sql = format!("PRAGMA table_info({})", quote_ident(table));
-        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(rows
             .iter()
@@ -292,7 +294,9 @@ impl DatabaseDriver for SqliteDriver {
         table: &str,
     ) -> Result<Vec<IndexInfo>> {
         let sql = format!("PRAGMA index_list({})", quote_ident(table));
-        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .fetch_all(&self.pool)
+            .await?;
 
         let mut indexes = Vec::new();
         for r in &rows {
@@ -303,7 +307,9 @@ impl DatabaseDriver for SqliteDriver {
                 .unwrap_or_else(|_| "c".into());
 
             let info_sql = format!("PRAGMA index_info({})", quote_ident(&name));
-            let info_rows = sqlx::query(&info_sql).fetch_all(&self.pool).await?;
+            let info_rows = sqlx::query(sqlx::AssertSqlSafe(&*info_sql))
+                .fetch_all(&self.pool)
+                .await?;
             let columns: Vec<String> = info_rows.iter().map(|ir| ir.get("name")).collect();
 
             indexes.push(IndexInfo {
@@ -403,7 +409,9 @@ impl DatabaseDriver for SqliteDriver {
             quote_ident(table),
             where_clause
         );
-        let count_row = sqlx::query(&count_sql).fetch_one(&self.pool).await?;
+        let count_row = sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
+            .fetch_one(&self.pool)
+            .await?;
         let total_rows: i64 = count_row.get("cnt");
 
         let sql = format!(
@@ -415,7 +423,9 @@ impl DatabaseDriver for SqliteDriver {
             offset
         );
 
-        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .fetch_all(&self.pool)
+            .await?;
         let col_count = columns.len();
         let data_rows: Vec<Vec<serde_json::Value>> = rows
             .iter()
@@ -440,7 +450,9 @@ impl DatabaseDriver for SqliteDriver {
             || trimmed.starts_with("EXPLAIN");
 
         if is_select {
-            let rows = sqlx::query(sql).fetch_all(&self.pool).await?;
+            let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+                .fetch_all(&self.pool)
+                .await?;
             let elapsed = start.elapsed().as_millis() as u64;
 
             let columns: Vec<String> = if rows.is_empty() {
@@ -467,7 +479,9 @@ impl DatabaseDriver for SqliteDriver {
                 is_select: true,
             })
         } else {
-            let result = sqlx::query(sql).execute(&self.pool).await?;
+            let result = sqlx::query(sqlx::AssertSqlSafe(sql))
+                .execute(&self.pool)
+                .await?;
             let elapsed = start.elapsed().as_millis() as u64;
 
             Ok(QueryResult {
@@ -483,7 +497,9 @@ impl DatabaseDriver for SqliteDriver {
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
         let start = Instant::now();
         let explain_sql = format!("EXPLAIN QUERY PLAN {}", sql);
-        let rows = sqlx::query(&explain_sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*explain_sql))
+            .fetch_all(&self.pool)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let mut raw_lines = Vec::new();
@@ -540,7 +556,15 @@ impl DatabaseDriver for SqliteDriver {
             }));
         }
         use sqlx::Executor;
-        match self.pool.prepare(sql).await {
+        match self
+            .pool
+            .prepare(
+                <sqlx::AssertSqlSafe<&str> as sqlx::SqlSafeStr>::into_sql_str(sqlx::AssertSqlSafe(
+                    sql,
+                )),
+            )
+            .await
+        {
             Ok(_) => Ok(None),
             Err(e) => {
                 let message = if let Some(db_err) = e.as_database_error() {
@@ -619,7 +643,9 @@ impl DatabaseDriver for SqliteDriver {
             quote_ident(table_name),
             col_defs.join(",\n    ")
         );
-        sqlx::query(&sql).execute(&self.pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -689,7 +715,9 @@ impl DatabaseDriver for SqliteDriver {
         table: &str,
     ) -> Result<TableStats> {
         let count_sql = format!("SELECT COUNT(*) as cnt FROM {}", quote_ident(table));
-        let count_row = sqlx::query(&count_sql).fetch_one(&self.pool).await?;
+        let count_row = sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
+            .fetch_one(&self.pool)
+            .await?;
         let row_count: i64 = count_row.get("cnt");
 
         let size_row = sqlx::query(
@@ -790,7 +818,9 @@ impl DatabaseDriver for SqliteDriver {
                     )
                 }
             };
-            sqlx::query(&sql).execute(&self.pool).await?;
+            sqlx::query(sqlx::AssertSqlSafe(&*sql))
+                .execute(&self.pool)
+                .await?;
         }
 
         Ok(())
@@ -827,7 +857,9 @@ impl DatabaseDriver for SqliteDriver {
                 "INSERT INTO {} ({}) VALUES {}",
                 table_ref, col_str, values_str
             );
-            let result = sqlx::query(&sql).execute(&mut *tx).await?;
+            let result = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+                .execute(&mut *tx)
+                .await?;
             total_inserted += result.rows_affected();
         }
 
@@ -847,13 +879,17 @@ impl DatabaseDriver for SqliteDriver {
             _ => "TABLE",
         };
         let sql = format!("DROP {} IF EXISTS {}", kind, quote_ident(object_name));
-        sqlx::query(&sql).execute(&self.pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     async fn truncate_table(&self, _database: &str, _schema: &str, table_name: &str) -> Result<()> {
         let sql = format!("DELETE FROM {}", quote_ident(table_name));
-        sqlx::query(&sql).execute(&self.pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -923,7 +959,9 @@ impl DatabaseDriver for SqliteDriver {
                 set_clause,
                 where_clause.join(" AND ")
             );
-            sqlx::query(&sql).execute(&mut *tx).await?;
+            sqlx::query(sqlx::AssertSqlSafe(&*sql))
+                .execute(&mut *tx)
+                .await?;
         }
 
         for insert in &changes.inserts {
@@ -939,7 +977,9 @@ impl DatabaseDriver for SqliteDriver {
                 cols.join(", "),
                 vals.join(", ")
             );
-            sqlx::query(&sql).execute(&mut *tx).await?;
+            sqlx::query(sqlx::AssertSqlSafe(&*sql))
+                .execute(&mut *tx)
+                .await?;
         }
 
         for delete in &changes.deletes {
@@ -956,7 +996,9 @@ impl DatabaseDriver for SqliteDriver {
                 quote_ident(&changes.table),
                 where_clause.join(" AND ")
             );
-            sqlx::query(&sql).execute(&mut *tx).await?;
+            sqlx::query(sqlx::AssertSqlSafe(&*sql))
+                .execute(&mut *tx)
+                .await?;
         }
 
         tx.commit().await?;

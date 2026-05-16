@@ -204,7 +204,9 @@ impl DatabaseDriver for MysqlDriver {
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
         let start = Instant::now();
         let explain_sql = format!("EXPLAIN FORMAT=JSON {}", sql);
-        let row = sqlx::query(&explain_sql).fetch_one(&self.pool).await?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(&*explain_sql))
+            .fetch_one(&self.pool)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let raw_text: String = row.try_get(0)?;

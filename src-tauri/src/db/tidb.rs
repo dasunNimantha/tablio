@@ -200,7 +200,9 @@ impl DatabaseDriver for TidbDriver {
         let start = Instant::now();
         // TiDB does not support EXPLAIN FORMAT=JSON — use plain EXPLAIN
         let explain_sql = format!("EXPLAIN {}", sql);
-        let rows = sqlx::query(&explain_sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*explain_sql))
+            .fetch_all(&self.pool)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let columns: Vec<String> = rows
