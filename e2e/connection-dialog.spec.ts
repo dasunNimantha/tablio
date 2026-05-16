@@ -206,6 +206,31 @@ test.describe("Connection dialog — validation", () => {
     await expect(page.locator(".connection-form-error")).toContainText("fix the highlighted");
   });
 
+  // Regression for issue #126. Error text everywhere in the app was
+  // non-selectable because the global root sets `user-select: none`
+  // and only a tiny whitelist of element classes opted back into
+  // `text`. Users couldn't highlight + Ctrl-C the error to email it
+  // to their DBA. The fix extends the whitelist to cover every error
+  // / banner / warning class in the app — this test pins the
+  // connection-form-error case as a representative check; the rest
+  // are covered by the same CSS rule and verified manually in dev.
+  test("error text is selectable (issue #126)", async ({ page }) => {
+    const nameInput = page.locator(".dialog input").first();
+    await nameInput.fill("");
+    await page.locator(".btn-test-conn").click();
+    const errorEl = page.locator(".connection-form-error");
+    await expect(errorEl).toBeVisible();
+    // `user-select` resolves to `text` (not `none`) when the
+    // whitelist rule applies. We can't reliably test user-initiated
+    // mouse-drag selection through Playwright, but the computed
+    // `userSelect` is the property that gates browser behaviour
+    // here, so it's the right check.
+    const userSelect = await errorEl.evaluate(
+      (el) => window.getComputedStyle(el).userSelect,
+    );
+    expect(userSelect).toBe("text");
+  });
+
   test("empty host shows error after blur", async ({ page }) => {
     await page.locator(".dialog input").first().fill("Missing Host");
     const hostInput = dialogField(page, /^Host$/);

@@ -458,7 +458,9 @@ pub async fn my_list_indexes(
         quote_ident(database),
         quote_ident(table)
     );
-    let rows = sqlx::query(&sql).fetch_all(pool).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .fetch_all(pool)
+        .await?;
 
     let mut index_map: std::collections::HashMap<String, IndexInfo> =
         std::collections::HashMap::new();
@@ -596,7 +598,9 @@ pub async fn my_fetch_rows_impl(
         quote_ident(table),
         where_clause
     );
-    let count_row = sqlx::query(&count_sql).fetch_one(pool).await?;
+    let count_row = sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
+        .fetch_one(pool)
+        .await?;
     let total_rows: i64 = count_row.get("cnt");
 
     let sql = format!(
@@ -609,7 +613,9 @@ pub async fn my_fetch_rows_impl(
         offset
     );
 
-    let rows = sqlx::query(&sql).fetch_all(pool).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .fetch_all(pool)
+        .await?;
     let col_count = columns.len();
     let data_rows: Vec<Vec<serde_json::Value>> = rows
         .iter()
@@ -634,7 +640,9 @@ pub async fn my_execute_query(pool: &MySqlPool, _database: &str, sql: &str) -> R
         || trimmed.starts_with("EXPLAIN");
 
     if is_select {
-        let rows = sqlx::query(sql).fetch_all(pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .fetch_all(pool)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
         let columns: Vec<String> = if rows.is_empty() {
             vec![]
@@ -658,7 +666,9 @@ pub async fn my_execute_query(pool: &MySqlPool, _database: &str, sql: &str) -> R
             is_select: true,
         })
     } else {
-        let result = sqlx::raw_sql(sql).execute(pool).await?;
+        let result = sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(pool)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
         Ok(QueryResult {
             columns: vec![],
@@ -689,7 +699,9 @@ pub async fn my_get_ddl(
             quote_ident(object_name)
         ),
     };
-    let row = sqlx::query(&sql).fetch_one(pool).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .fetch_one(pool)
+        .await?;
     let ddl: String = row.try_get(1)?;
     Ok(ddl)
 }
@@ -745,7 +757,9 @@ pub async fn my_create_table(
         quote_ident(table_name),
         col_defs.join(",\n    ")
     );
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -948,7 +962,9 @@ pub async fn my_alter_table(
                 format!("RENAME TABLE {} TO {}", table_ref, new_ref)
             }
         };
-        sqlx::query(&sql).execute(pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(pool)
+            .await?;
     }
 
     Ok(())
@@ -985,7 +1001,9 @@ pub async fn my_import_data(
             "INSERT INTO {} ({}) VALUES {}",
             table_ref, col_str, values_str
         );
-        let result = sqlx::query(&sql).execute(&mut *tx).await?;
+        let result = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *tx)
+            .await?;
         total_inserted += result.rows_affected();
     }
 
@@ -1010,7 +1028,9 @@ pub async fn my_drop_object(
         quote_ident(database),
         quote_ident(object_name)
     );
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1025,7 +1045,9 @@ pub async fn my_truncate_table(
         quote_ident(database),
         quote_ident(table_name)
     );
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1054,7 +1076,9 @@ pub async fn my_cancel_query(pool: &MySqlPool, pid: &str) -> Result<()> {
         .parse()
         .map_err(|_| anyhow!("Invalid PID: must be numeric"))?;
     let sql = format!("KILL QUERY {}", pid_num);
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1066,7 +1090,12 @@ pub async fn my_validate_query(pool: &MySqlPool, sql: &str) -> Result<Option<Val
         }));
     }
     use sqlx::Executor;
-    match pool.prepare(sql).await {
+    match pool
+        .prepare(
+            <sqlx::AssertSqlSafe<&str> as sqlx::SqlSafeStr>::into_sql_str(sqlx::AssertSqlSafe(sql)),
+        )
+        .await
+    {
         Ok(_) => Ok(None),
         Err(e) => {
             let message = if let Some(db_err) = e.as_database_error() {
@@ -1110,7 +1139,9 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
             set_clause,
             where_clause.join(" AND ")
         );
-        sqlx::query(&sql).execute(&mut *tx).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *tx)
+            .await?;
     }
 
     for insert in &changes.inserts {
@@ -1126,7 +1157,9 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
             cols.join(", "),
             vals.join(", ")
         );
-        sqlx::query(&sql).execute(&mut *tx).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *tx)
+            .await?;
     }
 
     for delete in &changes.deletes {
@@ -1143,7 +1176,9 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
             fq_table,
             where_clause.join(" AND ")
         );
-        sqlx::query(&sql).execute(&mut *tx).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *tx)
+            .await?;
     }
 
     tx.commit().await?;
@@ -1176,7 +1211,9 @@ pub async fn my_get_table_stats(
         quote_ident(database),
         quote_ident(table)
     );
-    let count_row = sqlx::query(&count_sql).fetch_one(pool).await?;
+    let count_row = sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
+        .fetch_one(pool)
+        .await?;
     let exact_count: i64 = count_row.try_get("cnt").unwrap_or(0);
 
     let data_bytes = data_length.unwrap_or(0);

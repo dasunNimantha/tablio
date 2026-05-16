@@ -337,7 +337,9 @@ impl DatabaseDriver for CockroachdbDriver {
         let pool = self.get_pool(database).await?;
         let start = Instant::now();
         let explain_sql = format!("EXPLAIN {}", sql);
-        let rows = sqlx::query(&explain_sql).fetch_all(&pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*explain_sql))
+            .fetch_all(&pool)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let raw_text = rows
