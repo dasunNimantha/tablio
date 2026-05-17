@@ -191,6 +191,174 @@ fn format_bytes(bytes: i64) -> String {
     }
 }
 
+/// Split a SQL script into individual statements, respecting strings
+/// and comments so semicolons inside them don't accidentally split a
+/// statement in two. Used by `execute_query` to support
+/// multi-statement inputs from the Query Console (e.g. `CREATE VIEW v
+/// AS ...; SELECT * FROM v;`).
+///
+/// Statement separators handled:
+/// - `;` at the top level
+///
+/// Quote forms recognised (where `;` is treated as content):
+/// - `'...'`  single-quoted string, with `''` for an embedded quote
+/// - `"..."`  double-quoted identifier, with `""` embedded
+/// - `[...]` bracket-quoted identifier (SQLite + SQL Server style)
+/// - `` `...` `` backtick-quoted identifier (MySQL + SQLite)
+///
+/// Comments recognised (where everything is treated as content,
+/// including `;`):
+/// - `-- line comment` until end-of-line
+/// - `/* block comment */` non-nested
+///
+/// SQLite-specific quirk: bracket identifiers don't have an escape
+/// sequence — `]` ends the identifier even if quoted. We replicate
+/// that.
+///
+/// Whitespace-only and comment-only fragments between semicolons are
+/// dropped from the output so callers can safely `.last()` on the
+/// result.
+pub(crate) fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut statements: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = sql.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        // Line comment: skip until newline. Keep the comment in
+        // `current` so the statement string we hand to sqlx is a
+        // faithful copy — the SQLite parser handles comments
+        // internally.
+        if c == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
+            while i < chars.len() && chars[i] != '\n' {
+                current.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Block comment: scan to closing */.
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            current.push(chars[i]);
+            current.push(chars[i + 1]);
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                current.push(chars[i]);
+                i += 1;
+            }
+            if i + 1 < chars.len() {
+                current.push(chars[i]);
+                current.push(chars[i + 1]);
+                i += 2;
+            }
+            continue;
+        }
+
+        // Single-quoted string. `''` is the SQL-standard escape for
+        // an embedded single quote — we have to detect it and not
+        // mistake it for a string close.
+        if c == '\'' {
+            current.push(c);
+            i += 1;
+            while i < chars.len() {
+                let q = chars[i];
+                current.push(q);
+                i += 1;
+                if q == '\'' {
+                    if i < chars.len() && chars[i] == '\'' {
+                        current.push(chars[i]);
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // Double-quoted identifier (SQL standard). `""` escape.
+        if c == '"' {
+            current.push(c);
+            i += 1;
+            while i < chars.len() {
+                let q = chars[i];
+                current.push(q);
+                i += 1;
+                if q == '"' {
+                    if i < chars.len() && chars[i] == '"' {
+                        current.push(chars[i]);
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // Backtick-quoted identifier (MySQL convention, accepted by
+        // SQLite). `` `` `` escape.
+        if c == '`' {
+            current.push(c);
+            i += 1;
+            while i < chars.len() {
+                let q = chars[i];
+                current.push(q);
+                i += 1;
+                if q == '`' {
+                    if i < chars.len() && chars[i] == '`' {
+                        current.push(chars[i]);
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // Bracket-quoted identifier (SQLite + SQL Server). No escape
+        // sequence; first `]` always closes.
+        if c == '[' {
+            current.push(c);
+            i += 1;
+            while i < chars.len() {
+                let q = chars[i];
+                current.push(q);
+                i += 1;
+                if q == ']' {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // Statement terminator at top level.
+        if c == ';' {
+            let trimmed = current.trim();
+            if !trimmed.is_empty() {
+                statements.push(trimmed.to_string());
+            }
+            current.clear();
+            i += 1;
+            continue;
+        }
+
+        current.push(c);
+        i += 1;
+    }
+
+    // Trailing statement without a terminating `;`.
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        statements.push(trimmed.to_string());
+    }
+
+    statements
+}
+
 #[async_trait]
 impl DatabaseDriver for SqliteDriver {
     async fn list_roles(&self) -> Result<Vec<RoleInfo>> {
@@ -443,14 +611,67 @@ impl DatabaseDriver for SqliteDriver {
 
     async fn execute_query(&self, _database: &str, sql: &str) -> Result<QueryResult> {
         let start = Instant::now();
-        let trimmed = sql.trim().to_uppercase();
-        let is_select = trimmed.starts_with("SELECT")
-            || trimmed.starts_with("WITH")
-            || trimmed.starts_with("PRAGMA")
-            || trimmed.starts_with("EXPLAIN");
 
-        if is_select {
-            let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        // SQLite's `sqlite3_prepare_v2` compiles ONE statement per
+        // call. sqlx's `query().fetch_all()` uses prepare under the
+        // hood, so multi-statement inputs like `CREATE VIEW v ...;
+        // SELECT * FROM v;` only ever compile the first statement —
+        // the trailing SELECT never runs. The previous code routed
+        // on the FIRST keyword of the whole input ("CREATE" → exec
+        // path), which created the view but discarded the SELECT's
+        // rows entirely.
+        //
+        // Fix: split the input into individual statements, run each
+        // one in sequence, and return rows from the LAST one (if
+        // it's SELECT-like). This is what every SQL CLI does
+        // naturally — psql, sqlite3 shell, mysql client — and
+        // matches what users expect when they paste a DDL+DML
+        // script into the Query tab.
+        //
+        // TODO(#XXX): the same fix should be applied to
+        // pg_common::pg_execute_query, mysql_common::my_execute_query,
+        // and mssql::execute_query — they all have the same
+        // first-keyword routing bug. Doing one driver at a time
+        // here to keep the fix scope minimal; this commit is on the
+        // critical path of issue #126 testing.
+        let statements = split_sql_statements(sql);
+
+        // Empty input or only comments / whitespace.
+        if statements.is_empty() {
+            return Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                rows_affected: 0,
+                execution_time_ms: start.elapsed().as_millis() as u64,
+                is_select: false,
+            });
+        }
+
+        // Run every non-last statement as a side-effect execute.
+        // Use rows_affected for any DML the user mixed in but
+        // discard the rowsets — only the last statement's output
+        // is shown to the user, by convention.
+        let mut total_affected: u64 = 0;
+        for stmt in &statements[..statements.len() - 1] {
+            let stmt_owned = stmt.clone();
+            let result = sqlx::query(sqlx::AssertSqlSafe(stmt_owned))
+                .execute(&self.pool)
+                .await?;
+            total_affected = total_affected.saturating_add(result.rows_affected());
+        }
+
+        // Decide how to run the last statement based on its leading
+        // keyword. SELECT / WITH / PRAGMA / EXPLAIN return rows; everything
+        // else just emits rows_affected.
+        let last = statements.last().unwrap().clone();
+        let last_trimmed = last.trim().to_uppercase();
+        let last_is_select = last_trimmed.starts_with("SELECT")
+            || last_trimmed.starts_with("WITH")
+            || last_trimmed.starts_with("PRAGMA")
+            || last_trimmed.starts_with("EXPLAIN");
+
+        if last_is_select {
+            let rows = sqlx::query(sqlx::AssertSqlSafe(last))
                 .fetch_all(&self.pool)
                 .await?;
             let elapsed = start.elapsed().as_millis() as u64;
@@ -479,7 +700,7 @@ impl DatabaseDriver for SqliteDriver {
                 is_select: true,
             })
         } else {
-            let result = sqlx::query(sqlx::AssertSqlSafe(sql))
+            let result = sqlx::query(sqlx::AssertSqlSafe(last))
                 .execute(&self.pool)
                 .await?;
             let elapsed = start.elapsed().as_millis() as u64;
@@ -487,7 +708,7 @@ impl DatabaseDriver for SqliteDriver {
             Ok(QueryResult {
                 columns: vec![],
                 rows: vec![],
-                rows_affected: result.rows_affected(),
+                rows_affected: total_affected.saturating_add(result.rows_affected()),
                 execution_time_ms: elapsed,
                 is_select: false,
             })
@@ -1013,6 +1234,119 @@ mod tests {
     #[test]
     fn filter_safe_empty() {
         assert!(!filter_is_unsafe(""));
+    }
+
+    // ---------------------------------------------------------------
+    // split_sql_statements — multi-statement input support for the
+    // Query Console (fix for #126 follow-up: "CREATE VIEW ...;
+    // SELECT * FROM view" was creating the view but discarding the
+    // SELECT's rows).
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn split_empty() {
+        assert!(split_sql_statements("").is_empty());
+        assert!(split_sql_statements("   \n\t ").is_empty());
+        assert!(split_sql_statements(";;;").is_empty());
+    }
+
+    #[test]
+    fn split_single_no_terminator() {
+        assert_eq!(split_sql_statements("SELECT 1"), vec!["SELECT 1"]);
+    }
+
+    #[test]
+    fn split_single_with_terminator() {
+        assert_eq!(split_sql_statements("SELECT 1;"), vec!["SELECT 1"]);
+    }
+
+    #[test]
+    fn split_pair() {
+        let out = split_sql_statements("CREATE VIEW v AS SELECT 1; SELECT * FROM v");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], "CREATE VIEW v AS SELECT 1");
+        assert_eq!(out[1], "SELECT * FROM v");
+    }
+
+    #[test]
+    fn split_handles_semicolon_in_single_quoted_string() {
+        let out = split_sql_statements("SELECT ';'; SELECT 1");
+        assert_eq!(out, vec!["SELECT ';'", "SELECT 1"]);
+    }
+
+    #[test]
+    fn split_handles_escaped_quote_in_string() {
+        // Doubled quote is the SQL escape — `';'` must NOT be parsed
+        // as "two empty strings stuck together".
+        let out = split_sql_statements("SELECT 'don''t; split'; SELECT 1");
+        assert_eq!(out, vec!["SELECT 'don''t; split'", "SELECT 1"]);
+    }
+
+    #[test]
+    fn split_handles_semicolon_in_double_quoted_identifier() {
+        let out = split_sql_statements(r#"SELECT "weird;name" FROM t; SELECT 1"#);
+        assert_eq!(out, vec![r#"SELECT "weird;name" FROM t"#, "SELECT 1"]);
+    }
+
+    #[test]
+    fn split_handles_semicolon_in_bracket_identifier() {
+        let out = split_sql_statements("SELECT [oh; no] FROM t; SELECT 1");
+        assert_eq!(out, vec!["SELECT [oh; no] FROM t", "SELECT 1"]);
+    }
+
+    #[test]
+    fn split_handles_semicolon_in_backtick_identifier() {
+        let out = split_sql_statements("SELECT `back; tick` FROM t; SELECT 1");
+        assert_eq!(out, vec!["SELECT `back; tick` FROM t", "SELECT 1"]);
+    }
+
+    #[test]
+    fn split_handles_semicolon_in_line_comment() {
+        let out = split_sql_statements("SELECT 1 -- yes; really\n; SELECT 2");
+        assert_eq!(out.len(), 2);
+        assert!(out[0].contains("yes; really"));
+        assert_eq!(out[1], "SELECT 2");
+    }
+
+    #[test]
+    fn split_handles_semicolon_in_block_comment() {
+        let out = split_sql_statements("SELECT 1 /* a; b; c */; SELECT 2");
+        assert_eq!(out.len(), 2);
+        assert!(out[0].contains("a; b; c"));
+        assert_eq!(out[1], "SELECT 2");
+    }
+
+    #[test]
+    fn split_drops_blank_fragments_between_semicolons() {
+        // Trailing `;` plus extra newlines shouldn't produce empty
+        // statements in the output.
+        let out = split_sql_statements("SELECT 1;\n\n; SELECT 2;\n");
+        assert_eq!(out, vec!["SELECT 1", "SELECT 2"]);
+    }
+
+    #[test]
+    fn split_real_world_create_view_then_select() {
+        // The exact shape that triggered the bug report — issue #126
+        // testing flow. Should produce two statements: the CREATE
+        // VIEW (compound, contains nested if() calls and a join) and
+        // the trailing SELECT.
+        let input = r#"
+            CREATE VIEW order_summary AS
+            SELECT
+              o.id,
+              if(o.paid = 1, 'paid', 'unpaid') AS payment_status,
+              if(o.shipped_at IS NULL, 'pending', 'shipped') AS fulfillment,
+              printf('$%.2f', o.total_cents / 100.0) AS total
+            FROM orders o
+            JOIN users u ON u.id = o.user_id;
+
+            SELECT * FROM order_summary LIMIT 10;
+        "#;
+        let out = split_sql_statements(input);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].starts_with("CREATE VIEW order_summary"));
+        assert!(out[0].contains("if(o.paid = 1"));
+        assert!(out[1].starts_with("SELECT * FROM order_summary"));
     }
 
     #[test]
