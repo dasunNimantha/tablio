@@ -103,6 +103,76 @@ async fn sqlite_if_function_works() {
     assert_eq!(value, "yes", "if(1, 'yes', 'no') should return 'yes'");
 }
 
+// Regression for the bug surfaced during #126 testing: multi-statement
+// input like `CREATE VIEW v ...; SELECT * FROM v;` was creating the
+// view (executed via the single-statement `.execute()` path which
+// silently runs every statement in the batch) but discarding the
+// trailing SELECT's rows because the input was routed to the exec
+// path based on the FIRST keyword ("CREATE"). The fix is to split
+// the input into statements and decide row-vs-affected behaviour
+// from the LAST statement.
+#[tokio::test]
+async fn sqlite_multi_statement_create_view_then_select_returns_rows() {
+    let (driver, path) = create_driver().await;
+    let script = "CREATE TABLE t (x INTEGER); \
+                  INSERT INTO t VALUES (1), (2), (3); \
+                  CREATE VIEW v AS SELECT x, if(x % 2 = 0, 'even', 'odd') AS parity FROM t; \
+                  SELECT * FROM v ORDER BY x;";
+    let result = driver.execute_query(DB, script).await;
+    let _ = std::fs::remove_file(&path);
+    let result = result.expect("multi-statement script failed to execute");
+
+    // The user's complaint: they got "no rows" even though the view
+    // worked. After the fix we should see all 3 rows from the trailing
+    // SELECT, with the parity column computed by `if()`.
+    assert!(
+        result.is_select,
+        "is_select should be true because the LAST statement is a SELECT"
+    );
+    assert_eq!(
+        result.rows.len(),
+        3,
+        "expected 3 rows from `SELECT * FROM v`"
+    );
+    let parities: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.get(1).and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(parities, vec!["odd", "even", "odd"]);
+}
+
+#[tokio::test]
+async fn sqlite_multi_statement_all_ddl_returns_rows_affected_zero() {
+    // The other direction of the fix: a script that's only DDL
+    // (no trailing SELECT) should still execute every statement
+    // and report success, not erroneously try to fetch rows.
+    let (driver, path) = create_driver().await;
+    let script = "CREATE TABLE a (x INT); CREATE TABLE b (y INT); CREATE INDEX i ON a(x);";
+    let result = driver.execute_query(DB, script).await;
+
+    // Verify all three statements ran by inspecting sqlite_master.
+    let post = driver
+        .execute_query(
+            DB,
+            "SELECT name FROM sqlite_master WHERE type IN ('table','index') ORDER BY name",
+        )
+        .await;
+    let _ = std::fs::remove_file(&path);
+
+    let result = result.expect("DDL script failed");
+    assert!(!result.is_select);
+    assert!(result.rows.is_empty());
+
+    let post = post.expect("post-check failed");
+    let names: Vec<&str> = post
+        .rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(names, vec!["a", "b", "i"]);
+}
+
 // ---------------------------------------------------------------------------
 // Catalog
 // ---------------------------------------------------------------------------

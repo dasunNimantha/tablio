@@ -10,6 +10,7 @@ use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 use crate::db::DatabaseDriver;
 use crate::models::*;
+use crate::util::sql::{split_sql_statements, statement_is_select_like};
 
 type MssqlStream = tokio_util::compat::Compat<tokio::net::TcpStream>;
 
@@ -284,13 +285,22 @@ impl MssqlDriver {
         format!("USE {}; {}", bracket(database), sql)
     }
 
+    /// `true` when the first non-comment keyword in `sql` indicates
+    /// a rows-returning statement. Used to pick between
+    /// `run_select` / `run_exec` / `run_batch` and shared with the
+    /// multi-statement splitter so the LAST statement of a
+    /// `CREATE VIEW ...; SELECT * FROM v;` script picks the
+    /// SELECT path.
+    fn statement_is_select_like(sql: &str) -> bool {
+        statement_is_select_like(sql, &["SELECT", "WITH", "SHOWPLAN", "EXPLAIN"])
+    }
+
+    /// Back-compat alias retained for the existing unit tests in
+    /// this file. Production callers go through
+    /// `statement_is_select_like`.
+    #[cfg(test)]
     fn is_select_like(sql: &str) -> bool {
-        let t = sql.trim();
-        let u = t.to_ascii_uppercase();
-        u.starts_with("SELECT")
-            || u.starts_with("WITH")
-            || u.starts_with("SHOWPLAN")
-            || u.starts_with("EXPLAIN")
+        Self::statement_is_select_like(sql)
     }
 
     async fn primary_key_set(
@@ -884,8 +894,39 @@ impl DatabaseDriver for MssqlDriver {
         self.use_database(database).await?;
         let start = Instant::now();
 
-        if Self::is_select_like(sql) {
-            let (columns, rows) = self.run_select(sql).await?;
+        // Multi-statement support: see the matching comment in
+        // `pg_common::pg_execute_query`. We split the input on
+        // top-level semicolons and run each leading statement on
+        // the same `Client` (held under `self.client`), then pick
+        // the exec path for the LAST statement based on its
+        // shape — so `CREATE VIEW v ...; SELECT * FROM v;` returns
+        // rows from the SELECT.
+        //
+        // We don't fall back to a single-batch send here even when
+        // there's exactly one statement, because `tiberius::execute`
+        // happily handles trailing comments / whitespace.
+        let statements = split_sql_statements(sql);
+        if statements.is_empty() {
+            return Err(anyhow!("Query is empty"));
+        }
+
+        for stmt in &statements[..statements.len() - 1] {
+            if Self::statement_is_select_like(stmt) {
+                // Even a leading SELECT could materialise a temp
+                // table via SELECT INTO. Run it as a batch so any
+                // side effects land, and discard the rowset.
+                self.run_batch(stmt).await?;
+            } else if Self::is_ddl(stmt) {
+                self.run_batch(stmt).await?;
+            } else {
+                self.run_exec(stmt).await?;
+            }
+        }
+
+        let last = statements.last().unwrap();
+
+        if Self::statement_is_select_like(last) {
+            let (columns, rows) = self.run_select(last).await?;
             let elapsed = start.elapsed().as_millis() as u64;
             let n = rows.len() as u64;
             return Ok(QueryResult {
@@ -897,8 +938,8 @@ impl DatabaseDriver for MssqlDriver {
             });
         }
 
-        if Self::is_ddl(sql) {
-            self.run_batch(sql).await?;
+        if Self::is_ddl(last) {
+            self.run_batch(last).await?;
             let elapsed = start.elapsed().as_millis() as u64;
             return Ok(QueryResult {
                 columns: vec![],
@@ -909,7 +950,7 @@ impl DatabaseDriver for MssqlDriver {
             });
         }
 
-        let rows_affected = self.run_exec(sql).await?;
+        let rows_affected = self.run_exec(last).await?;
         let elapsed = start.elapsed().as_millis() as u64;
         Ok(QueryResult {
             columns: vec![],

@@ -2619,3 +2619,167 @@ async fn pg_xlsx_round_trip_preserves_types() {
 
     driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Multi-statement execute_query (PR #131 follow-up)
+// ---------------------------------------------------------------------------
+
+// Mirrors `sqlite_multi_statement_create_view_then_select_returns_rows` —
+// the same fix in pg_common's exec path. Before the fix, the
+// uppercased input started with `CREATE`, so the whole batch was
+// routed to the `execute` arm and the trailing SELECT's rows were
+// thrown away. After the fix, the input is split into statements,
+// every leading statement runs as exec, and the LAST statement
+// dictates whether we fetch rows.
+#[tokio::test]
+async fn pg_multi_statement_create_view_then_select_returns_rows() {
+    let driver = pg_driver!();
+    let tbl = unique_table("multi_stmt");
+    let view = format!("{}_view", tbl);
+    let script = format!(
+        "CREATE TABLE {SCHEMA}.{tbl} (x INT); \
+         INSERT INTO {SCHEMA}.{tbl} VALUES (1), (2), (3); \
+         CREATE VIEW {SCHEMA}.{view} AS \
+            SELECT x, CASE WHEN x % 2 = 0 THEN 'even' ELSE 'odd' END AS parity \
+            FROM {SCHEMA}.{tbl}; \
+         SELECT * FROM {SCHEMA}.{view} ORDER BY x;"
+    );
+    let result = driver
+        .execute_query(DB, &script)
+        .await
+        .expect("multi-statement script failed");
+
+    assert!(
+        result.is_select,
+        "is_select should be true because the LAST statement is a SELECT"
+    );
+    assert_eq!(result.rows.len(), 3);
+    let parities: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.get(1).and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(parities, vec!["odd", "even", "odd"]);
+
+    driver
+        .execute_query(DB, &format!("DROP VIEW IF EXISTS {SCHEMA}.{view}"))
+        .await
+        .ok();
+    driver
+        .execute_query(DB, &format!("DROP TABLE IF EXISTS {SCHEMA}.{tbl}"))
+        .await
+        .ok();
+}
+
+// PostgreSQL-specific: dollar-quoted DO block followed by a SELECT.
+// Without dollar-quote awareness, the splitter would treat the
+// semicolons inside `BEGIN PERFORM ...; END` as statement
+// terminators and the script would fail with a syntax error.
+#[tokio::test]
+async fn pg_multi_statement_dollar_quoted_do_block_then_select() {
+    let driver = pg_driver!();
+    let tbl = unique_table("multi_stmt_dq");
+    let script = format!(
+        "CREATE TABLE {SCHEMA}.{tbl} (x INT); \
+         DO $$ \
+         BEGIN \
+            INSERT INTO {SCHEMA}.{tbl} VALUES (10); \
+            INSERT INTO {SCHEMA}.{tbl} VALUES (20); \
+         END $$; \
+         SELECT x FROM {SCHEMA}.{tbl} ORDER BY x;"
+    );
+    let result = driver
+        .execute_query(DB, &script)
+        .await
+        .expect("dollar-quoted DO block script failed — splitter probably misread $$");
+
+    assert!(result.is_select);
+    let xs: Vec<i64> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_i64()))
+        .collect();
+    assert_eq!(xs, vec![10, 20]);
+
+    driver
+        .execute_query(DB, &format!("DROP TABLE IF EXISTS {SCHEMA}.{tbl}"))
+        .await
+        .ok();
+}
+
+// All-DDL script with no trailing SELECT: should run every statement
+// and report `is_select = false`. Verifies the DDL-only fall-through
+// path still works.
+#[tokio::test]
+async fn pg_multi_statement_all_ddl_no_rows() {
+    let driver = pg_driver!();
+    let t1 = unique_table("multi_stmt_ddl_a");
+    let t2 = unique_table("multi_stmt_ddl_b");
+    let script = format!("CREATE TABLE {SCHEMA}.{t1} (x INT); CREATE TABLE {SCHEMA}.{t2} (y INT);");
+    let result = driver
+        .execute_query(DB, &script)
+        .await
+        .expect("DDL script failed");
+    assert!(!result.is_select);
+    assert!(result.rows.is_empty());
+
+    // Sanity check: both tables actually exist.
+    let check = driver
+        .execute_query(
+            DB,
+            &format!(
+                "SELECT COUNT(*)::INT AS n FROM information_schema.tables \
+                 WHERE table_schema = '{SCHEMA}' \
+                 AND table_name IN ('{t1}', '{t2}')"
+            ),
+        )
+        .await
+        .expect("post-check failed");
+    let n = check
+        .rows
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+    assert_eq!(n, 2);
+
+    driver
+        .execute_query(DB, &format!("DROP TABLE IF EXISTS {SCHEMA}.{t1}"))
+        .await
+        .ok();
+    driver
+        .execute_query(DB, &format!("DROP TABLE IF EXISTS {SCHEMA}.{t2}"))
+        .await
+        .ok();
+}
+
+// Regression test: semicolons embedded in single-quoted string
+// literals must not split the statement. Before the splitter knew
+// about strings, this kind of payload could corrupt the batch.
+#[tokio::test]
+async fn pg_multi_statement_semicolon_in_string_literal_is_safe() {
+    let driver = pg_driver!();
+    let tbl = unique_table("multi_stmt_str");
+    let script = format!(
+        "CREATE TABLE {SCHEMA}.{tbl} (note TEXT); \
+         INSERT INTO {SCHEMA}.{tbl} VALUES ('first; second; third'); \
+         SELECT note FROM {SCHEMA}.{tbl};"
+    );
+    let result = driver
+        .execute_query(DB, &script)
+        .await
+        .expect("string-with-semicolons script failed");
+    assert!(result.is_select);
+    let note = result
+        .rows
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(note, "first; second; third");
+
+    driver
+        .execute_query(DB, &format!("DROP TABLE IF EXISTS {SCHEMA}.{tbl}"))
+        .await
+        .ok();
+}

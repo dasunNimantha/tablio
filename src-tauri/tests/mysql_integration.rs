@@ -1910,3 +1910,128 @@ async fn my_get_query_stats_ok_or_perf_schema_message() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Multi-statement execute_query (PR #131 follow-up)
+// ---------------------------------------------------------------------------
+
+// Mirrors the same fix in sqlite + postgres. The MySQL driver used
+// to route based on the FIRST keyword of the input, so a
+// `CREATE VIEW ...; SELECT * FROM v;` would create the view but
+// throw away the SELECT's rows.
+#[tokio::test]
+async fn mysql_multi_statement_create_view_then_select_returns_rows() {
+    let (driver, db) = mysql_driver!();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let tbl = format!("mst_t_{}", &suffix[..8]);
+    let view = format!("mst_v_{}", &suffix[..8]);
+    let script = format!(
+        "CREATE TABLE `{db}`.`{tbl}` (x INT); \
+         INSERT INTO `{db}`.`{tbl}` VALUES (1), (2), (3); \
+         CREATE VIEW `{db}`.`{view}` AS \
+            SELECT x, CASE WHEN x % 2 = 0 THEN 'even' ELSE 'odd' END AS parity \
+            FROM `{db}`.`{tbl}`; \
+         SELECT * FROM `{db}`.`{view}` ORDER BY x;"
+    );
+    let result = driver
+        .execute_query(&db, &script)
+        .await
+        .expect("multi-statement script failed");
+
+    assert!(result.is_select);
+    assert_eq!(result.rows.len(), 3);
+    let parities: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.get(1).and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(parities, vec!["odd", "even", "odd"]);
+
+    driver
+        .execute_query(&db, &format!("DROP VIEW IF EXISTS `{db}`.`{view}`"))
+        .await
+        .ok();
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS `{db}`.`{tbl}`"))
+        .await
+        .ok();
+}
+
+// MySQL-specific: backtick-quoted identifier with an embedded
+// semicolon must not split the statement. The splitter is the
+// only thing that prevents this from corrupting the batch.
+#[tokio::test]
+async fn mysql_multi_statement_semicolon_in_backtick_identifier_is_safe() {
+    let (driver, db) = mysql_driver!();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let tbl = format!("mst_q_{}", &suffix[..8]);
+    // Column named "weird;name" — perfectly legal MySQL identifier
+    // when backticked.
+    let script = format!(
+        "CREATE TABLE `{db}`.`{tbl}` (`weird;name` INT); \
+         INSERT INTO `{db}`.`{tbl}` (`weird;name`) VALUES (42); \
+         SELECT `weird;name` FROM `{db}`.`{tbl}`;"
+    );
+    let result = driver
+        .execute_query(&db, &script)
+        .await
+        .expect("backtick-with-semicolon script failed");
+    assert!(result.is_select);
+    let v = result
+        .rows
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+    assert_eq!(v, 42);
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS `{db}`.`{tbl}`"))
+        .await
+        .ok();
+}
+
+// All-DDL script with no trailing SELECT — should run every
+// statement and return `is_select = false`.
+#[tokio::test]
+async fn mysql_multi_statement_all_ddl_no_rows() {
+    let (driver, db) = mysql_driver!();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let t1 = format!("mst_a_{}", &suffix[..8]);
+    let t2 = format!("mst_b_{}", &suffix[..8]);
+    let script = format!("CREATE TABLE `{db}`.`{t1}` (x INT); CREATE TABLE `{db}`.`{t2}` (y INT);");
+    let result = driver
+        .execute_query(&db, &script)
+        .await
+        .expect("DDL script failed");
+    assert!(!result.is_select);
+    assert!(result.rows.is_empty());
+
+    let check = driver
+        .execute_query(
+            &db,
+            &format!(
+                "SELECT COUNT(*) AS n FROM information_schema.tables \
+                 WHERE table_schema = '{db}' \
+                 AND table_name IN ('{t1}', '{t2}')"
+            ),
+        )
+        .await
+        .expect("post-check failed");
+    let n = check
+        .rows
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|u| u as i64)))
+        .unwrap_or(-1);
+    assert_eq!(n, 2);
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS `{db}`.`{t1}`"))
+        .await
+        .ok();
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS `{db}`.`{t2}`"))
+        .await
+        .ok();
+}

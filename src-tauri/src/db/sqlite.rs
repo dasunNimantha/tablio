@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::db::DatabaseDriver;
 use crate::models::*;
 use crate::util::path::expand_tilde;
+use crate::util::sql::{split_sql_statements, statement_is_select_like};
 
 pub struct SqliteDriver {
     pool: SqlitePool,
@@ -443,14 +444,64 @@ impl DatabaseDriver for SqliteDriver {
 
     async fn execute_query(&self, _database: &str, sql: &str) -> Result<QueryResult> {
         let start = Instant::now();
-        let trimmed = sql.trim().to_uppercase();
-        let is_select = trimmed.starts_with("SELECT")
-            || trimmed.starts_with("WITH")
-            || trimmed.starts_with("PRAGMA")
-            || trimmed.starts_with("EXPLAIN");
 
-        if is_select {
-            let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        // SQLite's `sqlite3_prepare_v2` compiles ONE statement per
+        // call. sqlx's `query().fetch_all()` uses prepare under the
+        // hood, so multi-statement inputs like `CREATE VIEW v ...;
+        // SELECT * FROM v;` only ever compile the first statement —
+        // the trailing SELECT never runs. The previous code routed
+        // on the FIRST keyword of the whole input ("CREATE" → exec
+        // path), which created the view but discarded the SELECT's
+        // rows entirely.
+        //
+        // Fix: split the input into individual statements, run each
+        // one in sequence, and return rows from the LAST one (if
+        // it's SELECT-like). This is what every SQL CLI does
+        // naturally — psql, sqlite3 shell, mysql client — and
+        // matches what users expect when they paste a DDL+DML
+        // script into the Query tab.
+        //
+        // TODO(#XXX): the same fix should be applied to
+        // pg_common::pg_execute_query, mysql_common::my_execute_query,
+        // and mssql::execute_query — they all have the same
+        // first-keyword routing bug. Doing one driver at a time
+        // here to keep the fix scope minimal; this commit is on the
+        // critical path of issue #126 testing.
+        let statements = split_sql_statements(sql);
+
+        // Empty input or only comments / whitespace.
+        if statements.is_empty() {
+            return Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                rows_affected: 0,
+                execution_time_ms: start.elapsed().as_millis() as u64,
+                is_select: false,
+            });
+        }
+
+        // Run every non-last statement as a side-effect execute.
+        // Use rows_affected for any DML the user mixed in but
+        // discard the rowsets — only the last statement's output
+        // is shown to the user, by convention.
+        let mut total_affected: u64 = 0;
+        for stmt in &statements[..statements.len() - 1] {
+            let stmt_owned = stmt.clone();
+            let result = sqlx::query(sqlx::AssertSqlSafe(stmt_owned))
+                .execute(&self.pool)
+                .await?;
+            total_affected = total_affected.saturating_add(result.rows_affected());
+        }
+
+        // Decide how to run the last statement based on its leading
+        // keyword. SELECT / WITH / PRAGMA / EXPLAIN return rows;
+        // everything else just emits rows_affected.
+        let last = statements.last().unwrap().clone();
+        let last_is_select =
+            statement_is_select_like(&last, &["SELECT", "WITH", "PRAGMA", "EXPLAIN"]);
+
+        if last_is_select {
+            let rows = sqlx::query(sqlx::AssertSqlSafe(last))
                 .fetch_all(&self.pool)
                 .await?;
             let elapsed = start.elapsed().as_millis() as u64;
@@ -479,7 +530,7 @@ impl DatabaseDriver for SqliteDriver {
                 is_select: true,
             })
         } else {
-            let result = sqlx::query(sqlx::AssertSqlSafe(sql))
+            let result = sqlx::query(sqlx::AssertSqlSafe(last))
                 .execute(&self.pool)
                 .await?;
             let elapsed = start.elapsed().as_millis() as u64;
@@ -487,7 +538,7 @@ impl DatabaseDriver for SqliteDriver {
             Ok(QueryResult {
                 columns: vec![],
                 rows: vec![],
-                rows_affected: result.rows_affected(),
+                rows_affected: total_affected.saturating_add(result.rows_affected()),
                 execution_time_ms: elapsed,
                 is_select: false,
             })
@@ -1014,6 +1065,9 @@ mod tests {
     fn filter_safe_empty() {
         assert!(!filter_is_unsafe(""));
     }
+
+    // SQL statement splitter tests moved to `util::sql::tests`
+    // since the function is now shared across drivers.
 
     #[test]
     fn filter_safe_expression() {
