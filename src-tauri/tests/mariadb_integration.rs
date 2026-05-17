@@ -1467,3 +1467,48 @@ async fn mariadb_get_query_stats_ok_or_perf_schema_message() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Multi-statement execute_query (PR #131 follow-up)
+// ---------------------------------------------------------------------------
+
+// MariaDB shares mysql_common's `my_execute_query`, so the same
+// multi-statement fix benefits MariaDB too. Verify with the same
+// CREATE VIEW + SELECT shape that triggered the original bug.
+#[tokio::test]
+async fn mariadb_multi_statement_create_view_then_select_returns_rows() {
+    let (driver, db) = mariadb_driver!();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let tbl = format!("mar_mst_t_{}", &suffix[..8]);
+    let view = format!("mar_mst_v_{}", &suffix[..8]);
+    let script = format!(
+        "CREATE TABLE `{db}`.`{tbl}` (x INT); \
+         INSERT INTO `{db}`.`{tbl}` VALUES (1), (2), (3); \
+         CREATE VIEW `{db}`.`{view}` AS \
+            SELECT x, CASE WHEN x % 2 = 0 THEN 'even' ELSE 'odd' END AS parity \
+            FROM `{db}`.`{tbl}`; \
+         SELECT * FROM `{db}`.`{view}` ORDER BY x;"
+    );
+    let result = driver
+        .execute_query(&db, &script)
+        .await
+        .expect("multi-statement script failed");
+
+    assert!(result.is_select);
+    assert_eq!(result.rows.len(), 3);
+    let parities: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.get(1).and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(parities, vec!["odd", "even", "odd"]);
+
+    driver
+        .execute_query(&db, &format!("DROP VIEW IF EXISTS `{db}`.`{view}`"))
+        .await
+        .ok();
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS `{db}`.`{tbl}`"))
+        .await
+        .ok();
+}

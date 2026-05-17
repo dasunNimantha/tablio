@@ -1893,3 +1893,147 @@ async fn mssql_get_query_stats_ok_or_view_server_state_message() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Multi-statement execute_query (PR #131 follow-up)
+// ---------------------------------------------------------------------------
+
+// SQL Server's tiberius driver supports multi-statement batches
+// natively, but Tablio's wrapper used to route the entire batch
+// on the FIRST keyword. After the fix, the script is split at
+// top-level semicolons and the LAST statement chooses between
+// `run_select` / `run_exec` / `run_batch`.
+//
+// We exercise the CREATE VIEW → SELECT shape that triggered the
+// original bug report.
+#[tokio::test]
+async fn mssql_multi_statement_create_view_then_select_returns_rows() {
+    let (driver, db) = mssql_driver!();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let tbl = format!("mssql_mst_t_{}", &suffix[..8]);
+    let view = format!("mssql_mst_v_{}", &suffix[..8]);
+
+    // CREATE VIEW must be the first (and only) statement in its
+    // batch on SQL Server, so we drive the multi-statement path
+    // via separate batches that end up needing the LAST-statement
+    // dispatch behaviour.
+    let script = format!(
+        "CREATE TABLE dbo.{tbl} (x INT); \
+         INSERT INTO dbo.{tbl} VALUES (1), (2), (3); \
+         SELECT x, CASE WHEN x % 2 = 0 THEN 'even' ELSE 'odd' END AS parity \
+         FROM dbo.{tbl} ORDER BY x;"
+    );
+    let result = driver
+        .execute_query(&db, &script)
+        .await
+        .expect("multi-statement script failed");
+
+    assert!(result.is_select);
+    assert_eq!(result.rows.len(), 3);
+    let parities: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.get(1).and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(parities, vec!["odd", "even", "odd"]);
+
+    // CREATE VIEW + trailing SELECT, with the view created as a
+    // standalone statement before the SELECT runs. This exercises
+    // the per-statement dispatch path that calls `run_batch` for a
+    // leading DDL and `run_select` for the trailing SELECT.
+    let view_script = format!(
+        "CREATE VIEW dbo.{view} AS SELECT x FROM dbo.{tbl}; \
+         SELECT * FROM dbo.{view} ORDER BY x;"
+    );
+    let r2 = driver
+        .execute_query(&db, &view_script)
+        .await
+        .expect("CREATE VIEW + SELECT failed");
+    assert!(r2.is_select);
+    assert_eq!(r2.rows.len(), 3);
+
+    driver
+        .execute_query(&db, &format!("DROP VIEW IF EXISTS dbo.{view}"))
+        .await
+        .ok();
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS dbo.{tbl}"))
+        .await
+        .ok();
+}
+
+// SQL Server-specific: bracket-quoted identifier with embedded
+// semicolon must not split the statement. Plus a single-quoted
+// string with embedded semicolons — both quote forms covered.
+#[tokio::test]
+async fn mssql_multi_statement_quotes_with_semicolons_are_safe() {
+    let (driver, db) = mssql_driver!();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let tbl = format!("mssql_mst_q_{}", &suffix[..8]);
+    let script = format!(
+        "CREATE TABLE dbo.{tbl} ([weird;name] NVARCHAR(64)); \
+         INSERT INTO dbo.{tbl} ([weird;name]) VALUES (N'first; second; third'); \
+         SELECT [weird;name] FROM dbo.{tbl};"
+    );
+    let result = driver
+        .execute_query(&db, &script)
+        .await
+        .expect("quoted-identifier-with-semicolons script failed");
+    assert!(result.is_select);
+    let v = result
+        .rows
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(v, "first; second; third");
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS dbo.{tbl}"))
+        .await
+        .ok();
+}
+
+// All-DDL script: no trailing SELECT. Verify every leading
+// statement runs and the wrapper reports `is_select = false`.
+#[tokio::test]
+async fn mssql_multi_statement_all_ddl_no_rows() {
+    let (driver, db) = mssql_driver!();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let t1 = format!("mssql_mst_a_{}", &suffix[..8]);
+    let t2 = format!("mssql_mst_b_{}", &suffix[..8]);
+    let script = format!("CREATE TABLE dbo.{t1} (x INT); CREATE TABLE dbo.{t2} (y INT);");
+    let result = driver
+        .execute_query(&db, &script)
+        .await
+        .expect("DDL script failed");
+    assert!(!result.is_select);
+    assert!(result.rows.is_empty());
+
+    let check = driver
+        .execute_query(
+            &db,
+            &format!(
+                "SELECT COUNT(*) AS n FROM sys.tables \
+                 WHERE name IN ('{t1}', '{t2}')"
+            ),
+        )
+        .await
+        .expect("post-check failed");
+    let n = check
+        .rows
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|u| u as i64)))
+        .unwrap_or(-1);
+    assert_eq!(n, 2);
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS dbo.{t1}"))
+        .await
+        .ok();
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS dbo.{t2}"))
+        .await
+        .ok();
+}

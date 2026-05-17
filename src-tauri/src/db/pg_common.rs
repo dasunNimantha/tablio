@@ -3,6 +3,7 @@ use sqlx::{Column, PgPool, Row, TypeInfo};
 use std::time::Instant;
 
 use crate::models::*;
+use crate::util::sql::{split_sql_statements, statement_is_select_like};
 
 pub fn pg_row_to_json_values(
     row: &sqlx::postgres::PgRow,
@@ -996,15 +997,39 @@ pub async fn pg_fetch_rows_impl(
 
 pub async fn pg_execute_query(pool: &PgPool, _database: &str, sql: &str) -> Result<QueryResult> {
     let start = Instant::now();
-    let trimmed = sql.trim().to_uppercase();
-    let is_select = trimmed.starts_with("SELECT")
-        || trimmed.starts_with("WITH")
-        || trimmed.starts_with("SHOW")
-        || trimmed.starts_with("EXPLAIN");
 
-    if is_select {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .fetch_all(pool)
+    // Multi-statement support: split the input on top-level
+    // semicolons (respecting strings, dollar-quoted bodies,
+    // identifiers, and comments). Run every leading statement as a
+    // DDL/DML op and base the final result on the LAST statement's
+    // shape so e.g. `CREATE VIEW v ...; SELECT * FROM v;` returns
+    // rows from the SELECT.
+    //
+    // All statements are run on a single pinned connection so
+    // session-local state (temp tables, transactions, search_path
+    // changes) carries between them.
+    let statements = split_sql_statements(sql);
+    if statements.is_empty() {
+        return Err(anyhow::anyhow!("Query is empty"));
+    }
+
+    let mut conn = pool.acquire().await?;
+
+    // Execute all but the last statement as plain exec — we don't
+    // care about rows from earlier statements, just side effects.
+    for stmt in &statements[..statements.len() - 1] {
+        sqlx::query(sqlx::AssertSqlSafe(stmt.as_str()))
+            .execute(&mut *conn)
+            .await?;
+    }
+
+    let last = statements.last().unwrap().as_str();
+    let last_is_select =
+        statement_is_select_like(last, &["SELECT", "WITH", "SHOW", "EXPLAIN", "VALUES"]);
+
+    if last_is_select {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(last))
+            .fetch_all(&mut *conn)
             .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -1032,7 +1057,9 @@ pub async fn pg_execute_query(pool: &PgPool, _database: &str, sql: &str) -> Resu
             is_select: true,
         })
     } else {
-        let result = sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
+        let result = sqlx::query(sqlx::AssertSqlSafe(last))
+            .execute(&mut *conn)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         Ok(QueryResult {

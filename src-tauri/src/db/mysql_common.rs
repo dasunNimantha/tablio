@@ -3,6 +3,7 @@ use sqlx::{Column, MySqlPool, Row, TypeInfo};
 use std::time::Instant;
 
 use crate::models::*;
+use crate::util::sql::{split_sql_statements, statement_is_select_like};
 
 /// Returns true when the server supports `ALTER TABLE ... RENAME COLUMN ... TO ...`.
 ///
@@ -633,15 +634,39 @@ pub async fn my_fetch_rows_impl(
 
 pub async fn my_execute_query(pool: &MySqlPool, _database: &str, sql: &str) -> Result<QueryResult> {
     let start = Instant::now();
-    let trimmed = sql.trim().to_uppercase();
-    let is_select = trimmed.starts_with("SELECT")
-        || trimmed.starts_with("SHOW")
-        || trimmed.starts_with("DESCRIBE")
-        || trimmed.starts_with("EXPLAIN");
 
-    if is_select {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .fetch_all(pool)
+    // Multi-statement support: see the matching comment in
+    // `pg_common::pg_execute_query`. The same model applies here —
+    // run all leading statements as exec-only, then run the LAST
+    // statement based on its own shape so e.g.
+    // `CREATE VIEW v ...; SELECT * FROM v;` returns rows from the
+    // SELECT instead of `rows_affected = 0`.
+    //
+    // Everything runs on a single pinned connection so session
+    // variables (`SET @x = ...;`) and temp tables survive between
+    // statements.
+    let statements = split_sql_statements(sql);
+    if statements.is_empty() {
+        return Err(anyhow::anyhow!("Query is empty"));
+    }
+
+    let mut conn = pool.acquire().await?;
+
+    for stmt in &statements[..statements.len() - 1] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(stmt.as_str()))
+            .execute(&mut *conn)
+            .await?;
+    }
+
+    let last = statements.last().unwrap().as_str();
+    let last_is_select = statement_is_select_like(
+        last,
+        &["SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "WITH"],
+    );
+
+    if last_is_select {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(last))
+            .fetch_all(&mut *conn)
             .await?;
         let elapsed = start.elapsed().as_millis() as u64;
         let columns: Vec<String> = if rows.is_empty() {
@@ -666,8 +691,8 @@ pub async fn my_execute_query(pool: &MySqlPool, _database: &str, sql: &str) -> R
             is_select: true,
         })
     } else {
-        let result = sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-            .execute(pool)
+        let result = sqlx::raw_sql(sqlx::AssertSqlSafe(last))
+            .execute(&mut *conn)
             .await?;
         let elapsed = start.elapsed().as_millis() as u64;
         Ok(QueryResult {
