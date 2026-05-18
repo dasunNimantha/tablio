@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { Search, X } from "lucide-react";
 import {
   ColumnInfo,
   IndexInfo,
@@ -32,65 +33,111 @@ export function ColumnsPanel({ columns, foreignKeys }: ColumnsPanelProps) {
     return m;
   }, [foreignKeys]);
 
+  // Column-name filter (#60). Local-only — the input is not
+  // persisted; closing the panel resets it because the component
+  // unmounts. We keep the filter scoped to a substring match on
+  // the column name; type filtering is out of scope per the
+  // issue's "out of scope" list.
+  const [filter, setFilter] = useState("");
+  const trimmedFilter = filter.trim().toLowerCase();
+  const filteredColumns = useMemo(() => {
+    if (!trimmedFilter) return columns;
+    return columns.filter((c) => c.name.toLowerCase().includes(trimmedFilter));
+  }, [columns, trimmedFilter]);
+
   return (
-    <table className="tv-table">
-      <thead>
-        <tr>
-          <th style={{ width: 40 }}>#</th>
-          <th>Name</th>
-          <th>Type</th>
-          <th style={{ width: 80 }}>Nullable</th>
-          <th>Default</th>
-          <th style={{ width: 110 }}>Key</th>
-        </tr>
-      </thead>
-      <tbody>
-        {columns.length === 0 ? (
-          <tr>
-            <td colSpan={6} className="tv-cell-empty">No columns</td>
-          </tr>
-        ) : (
-          columns.map((col, i) => {
-            const colFks = fksByColumn.get(col.name) ?? [];
-            const fkTitle =
-              colFks.length > 0
-                ? colFks
-                    .map((fk) => `${fk.referenced_table}.${fk.referenced_column}`)
-                    .join(" | ")
-                : undefined;
-            return (
-              <tr key={col.name}>
-                <td className="tv-cell-muted">{i + 1}</td>
-                <td className="tv-cell-name">{col.name}</td>
-                <td className="tv-cell-type">{col.data_type}</td>
-                <td>{col.is_nullable ? "YES" : "NO"}</td>
-                <td className="tv-cell-muted">{col.default_value || "-"}</td>
-                <td>
-                  <span className="tv-badges">
-                    {col.is_primary_key && (
-                      <span className="tv-badge tv-badge-pk">PK</span>
-                    )}
-                    {colFks.length > 0 && (
-                      <span className="tv-badge tv-badge-fk" title={fkTitle}>
-                        FK
-                      </span>
-                    )}
-                    {col.is_auto_generated && (
-                      <span
-                        className="tv-badge tv-badge-auto"
-                        title="Auto-generated"
-                      >
-                        AUTO
-                      </span>
-                    )}
-                  </span>
-                </td>
-              </tr>
-            );
-          })
+    <>
+      <div className="tv-columns-filter">
+        <Search size={13} className="tv-columns-filter-icon" />
+        <input
+          className="tv-columns-filter-input"
+          type="text"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Search columns..."
+          aria-label="Filter columns by name"
+        />
+        {filter && (
+          <button
+            type="button"
+            className="btn-icon tv-columns-filter-clear"
+            onClick={() => setFilter("")}
+            aria-label="Clear column filter"
+          >
+            <X size={13} />
+          </button>
         )}
-      </tbody>
-    </table>
+      </div>
+
+      <table className="tv-table">
+        <thead>
+          <tr>
+            <th style={{ width: 40 }}>#</th>
+            <th>Name</th>
+            <th>Type</th>
+            <th style={{ width: 80 }}>Nullable</th>
+            <th>Default</th>
+            <th style={{ width: 110 }}>Key</th>
+          </tr>
+        </thead>
+        <tbody>
+          {columns.length === 0 ? (
+            <tr>
+              <td colSpan={6} className="tv-cell-empty">No columns</td>
+            </tr>
+          ) : filteredColumns.length === 0 ? (
+            <tr>
+              <td colSpan={6} className="tv-cell-empty">
+                No columns match &ldquo;{filter}&rdquo;
+              </td>
+            </tr>
+          ) : (
+            filteredColumns.map((col) => {
+              // The displayed `#` keeps its original ordinal so a
+              // user filtering down to a single column still sees
+              // its real position in the table.
+              const ordinal = columns.indexOf(col) + 1;
+              const colFks = fksByColumn.get(col.name) ?? [];
+              const fkTitle =
+                colFks.length > 0
+                  ? colFks
+                      .map((fk) => `${fk.referenced_table}.${fk.referenced_column}`)
+                      .join(" | ")
+                  : undefined;
+              return (
+                <tr key={col.name}>
+                  <td className="tv-cell-muted">{ordinal}</td>
+                  <td className="tv-cell-name">{col.name}</td>
+                  <td className="tv-cell-type">{col.data_type}</td>
+                  <td>{col.is_nullable ? "YES" : "NO"}</td>
+                  <td className="tv-cell-muted">{col.default_value || "-"}</td>
+                  <td>
+                    <span className="tv-badges">
+                      {col.is_primary_key && (
+                        <span className="tv-badge tv-badge-pk">PK</span>
+                      )}
+                      {colFks.length > 0 && (
+                        <span className="tv-badge tv-badge-fk" title={fkTitle}>
+                          FK
+                        </span>
+                      )}
+                      {col.is_auto_generated && (
+                        <span
+                          className="tv-badge tv-badge-auto"
+                          title="Auto-generated"
+                        >
+                          AUTO
+                        </span>
+                      )}
+                    </span>
+                  </td>
+                </tr>
+              );
+            })
+          )}
+        </tbody>
+      </table>
+    </>
   );
 }
 

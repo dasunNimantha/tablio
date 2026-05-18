@@ -176,6 +176,50 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Column-name filter (Schema view → Columns tab). Issue #60.          */
+/* The same pattern lives in AlterTableDialog so users can filter long */
+/* column lists when reviewing alterations.                            */
+/* ------------------------------------------------------------------ */
+
+.tv-columns-filter {
+  position: sticky;
+  top: 0;
+  z-index: 6; /* above .tv-table thead, which uses z-index: 5 */
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.tv-columns-filter-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.tv-columns-filter-input {
+  flex: 1;
+  height: 28px;
+  padding: 0 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.tv-columns-filter-input:focus {
+  border-color: var(--accent);
+}
+
+.tv-columns-filter-clear {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+/* ------------------------------------------------------------------ */
 /* Panel tables (shared across Columns/Constraints/Indexes/...)        */
 /* ------------------------------------------------------------------ */
 

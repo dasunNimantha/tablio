@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { api, AlterTableOperation, ColumnInfo } from "../../lib/tauri";
-import { X, Plus, Loader2, Eye, EyeOff } from "lucide-react";
+import { X, Plus, Loader2, Eye, EyeOff, Search } from "lucide-react";
 import "./AlterTableDialog.css";
 
 const PG_TYPES = [
@@ -199,6 +199,23 @@ export function AlterTableDialog({
     []
   );
   const [showPreview, setShowPreview] = useState(false);
+  // Column-name filter (#60). Scoped to *existing* columns —
+  // pending-new column rows stay visible because the user is
+  // actively typing into them and hiding their own draft would be
+  // surprising. Filter is local to this dialog instance and is
+  // reset when the dialog unmounts (closing + reopening clears it).
+  const [columnFilter, setColumnFilter] = useState("");
+
+  // Case-insensitive substring match on column name. When the
+  // filter is empty we pass the original array through so render
+  // identity doesn't change (avoids re-keying every row on every
+  // keystroke).
+  const filteredExistingColumns = useMemo(() => {
+    const q = columnFilter.trim().toLowerCase();
+    if (!q) return columns;
+    return columns.filter((c) => c.name.toLowerCase().includes(q));
+  }, [columns, columnFilter]);
+
   const dialogRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const [editingCell, setEditingCell] = useState<{
@@ -528,6 +545,32 @@ export function AlterTableDialog({
                 <Plus size={14} /> Add Column
               </button>
             </div>
+            {/* Column-name filter (#60). Sits above the columns table
+                so it's discoverable on tables with 50-100+ columns
+                where finding a specific column would otherwise mean
+                scrolling. Filters EXISTING columns only — pending new
+                rows stay visible. */}
+            <div className="alter-table-columns-filter">
+              <Search size={13} className="alter-table-columns-filter-icon" />
+              <input
+                type="text"
+                className="alter-table-columns-filter-input"
+                value={columnFilter}
+                onChange={(e) => setColumnFilter(e.target.value)}
+                placeholder="Search columns..."
+                aria-label="Filter columns by name"
+              />
+              {columnFilter && (
+                <button
+                  type="button"
+                  className="btn-icon alter-table-columns-filter-clear"
+                  onClick={() => setColumnFilter("")}
+                  aria-label="Clear column filter"
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </div>
             <div className="alter-table-columns">
               <div className="alter-table-columns-header">
                 <span style={{ flex: 2 }}>Name</span>
@@ -598,7 +641,13 @@ export function AlterTableDialog({
                 </div>
               ))}
 
-              {columns.map((col) => {
+              {columns.length > 0 && filteredExistingColumns.length === 0 && (
+                <div className="alter-table-columns-empty">
+                  No columns match &ldquo;{columnFilter}&rdquo;
+                </div>
+              )}
+
+              {filteredExistingColumns.map((col) => {
                 const dropped = isColumnDropped(col.name);
                 const eff = effectiveState.get(col.name);
                 if (!eff) return null;

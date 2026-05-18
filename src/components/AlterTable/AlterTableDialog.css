@@ -95,6 +95,50 @@
   color: var(--text-secondary);
 }
 
+/* Column-name filter row (#60). Sits above the columns table so
+ * users can narrow a 100-column list to whatever they're looking
+ * for. Local state, cleared when the dialog unmounts. */
+.alter-table-columns-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.alter-table-columns-filter-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.alter-table-columns-filter-input {
+  flex: 1;
+  height: 26px;
+  padding: 0 6px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.alter-table-columns-filter-clear {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.alter-table-columns-empty {
+  padding: 14px 16px;
+  text-align: center;
+  font-size: 13px;
+  font-style: italic;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
 .alter-table-columns {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
