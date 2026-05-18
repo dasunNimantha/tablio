@@ -1004,3 +1004,118 @@ describe("Delete button label", () => {
     expect(deleteButtonLabel(100)).toBe("Delete 100 rows");
   });
 });
+
+// -----------------------------------------------------------------------
+// Feature #64: pressing Down on the last data row creates a new pending
+// row, spreadsheet-style. The logic lives inside an `onCellKeyDown`
+// callback in DataGrid.tsx; we mirror its decision-making here as a pure
+// function so we can exercise every branch without spinning up ag-grid.
+// -----------------------------------------------------------------------
+
+interface DownAddRowInput {
+  key: string;
+  shiftKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+  rowPinned: "top" | "bottom" | null;
+  rowIndex: number;
+  lastDataRowIndex: number; // = agRowData.length - 1
+  editingCellsCount: number;
+  hasColumns: boolean;
+  hasEditableColumn: boolean;
+}
+
+/**
+ * Returns true when a keydown event should be handled as "add a new
+ * pending row". Mirrors the conditions inside
+ * `DataGrid.tsx::handleCellKeyDown` exactly.
+ */
+function shouldAddRowOnDown(input: DownAddRowInput): boolean {
+  if (input.key !== "ArrowDown") return false;
+  if (input.shiftKey || input.ctrlKey || input.metaKey || input.altKey)
+    return false;
+  if (input.rowPinned !== null) return false;
+  if (input.lastDataRowIndex < 0) return false;
+  if (input.rowIndex !== input.lastDataRowIndex) return false;
+  if (input.editingCellsCount > 0) return false;
+  if (!input.hasColumns) return false;
+  if (!input.hasEditableColumn) return false;
+  return true;
+}
+
+const baseInput: DownAddRowInput = {
+  key: "ArrowDown",
+  shiftKey: false,
+  ctrlKey: false,
+  metaKey: false,
+  altKey: false,
+  rowPinned: null,
+  rowIndex: 4,
+  lastDataRowIndex: 4,
+  editingCellsCount: 0,
+  hasColumns: true,
+  hasEditableColumn: true,
+};
+
+describe("Down-on-last-row creates a new pending row (#64)", () => {
+  it("fires on the last data row with a plain ArrowDown", () => {
+    expect(shouldAddRowOnDown(baseInput)).toBe(true);
+  });
+
+  it("does not fire for any key other than ArrowDown", () => {
+    for (const key of ["ArrowUp", "ArrowLeft", "ArrowRight", "Enter", "Tab", "PageDown", "End"]) {
+      expect(shouldAddRowOnDown({ ...baseInput, key })).toBe(false);
+    }
+  });
+
+  it("does not fire when a modifier is held (selection extension, page nav, etc.)", () => {
+    expect(shouldAddRowOnDown({ ...baseInput, shiftKey: true })).toBe(false);
+    expect(shouldAddRowOnDown({ ...baseInput, ctrlKey: true })).toBe(false);
+    expect(shouldAddRowOnDown({ ...baseInput, metaKey: true })).toBe(false);
+    expect(shouldAddRowOnDown({ ...baseInput, altKey: true })).toBe(false);
+  });
+
+  it("does not fire when the user is not on the last data row", () => {
+    expect(shouldAddRowOnDown({ ...baseInput, rowIndex: 0 })).toBe(false);
+    expect(shouldAddRowOnDown({ ...baseInput, rowIndex: 3 })).toBe(false);
+  });
+
+  it("does not fire when focus is on a pinned-top row (i.e. an in-progress insert)", () => {
+    // Pinned-top is where the new rows ALREADY go after we add
+    // them. Chaining Down there would create rows indefinitely
+    // before the user has typed anything.
+    expect(shouldAddRowOnDown({ ...baseInput, rowPinned: "top" })).toBe(false);
+  });
+
+  it("does not fire when there are no data rows at all", () => {
+    expect(shouldAddRowOnDown({ ...baseInput, rowIndex: -1, lastDataRowIndex: -1 })).toBe(false);
+  });
+
+  it("does not fire while a cell is being edited", () => {
+    // ag-grid forwards keydown to the cell editor while editing.
+    // We must not mutate the row set out from under the editor.
+    expect(shouldAddRowOnDown({ ...baseInput, editingCellsCount: 1 })).toBe(false);
+  });
+
+  it("does not fire when the table has no columns", () => {
+    expect(shouldAddRowOnDown({ ...baseInput, hasColumns: false })).toBe(false);
+  });
+
+  it("does not fire when every column is auto-generated (degenerate case)", () => {
+    // e.g. a table whose only column is a serial PK. There's no
+    // editable column to focus, so the shortcut would land the
+    // user on a non-editable cell.
+    expect(shouldAddRowOnDown({ ...baseInput, hasEditableColumn: false })).toBe(false);
+  });
+
+  it("repeated Down keystrokes only fire while still on the last row", () => {
+    // After the first Down adds a row and moves focus to the
+    // pinned-top area, the next Down arrives with rowPinned="top"
+    // and so the guard above blocks chained creation.
+    expect(shouldAddRowOnDown(baseInput)).toBe(true);
+    expect(
+      shouldAddRowOnDown({ ...baseInput, rowPinned: "top", rowIndex: 0 })
+    ).toBe(false);
+  });
+});
