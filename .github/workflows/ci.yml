@@ -163,7 +163,7 @@ jobs:
           sudo apt-get install -y lcov
 
       - name: Download all per-engine coverage artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           pattern: lcov-*
           path: lcov-parts
