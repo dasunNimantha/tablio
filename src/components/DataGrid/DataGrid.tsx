@@ -46,7 +46,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { AllCommunityModule, themeQuartz, type ColDef, type CellClickedEvent, type CellContextMenuEvent, type GridApi, type GridReadyEvent, type IHeaderParams, type SelectionChangedEvent } from "ag-grid-community";
+import { AllCommunityModule, themeQuartz, type ColDef, type CellClickedEvent, type CellContextMenuEvent, type CellKeyDownEvent, type GridApi, type GridReadyEvent, type IHeaderParams, type SelectionChangedEvent } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import "./DataGrid.css";
 import "./ag-grid-theme.css";
@@ -654,6 +654,54 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     }));
     setTimeout(() => gridApiRef.current?.ensureIndexVisible(0, "top"), 0);
   };
+
+  // Spreadsheet-style "Down on last row → add new pending row"
+  // (feature #64). The newly-added row goes into the pinned-top
+  // area, same as the toolbar "Add Row" button, so users can save
+  // a batch of inserts in one transaction. We move focus straight
+  // to the first editable cell of the new row so the user can
+  // type immediately without reaching for the mouse.
+  const handleCellKeyDown = useCallback((event: CellKeyDownEvent) => {
+    const ev = event.event as KeyboardEvent | null;
+    if (!ev || ev.key !== "ArrowDown") return;
+    // Modified Down is reserved for selection extension / page nav;
+    // don't hijack those.
+    if (ev.shiftKey || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+
+    // Only react when focus is on an existing data row at the very
+    // bottom of the main grid. The pinned-top area holds in-progress
+    // inserts; chaining Down there would create rows indefinitely.
+    if (event.rowPinned) return;
+    const lastIdx = agRowData.length - 1;
+    if (lastIdx < 0 || event.rowIndex !== lastIdx) return;
+
+    // ag-grid forwards keydown to the cell editor while a cell is
+    // being edited; we don't want to mutate the row set out from
+    // under the editor.
+    const api = event.api;
+    if (api.getEditingCells().length > 0) return;
+
+    if (!data) return;
+    // First non-auto-generated column is the first cell the user
+    // can actually type into. If every column is auto-generated
+    // (a degenerate case but possible for tables with only a
+    // serial PK), there's nothing to focus, so we don't trigger
+    // the shortcut.
+    const firstEditable = data.columns.find((c) => !c.is_auto_generated);
+    if (!firstEditable) return;
+
+    ev.preventDefault();
+
+    // The new pinned row's index = current count of pinned rows
+    // (we're appending). We capture this *before* `handleAddRow`
+    // mutates state so we can target it from a setTimeout that
+    // runs after the next render pass.
+    const newPinnedIdx = pinnedTopRows.length;
+    handleAddRow();
+    setTimeout(() => {
+      gridApiRef.current?.setFocusedCell(newPinnedIdx, firstEditable.name, "top");
+    }, 0);
+  }, [agRowData.length, pinnedTopRows.length, data, handleAddRow]);
 
   const handleDeleteRow = (rowIndex: number) => {
     const pkKey = getPkKey(rowIndex);
@@ -1285,6 +1333,7 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
           onGridReady={onGridReady}
           onCellClicked={onCellClicked}
           onCellContextMenu={onCellContextMenu}
+          onCellKeyDown={handleCellKeyDown}
           onSortChanged={onSortChanged}
           onSelectionChanged={onSelectionChanged}
           rowSelection={{ mode: "multiRow", checkboxes: false, headerCheckbox: false, enableClickSelection: false }}
