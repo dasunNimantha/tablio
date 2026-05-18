@@ -571,9 +571,19 @@ jobs:
       - name: Run MSSQL integration tests with coverage
         env:
           TEST_MSSQL_URL: "mssql://SA:Str0ng_Passw0rd!@localhost:1433/testdb"
+        # `--test-threads=1` serialises the integration suite so concurrent
+        # `CREATE TABLE` / `DROP TABLE` calls don't deadlock on SQL
+        # Server's system-catalog locks (error 1205 "Transaction was
+        # deadlocked on lock resources with another process and has
+        # been chosen as the deadlock victim"). The deadlock victim is
+        # a perfectly legitimate transient SQL-Server outcome and the
+        # docs recommend rerunning; serialising the suite makes it
+        # never happen in the first place. Trade-off: ~2 minutes
+        # longer wall-clock time. Same pattern as `test-ssh-tunnel`.
         run: |
           cargo llvm-cov --manifest-path src-tauri/Cargo.toml --test mssql_integration \
-            --lcov --output-path "${{ github.workspace }}/lcov-mssql.info"
+            --lcov --output-path "${{ github.workspace }}/lcov-mssql.info" \
+            -- --test-threads=1
 
       - name: Upload coverage
         if: always()
@@ -1045,6 +1055,7 @@ jobs:
       - test-postgres
       - test-mysql
       - test-mariadb
+      - test-mssql
       - test-cockroachdb
       - test-tidb
       - test-sqlite

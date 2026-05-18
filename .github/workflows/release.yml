@@ -236,7 +236,11 @@ jobs:
       - name: Run MSSQL integration tests
         env:
           TEST_MSSQL_URL: "mssql://SA:Str0ng_Passw0rd!@localhost:1433/testdb"
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test mssql_integration
+        # `--test-threads=1` serialises the integration suite so
+        # concurrent CREATE TABLE / DROP TABLE calls don't deadlock
+        # on SQL Server's system-catalog locks (error 1205). See
+        # the matching comment in `.github/workflows/ci.yml`.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test mssql_integration -- --test-threads=1
 
   test-cockroachdb:
     name: CockroachDB
