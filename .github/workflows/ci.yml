@@ -615,19 +615,63 @@ jobs:
       fail-fast: false
       matrix:
         cassandra_version: ["4.0", "4.1", "5.0"]
-    services:
-      cassandra:
-        image: cassandra:${{ matrix.cassandra_version }}
-        ports:
-          - 9042:9042
-        options: >-
-          --health-cmd "cqlsh -e 'describe cluster'"
-          --health-interval 15s
-          --health-timeout 10s
-          --health-retries 15
-          --health-start-period 90s
+    # NOTE: we deliberately don't use a `services:` block here.
+    # The official Cassandra image flipped materialized views to
+    # *experimental and disabled by default* in 4.0, and there's
+    # no env var or `services:` knob to flip them back on. The
+    # only reliable workaround is to patch `cassandra.yaml`
+    # before the server boots, which requires overriding the
+    # entrypoint — something GHA's `services:` syntax doesn't
+    # expose. So we run Cassandra ourselves via `docker run`.
     steps:
       - uses: actions/checkout@v6
+
+      - name: Start Cassandra (with materialized views enabled)
+        env:
+          # The MV-enablement property was renamed mid-lifecycle:
+          #   - Cassandra 4.0 / 4.1: `enable_materialized_views`
+          #   - Cassandra 5.0+:      `materialized_views_enabled`
+          # Cassandra rejects the *other* name as unknown at boot,
+          # so we must pass exactly the right one. Pick it from
+          # the matrix version.
+          MV_SETTING: ${{ startsWith(matrix.cassandra_version, '4.') && 'enable_materialized_views' || 'materialized_views_enabled' }}
+        run: |
+          docker run -d --name cassandra-ci \
+            -p 9042:9042 \
+            -e CASSANDRA_CLUSTER_NAME=ci-test \
+            -e MV_SETTING="$MV_SETTING" \
+            --entrypoint bash \
+            cassandra:${{ matrix.cassandra_version }} \
+            -c '
+              for conf in /etc/cassandra/cassandra.yaml /opt/cassandra/conf/cassandra.yaml; do
+                [ -f "$conf" ] || continue
+                # Uncomment-and-set the property if it appears as
+                # a commented default; otherwise append it. We
+                # never write the *other* property name, because
+                # Cassandra refuses to start if it sees a property
+                # it doesn'"'"'t recognise.
+                sed -i "s/^# *${MV_SETTING} *:.*/${MV_SETTING}: true/" "$conf"
+                if ! grep -qE "^${MV_SETTING}: true" "$conf"; then
+                  printf "\n%s: true\n" "$MV_SETTING" >> "$conf"
+                fi
+              done
+              exec docker-entrypoint.sh cassandra -f
+            '
+
+          # Wait for native protocol ready. cqlsh exit code is the
+          # canonical readiness signal — it requires the cluster
+          # to have finished schema bootstrap, not just opened the
+          # socket.
+          for i in $(seq 1 90); do
+            if docker exec cassandra-ci cqlsh -e "DESCRIBE KEYSPACES" >/dev/null 2>&1; then
+              echo "Cassandra ready after ~$((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Cassandra failed to become ready within 180s" >&2
+          docker logs cassandra-ci >&2 || true
+          exit 1
 
       - name: Install Linux dependencies
         run: |
@@ -645,6 +689,10 @@ jobs:
           TEST_CASSANDRA_HOST: "127.0.0.1"
           TEST_CASSANDRA_PORT: "9042"
         run: cargo test --manifest-path src-tauri/Cargo.toml --test cassandra_integration
+
+      - name: Dump Cassandra logs on failure
+        if: failure()
+        run: docker logs cassandra-ci || true
 
   test-scylladb:
     name: ScyllaDB ${{ matrix.scylla_version }}
