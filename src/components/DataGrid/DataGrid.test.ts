@@ -129,15 +129,6 @@ function buildSearchMatches(
   if (!searchQuery || !columns) return [];
   const q = searchQuery.toLowerCase();
   const matches: SearchMatch[] = [];
-
-  // Column-name matches first (bug #56). Sentinel rowIndex = -1
-  // means "no row — scroll the column into view".
-  for (const col of columns) {
-    if (col.name.toLowerCase().includes(q)) {
-      matches.push({ rowIndex: -1, colId: col.name });
-    }
-  }
-
   for (let r = 0; r < editingRows.length; r++) {
     for (let c = 0; c < editingRows[r].length; c++) {
       const val = editingRows[r][c];
@@ -290,75 +281,6 @@ describe("DataGrid search match building", () => {
     const matches = buildSearchMatches("alice", rows, shortCols);
     expect(matches).toEqual([]);
   });
-
-  // -----------------------------------------------------------------------
-  // Bug #56: the placeholder "Search columns and values..." promised
-  // column-name matching, but the matcher only scanned cell values.
-  // The fix adds column-name matches with a sentinel rowIndex = -1.
-  // -----------------------------------------------------------------------
-
-  it("matches a column name with sentinel rowIndex = -1", () => {
-    const matches = buildSearchMatches("email", [], cols);
-    expect(matches).toEqual([{ rowIndex: -1, colId: "email" }]);
-  });
-
-  it("matches a column name case-insensitively", () => {
-    const matches = buildSearchMatches("EMAIL", [], cols);
-    expect(matches).toEqual([{ rowIndex: -1, colId: "email" }]);
-  });
-
-  it("matches a column name with a partial substring", () => {
-    const matches = buildSearchMatches("nam", [], cols);
-    expect(matches).toEqual([{ rowIndex: -1, colId: "name" }]);
-  });
-
-  it("matches multiple column names", () => {
-    const fanCols = [
-      { name: "user_id" },
-      { name: "user_email" },
-      { name: "created_at" },
-    ];
-    const matches = buildSearchMatches("user", [], fanCols);
-    expect(matches).toEqual([
-      { rowIndex: -1, colId: "user_id" },
-      { rowIndex: -1, colId: "user_email" },
-    ]);
-  });
-
-  it("orders column matches before cell matches", () => {
-    const rows = [[1, "Alice", "alice@test.com"]];
-    // "name" matches the second column name AND no cell values.
-    const matches = buildSearchMatches("name", rows, cols);
-    expect(matches[0]).toEqual({ rowIndex: -1, colId: "name" });
-  });
-
-  it("finds both a column-name and a cell-value match in the same query", () => {
-    // Search query simultaneously matches the `email` column name
-    // AND the `alice@test.com` cell value. We surface both.
-    const rows = [[1, "Alice", "alice@test.com"]];
-    const matches = buildSearchMatches("email", rows, cols);
-    expect(matches).toEqual([
-      { rowIndex: -1, colId: "email" },
-      // No row-cell match here — neither "Alice" nor
-      // "alice@test.com" contains the substring "email".
-    ]);
-
-    // Now a query that hits both: "alice" matches the cell values
-    // but not the column names (cols = id / name / email).
-    const cellOnly = buildSearchMatches("alice", rows, cols);
-    expect(cellOnly).toEqual([
-      { rowIndex: 0, colId: "name" },
-      { rowIndex: 0, colId: "email" },
-    ]);
-
-    // And a query that hits BOTH a column name (`name`) and cell
-    // values that happen to contain it (`my_name_is_alice`).
-    const both = buildSearchMatches("name", [[1, "my_name_is_alice", "x"]], cols);
-    expect(both).toEqual([
-      { rowIndex: -1, colId: "name" },
-      { rowIndex: 0, colId: "name" },
-    ]);
-  });
 });
 
 describe("DataGrid search navigation index", () => {
@@ -463,17 +385,6 @@ describe("DataGrid cell search class rules", () => {
     it("returns false when colField is undefined", () => {
       const current = { rowIndex: 0, colId: "id" };
       expect(isCellSearchCurrent(current, 0, undefined)).toBe(false);
-    });
-
-    it("never matches a cell when the current match is a column-only sentinel (#56)", () => {
-      // After bug #56's fix, column-name matches use `rowIndex = -1`.
-      // No data cell has rowIndex = -1, so the cell-search-current
-      // class rule must never light up while the user navigates to
-      // a column match — the visual feedback for that path is
-      // `ensureColumnVisible` + `setFocusedCell`, not a cell tint.
-      const colMatch = { rowIndex: -1, colId: "email" };
-      expect(isCellSearchCurrent(colMatch, 0, "email")).toBe(false);
-      expect(isCellSearchCurrent(colMatch, 5, "email")).toBe(false);
     });
   });
 });

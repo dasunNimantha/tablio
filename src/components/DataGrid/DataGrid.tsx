@@ -381,19 +381,6 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     if (!searchQuery || !data) return [];
     const q = searchQuery.toLowerCase();
     const matches: { rowIndex: number; colId: string }[] = [];
-
-    // Column-name matches come first. The search bar's placeholder
-    // promises "Search columns and values..."; without this loop
-    // (bug #56), typing a column name returned zero results despite
-    // the copy. We emit a sentinel match with `rowIndex = -1` that
-    // `navigateToMatch` interprets as "no row — just scroll the
-    // column into view".
-    for (const col of data.columns) {
-      if (col.name.toLowerCase().includes(q)) {
-        matches.push({ rowIndex: -1, colId: col.name });
-      }
-    }
-
     for (let r = 0; r < editingRows.length; r++) {
       for (let c = 0; c < editingRows[r].length; c++) {
         const val = editingRows[r][c];
@@ -415,24 +402,10 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     searchCurrentRef.current = match;
     const api = gridApiRef.current;
     if (!api) return;
-
-    if (match.rowIndex < 0) {
-      // Column-name match (bug #56 sentinel). There's no row to
-      // scroll to — just bring the column into view and focus its
-      // first data row so the user sees a clear "this is the column
-      // you were searching for" cell outline. ag-grid's
-      // `headerClass` isn't reactive without a custom header
-      // component, so we rely on cell focus for the visual cue.
-      api.ensureColumnVisible(match.colId);
-      if (editingRows.length > 0) {
-        api.setFocusedCell(0, match.colId);
-      }
-    } else {
-      api.ensureIndexVisible(match.rowIndex, "middle");
-      api.ensureColumnVisible(match.colId);
-    }
+    api.ensureIndexVisible(match.rowIndex, "middle");
+    api.ensureColumnVisible(match.colId);
     api.refreshCells({ force: true });
-  }, [searchMatches, editingRows.length]);
+  }, [searchMatches]);
 
   useEffect(() => {
     if (searchMatches.length > 0) {
