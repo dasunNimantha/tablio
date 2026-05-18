@@ -418,21 +418,31 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
 
     if (match.rowIndex < 0) {
       // Column-name match (bug #56 sentinel). There's no row to
-      // scroll to — just bring the column into view and focus its
-      // first data row so the user sees a clear "this is the column
-      // you were searching for" cell outline. ag-grid's
-      // `headerClass` isn't reactive without a custom header
-      // component, so we rely on cell focus for the visual cue.
+      // scroll to — bring the column into view, but DO NOT move
+      // keyboard focus into the grid: the auto-navigate-to-match-0
+      // useEffect below fires on every keystroke, and
+      // `setFocusedCell` would yank focus out of the search input
+      // on every letter the user typed.
+      //
+      // We do still want a visual cue ("which column matched?"),
+      // so we drive `headerClass` and a column-wide
+      // `cell-column-search-current` rule from `searchCurrentRef`
+      // and force ag-grid to re-evaluate them via
+      // `refreshHeader` + `refreshCells`. The header lights up,
+      // every cell in the matched column gets a vertical tinted
+      // stripe, and the search input keeps the cursor.
       api.ensureColumnVisible(match.colId);
-      if (editingRows.length > 0) {
-        api.setFocusedCell(0, match.colId);
-      }
+      api.refreshHeader();
     } else {
       api.ensureIndexVisible(match.rowIndex, "middle");
       api.ensureColumnVisible(match.colId);
+      // When switching FROM a column-only match TO a cell match,
+      // we still need to clear the column-stripe highlight from
+      // the previous match's column.
+      api.refreshHeader();
     }
     api.refreshCells({ force: true });
-  }, [searchMatches, editingRows.length]);
+  }, [searchMatches]);
 
   useEffect(() => {
     if (searchMatches.length > 0) {
@@ -440,6 +450,13 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     } else {
       setSearchMatchIdx(-1);
       searchCurrentRef.current = null;
+      // Clear any lingering column-stripe / header highlight from
+      // the previous match. Without this, narrowing the query
+      // from "issuer_trading" (which matches a column) to a
+      // query that matches nothing would leave the previous
+      // column tinted forever.
+      gridApiRef.current?.refreshHeader();
+      gridApiRef.current?.refreshCells({ force: true });
     }
   }, [searchMatches, navigateToMatch]);
 
@@ -587,6 +604,18 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
           isPk: col.is_primary_key,
           fk: fkMap.get(col.name),
         },
+        // Highlights the header of the column the user just
+        // matched on. ag-grid evaluates this function each time
+        // `api.refreshHeader()` is called, so `navigateToMatch`
+        // can drive the visual cue without re-rendering the
+        // whole grid.
+        headerClass: (params) => {
+          const cur = searchCurrentRef.current;
+          if (!cur || cur.rowIndex >= 0) return "";
+          return params.column?.getColId() === cur.colId
+            ? "header-search-current"
+            : "";
+        },
         editable: (params) => {
           if (!params.data) return false;
           if (params.data.__isInserted && isAutoGen && (params.data[col.name] === null || params.data[col.name] === undefined)) return false;
@@ -615,6 +644,17 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
             const cur = searchCurrentRef.current;
             if (!cur) return false;
             return params.rowIndex === cur.rowIndex && params.colDef.field === cur.colId;
+          },
+          // Column-only search match (sentinel rowIndex < 0):
+          // tint EVERY cell in the matched column so the user
+          // sees a vertical stripe pointing at the column they
+          // searched for. The header class above does the same
+          // for the header. No keyboard focus is moved — see
+          // `navigateToMatch` for why.
+          "cell-column-search-current": (params) => {
+            const cur = searchCurrentRef.current;
+            if (!cur || cur.rowIndex >= 0) return false;
+            return params.colDef.field === cur.colId;
           },
         },
         valueFormatter: (params) => {

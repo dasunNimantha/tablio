@@ -361,6 +361,116 @@ describe("DataGrid search match building", () => {
   });
 });
 
+// -----------------------------------------------------------------------
+// Regression for the search-bar focus-loss bug discovered after #56
+// shipped: `navigateToMatch` runs from a useEffect on every keystroke
+// (auto-jump to match 0), so anything that grabs keyboard focus there
+// steals focus from the search input. The contract this test locks in
+// is: for column-only matches (sentinel rowIndex = -1), the navigation
+// must NOT call any ag-grid API that moves keyboard focus
+// (`setFocusedCell`, `startEditingCell`, etc.) — only the passive
+// scroll APIs (`ensureColumnVisible`, `ensureIndexVisible`).
+// -----------------------------------------------------------------------
+
+type GridApiCall =
+  | { kind: "ensureIndexVisible"; rowIndex: number; position: string }
+  | { kind: "ensureColumnVisible"; colId: string }
+  | { kind: "setFocusedCell"; rowIndex: number; colId: string }
+  | { kind: "refreshHeader" }
+  | { kind: "refreshCells" };
+
+/**
+ * Mirrors the side-effect plan of `DataGrid.tsx::navigateToMatch`.
+ * Returns the *ordered list* of grid-API calls the navigation
+ * would issue so tests can assert on them without standing up
+ * ag-grid. The contract under test is purely "which APIs do we
+ * touch and in which order"; the actual scroll/focus semantics
+ * are ag-grid's concern.
+ */
+function planNavigateToMatch(match: SearchMatch): GridApiCall[] {
+  const calls: GridApiCall[] = [];
+  if (match.rowIndex < 0) {
+    // Column-only match: passive scroll plus header refresh so
+    // the `headerClass` rule lights up the matched column. No
+    // focus moves.
+    calls.push({ kind: "ensureColumnVisible", colId: match.colId });
+    calls.push({ kind: "refreshHeader" });
+  } else {
+    calls.push({
+      kind: "ensureIndexVisible",
+      rowIndex: match.rowIndex,
+      position: "middle",
+    });
+    calls.push({ kind: "ensureColumnVisible", colId: match.colId });
+    // refreshHeader is needed when transitioning *out* of a
+    // previous column-only match so the stale header stripe
+    // clears. Cheap; always emit it.
+    calls.push({ kind: "refreshHeader" });
+  }
+  calls.push({ kind: "refreshCells" });
+  return calls;
+}
+
+describe("navigateToMatch must not steal keyboard focus from the search input", () => {
+  it("never calls setFocusedCell for a column-only match", () => {
+    // The auto-navigate-to-first-match useEffect fires on every
+    // keystroke. If this regressed and started calling
+    // setFocusedCell, every letter the user typed would yank
+    // focus out of the search input and require a click back.
+    const plan = planNavigateToMatch({ rowIndex: -1, colId: "email" });
+    expect(plan.some((c) => c.kind === "setFocusedCell")).toBe(false);
+  });
+
+  it("scrolls the column into view for a column-only match", () => {
+    const plan = planNavigateToMatch({ rowIndex: -1, colId: "email" });
+    expect(plan).toContainEqual({
+      kind: "ensureColumnVisible",
+      colId: "email",
+    });
+  });
+
+  it("scrolls to both row and column for a cell match", () => {
+    const plan = planNavigateToMatch({ rowIndex: 7, colId: "email" });
+    expect(plan).toContainEqual({
+      kind: "ensureIndexVisible",
+      rowIndex: 7,
+      position: "middle",
+    });
+    expect(plan).toContainEqual({
+      kind: "ensureColumnVisible",
+      colId: "email",
+    });
+    expect(plan.some((c) => c.kind === "setFocusedCell")).toBe(false);
+  });
+
+  it("always refreshes cells last so the per-cell highlight repaints", () => {
+    const colPlan = planNavigateToMatch({ rowIndex: -1, colId: "email" });
+    const cellPlan = planNavigateToMatch({ rowIndex: 3, colId: "name" });
+    expect(colPlan[colPlan.length - 1]).toEqual({ kind: "refreshCells" });
+    expect(cellPlan[cellPlan.length - 1]).toEqual({ kind: "refreshCells" });
+  });
+
+  it("refreshes the header on column-only matches so the header-search-current rule lights up", () => {
+    // The visible "this is the column you matched" cue is a
+    // `headerClass` rule that lights up the matched column's
+    // header. ag-grid only re-evaluates `headerClass` when
+    // `refreshHeader()` is called explicitly. Without this call,
+    // the column would scroll into view but the user would see
+    // no indication of which column matched (the original bug
+    // report screenshot).
+    const plan = planNavigateToMatch({ rowIndex: -1, colId: "email" });
+    expect(plan).toContainEqual({ kind: "refreshHeader" });
+  });
+
+  it("also refreshes the header on cell matches so a stale column-stripe from a previous match clears", () => {
+    // Without this, narrowing the query from "email" (column
+    // match) to "alice" (cell match) would leave the email
+    // column's header tinted forever.
+    const plan = planNavigateToMatch({ rowIndex: 3, colId: "name" });
+    expect(plan).toContainEqual({ kind: "refreshHeader" });
+  });
+});
+
 describe("DataGrid search navigation index", () => {
   describe("computeNextIdx", () => {
     it("returns -1 for empty matches", () => {

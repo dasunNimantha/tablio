@@ -537,6 +537,21 @@ th.grid-row-number {
   padding: 0 1px;
 }
 
+/* Column-name match (bug #56). When the user's search query
+ * matches a column NAME rather than a cell value, we don't move
+ * keyboard focus into the grid (that would steal focus from the
+ * search input on every keystroke), so the only visual cue is a
+ * tinted vertical stripe down the matched column plus an
+ * accent-coloured header. */
+.cell-column-search-current {
+  background: rgba(234, 179, 8, 0.08) !important;
+}
+
+.header-search-current {
+  background: rgba(234, 179, 8, 0.22) !important;
+  box-shadow: inset 0 -2px 0 rgba(234, 179, 8, 0.85);
+}
+
 .refresh-interval-wrapper {
   position: relative;
 }
