@@ -445,19 +445,63 @@ jobs:
       fail-fast: false
       matrix:
         cassandra_version: ["4.0", "4.1", "5.0"]
-    services:
-      cassandra:
-        image: cassandra:${{ matrix.cassandra_version }}
-        ports:
-          - 9042:9042
-        options: >-
-          --health-cmd "cqlsh -e 'describe cluster'"
-          --health-interval 15s
-          --health-timeout 10s
-          --health-retries 15
-          --health-start-period 90s
+    # See `.github/workflows/ci.yml` → `test-cassandra` for the
+    # full context. The short version: Cassandra 4.0+ ships with
+    # materialized views disabled by default, and there's no
+    # `services:` knob to flip them back on. We run Cassandra via
+    # `docker run` so we can override the entrypoint and patch
+    # `cassandra.yaml` before the server boots.
     steps:
       - uses: actions/checkout@v6
+
+      - name: Start Cassandra (with materialized views enabled)
+        env:
+          # The MV-enablement property was renamed mid-4.x:
+          #   - Cassandra 4.0:         `enable_materialized_views`
+          #   - Cassandra 4.1 + 5.0+:  `materialized_views_enabled`
+          # 4.1 is a transition release that knows both names and
+          # refuses to start if both are active, so we always
+          # write exactly one form.
+          MV_SETTING: ${{ matrix.cassandra_version == '4.0' && 'enable_materialized_views' || 'materialized_views_enabled' }}
+        run: |
+          docker run -d --name cassandra-ci \
+            -p 9042:9042 \
+            -e CASSANDRA_CLUSTER_NAME=release-test \
+            -e MV_SETTING="$MV_SETTING" \
+            --entrypoint bash \
+            cassandra:${{ matrix.cassandra_version }} \
+            -c '
+              case "$MV_SETTING" in
+                enable_materialized_views) OTHER=materialized_views_enabled ;;
+                materialized_views_enabled) OTHER=enable_materialized_views ;;
+              esac
+
+              for conf in /etc/cassandra/cassandra.yaml /opt/cassandra/conf/cassandra.yaml; do
+                [ -f "$conf" ] || continue
+                # Delete any line (commented or not) for the
+                # OTHER form so 4.1'"'"'s dual-key check passes.
+                sed -i -E "/^(# *)?${OTHER} *:/d" "$conf"
+                # Set OUR form: uncomment-and-true if commented,
+                # rewrite if already false, append if absent.
+                sed -i -E "s/^# *${MV_SETTING} *:.*/${MV_SETTING}: true/" "$conf"
+                sed -i -E "s/^${MV_SETTING} *: *false.*/${MV_SETTING}: true/" "$conf"
+                if ! grep -qE "^${MV_SETTING}: true" "$conf"; then
+                  printf "\n%s: true\n" "$MV_SETTING" >> "$conf"
+                fi
+              done
+              exec docker-entrypoint.sh cassandra -f
+            '
+
+          for i in $(seq 1 90); do
+            if docker exec cassandra-ci cqlsh -e "DESCRIBE KEYSPACES" >/dev/null 2>&1; then
+              echo "Cassandra ready after ~$((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Cassandra failed to become ready within 180s" >&2
+          docker logs cassandra-ci >&2 || true
+          exit 1
 
       - name: Install Linux dependencies
         run: |
@@ -475,6 +519,10 @@ jobs:
           TEST_CASSANDRA_HOST: "127.0.0.1"
           TEST_CASSANDRA_PORT: "9042"
         run: cargo test --manifest-path src-tauri/Cargo.toml --test cassandra_integration
+
+      - name: Dump Cassandra logs on failure
+        if: failure()
+        run: docker logs cassandra-ci || true
 
   test-scylladb:
     name: ScyllaDB ${{ matrix.scylla_version }}
