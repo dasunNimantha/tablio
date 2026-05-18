@@ -628,13 +628,19 @@ jobs:
 
       - name: Start Cassandra (with materialized views enabled)
         env:
-          # The MV-enablement property was renamed mid-lifecycle:
-          #   - Cassandra 4.0 / 4.1: `enable_materialized_views`
-          #   - Cassandra 5.0+:      `materialized_views_enabled`
-          # Cassandra rejects the *other* name as unknown at boot,
-          # so we must pass exactly the right one. Pick it from
-          # the matrix version.
-          MV_SETTING: ${{ startsWith(matrix.cassandra_version, '4.') && 'enable_materialized_views' || 'materialized_views_enabled' }}
+          # The MV-enablement property was renamed during the 4.x
+          # cycle, and 4.1 is a transition release that knows BOTH
+          # names and refuses to start if both are present and
+          # active in the same `cassandra.yaml`:
+          #
+          #   - Cassandra 4.0:         only `enable_materialized_views`
+          #   - Cassandra 4.1 + 5.0+:  use `materialized_views_enabled`
+          #     (4.1's startup check emits
+          #      "migrate old -> new: [enable_materialized_views ->
+          #      materialized_views_enabled]" if you write the old name)
+          #
+          # 4.0 is the only matrix entry that must use the old name.
+          MV_SETTING: ${{ matrix.cassandra_version == '4.0' && 'enable_materialized_views' || 'materialized_views_enabled' }}
         run: |
           docker run -d --name cassandra-ci \
             -p 9042:9042 \
@@ -643,14 +649,25 @@ jobs:
             --entrypoint bash \
             cassandra:${{ matrix.cassandra_version }} \
             -c '
+              # Strip the OTHER form first. Cassandra 4.1 ships
+              # both names in its default yaml as a transition aid
+              # and rejects boot if both are active. By deleting
+              # the form we are not writing, we guarantee exactly
+              # one MV setting reaches the server.
+              case "$MV_SETTING" in
+                enable_materialized_views) OTHER=materialized_views_enabled ;;
+                materialized_views_enabled) OTHER=enable_materialized_views ;;
+              esac
+
               for conf in /etc/cassandra/cassandra.yaml /opt/cassandra/conf/cassandra.yaml; do
                 [ -f "$conf" ] || continue
-                # Uncomment-and-set the property if it appears as
-                # a commented default; otherwise append it. We
-                # never write the *other* property name, because
-                # Cassandra refuses to start if it sees a property
-                # it doesn'"'"'t recognise.
-                sed -i "s/^# *${MV_SETTING} *:.*/${MV_SETTING}: true/" "$conf"
+                # Delete any line (commented or not) for the
+                # OTHER form so the dual-key check on 4.1 passes.
+                sed -i -E "/^(# *)?${OTHER} *:/d" "$conf"
+                # Set OUR form: uncomment-and-true if commented,
+                # rewrite if already set to false, append if absent.
+                sed -i -E "s/^# *${MV_SETTING} *:.*/${MV_SETTING}: true/" "$conf"
+                sed -i -E "s/^${MV_SETTING} *: *false.*/${MV_SETTING}: true/" "$conf"
                 if ! grep -qE "^${MV_SETTING}: true" "$conf"; then
                   printf "\n%s: true\n" "$MV_SETTING" >> "$conf"
                 fi
