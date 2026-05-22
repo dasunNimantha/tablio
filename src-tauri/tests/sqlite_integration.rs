@@ -1639,3 +1639,118 @@ async fn sqlite_cancel_query() {
     driver.cancel_query("0").await.unwrap();
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #126 follow-up: views with computed expressions returned NULL
+// for every cell.
+//
+// Reproducer from the user comment on the original issue:
+//
+//   create table income as select current_date as date, 100 as amount;
+//   create view f as select
+//     strftime('%Y',date)-if(cast(strftime('%m',date) as int)<4, 1, 0) year,
+//     round(total(amount),2) as net_income from income group by year;
+//   select * from f;
+//
+// Expected: year = some integer (e.g. 2026), net_income = 100.0
+// Actual on v0.4.8: year = NULL, net_income = NULL.
+//
+// Root cause: `sqlite_row_to_json_values` in src/db/sqlite.rs matches
+// on `col.type_info().name()`. For a view's computed column there's no
+// declared type, so the driver returns whatever sqlite reports
+// per-cell at runtime — which is *not* one of "INTEGER" / "REAL" /
+// "TEXT" / "BLOB" / "BOOLEAN", so the function falls through to the
+// String branch. An integer cell can't be decoded as String, sqlx
+// returns Err, `.ok()` swallows it, and the cell renders as NULL.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sqlite_view_with_computed_columns_does_not_return_null() {
+    let (driver, path) = create_driver().await;
+
+    driver
+        .execute_query(
+            DB,
+            "create table income as select current_date as date, 100 as amount;",
+        )
+        .await
+        .expect("create table failed");
+
+    driver
+        .execute_query(
+            DB,
+            "create view f as select \
+               strftime('%Y',date)-if(cast(strftime('%m',date) as int)<4, 1, 0) year, \
+               round(total(amount),2) as net_income from income group by year;",
+        )
+        .await
+        .expect("create view failed");
+
+    let result = driver
+        .execute_query(DB, "select * from f;")
+        .await
+        .expect("select from view failed");
+
+    assert_eq!(result.rows.len(), 1, "expected exactly one row");
+    let row = &result.rows[0];
+    assert_eq!(row.len(), 2, "expected exactly two columns");
+
+    // Both columns should have real values, not null. The exact
+    // year depends on the current date and the fiscal-year-style
+    // `if(month < 4, 1, 0)` adjustment, so we don't pin the exact
+    // value; we only assert the cells came back non-null.
+    assert!(
+        !row[0].is_null(),
+        "year column came back NULL — issue #126 reproduction. Driver: {:?}",
+        row[0]
+    );
+    assert!(
+        !row[1].is_null(),
+        "net_income column came back NULL — issue #126 reproduction. Driver: {:?}",
+        row[1]
+    );
+
+    // net_income is round(total(100), 2) on one row, which must be
+    // 100.0 (or the integer 100). Accept either shape; both are
+    // legitimate JSON encodings.
+    let net_income = row[1]
+        .as_f64()
+        .or_else(|| row[1].as_i64().map(|n| n as f64))
+        .unwrap_or_else(|| panic!("net_income not numeric: {:?}", row[1]));
+    assert!(
+        (net_income - 100.0).abs() < 0.001,
+        "net_income = {}, expected 100.0",
+        net_income
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// Smaller, more targeted version of the same bug for stable regression
+// coverage: any SELECT-only query whose columns are pure expressions
+// (no underlying table) used to surface as NULL because the column
+// type names from sqlx-sqlite don't match the static type strings.
+#[tokio::test]
+async fn sqlite_select_of_pure_expressions_returns_real_values() {
+    let (driver, path) = create_driver().await;
+
+    let result = driver
+        .execute_query(
+            DB,
+            "select 1+1 as sum_val, 1.5*2 as prod_val, 'hi' as label_val;",
+        )
+        .await
+        .expect("select of pure expressions failed");
+
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    assert_eq!(row.len(), 3);
+
+    // Three pure expressions — integer, real, text. Before the
+    // type-fallback fix every one of these came back as NULL.
+    assert!(!row[0].is_null(), "1+1 came back NULL: {:?}", row[0]);
+    assert!(!row[1].is_null(), "1.5*2 came back NULL: {:?}", row[1]);
+    assert!(!row[2].is_null(), "'hi' came back NULL: {:?}", row[2]);
+
+    let _ = std::fs::remove_file(&path);
+}
