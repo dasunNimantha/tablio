@@ -53,6 +53,13 @@ interface TabState {
   closeAllTabs: () => void;
   setActiveTab: (id: string) => void;
   setTabSubTab: (id: string, subTab: string) => void;
+  /**
+   * Replace just the `title` field on a tab. Used when a query tab
+   * loads a saved query (the tab should adopt the saved name) and
+   * after the first "Save…" of a brand-new query (the dialog name
+   * becomes the tab title). No-op if `id` doesn't exist.
+   */
+  setTabTitle: (id: string, title: string) => void;
   reorderTabs: (fromIndex: number, toIndex: number) => void;
   pruneStaleConnections: (validConnectionIds: Set<string>) => void;
 }
@@ -125,6 +132,20 @@ export const useTabStore = create<TabState>((set, get) => ({
     set((s) => {
       const newTabs = s.tabs.map((t) =>
         t.id === id ? { ...t, subTab } : t
+      );
+      persistTabs(newTabs, s.activeTabId);
+      return { tabs: newTabs };
+    });
+  },
+
+  setTabTitle: (id, title) => {
+    set((s) => {
+      // Bail out cheaply when the title is unchanged so we don't
+      // trip a re-render of every consumer of `tabs` for a no-op.
+      const existing = s.tabs.find((t) => t.id === id);
+      if (!existing || existing.title === title) return s;
+      const newTabs = s.tabs.map((t) =>
+        t.id === id ? { ...t, title } : t
       );
       persistTabs(newTabs, s.activeTabId);
       return { tabs: newTabs };

@@ -66,6 +66,7 @@ export function TabContent() {
           )}
           {tab.type === "query" && (
             <QueryConsole
+              tabId={tab.id}
               connectionId={tab.connectionId}
               database={tab.database}
             />

@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import Editor, { OnMount, BeforeMount, type Monaco } from "@monaco-editor/react";
-import { api, QueryResult, ExplainResult } from "../../lib/tauri";
+import { api, QueryResult, ExplainResult, SavedQuery } from "../../lib/tauri";
 import { syncMonacoTheme, isLightTheme } from "../../lib/monacoTheme";
 import { ResultTable, parseSimpleSelect, type SourceTable } from "./ResultTable";
 import { ExplainView } from "./ExplainView";
@@ -10,12 +10,33 @@ import { ChartView } from "../ChartView/ChartView";
 import { format as formatSQL } from "sql-formatter";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useToastStore } from "../../stores/toastStore";
+import { useTabStore } from "../../stores/tabStore";
 import { readZoomFactor } from "../../lib/zoom";
 import "./QueryConsole.css";
 
 interface Props {
+  tabId: string;
   connectionId: string;
   database: string;
+}
+
+/**
+ * Snapshot of a saved query the editor is currently editing. We keep
+ * the full object (not just the id) so:
+ *   - `name` is available for tab-title sync without a round trip
+ *   - `sql` is the baseline that drives the dirty check
+ *   - other fields (`created_at`, etc.) come along for the eventual
+ *     upsert call so we don't have to re-`load` the row
+ *
+ * Cleared whenever the user opens a new query tab, opens a different
+ * saved query, or saves a brand-new untitled query (in which case it's
+ * re-set to the freshly-saved row).
+ */
+interface LoadedSavedQuery {
+  id: string;
+  name: string;
+  sql: string;
+  created_at: number;
 }
 
 interface HistoryEntry {
@@ -50,8 +71,14 @@ function formatValidationMessage(message: string) {
   return message.replace(/[A-Za-z]/, (char) => char.toUpperCase());
 }
 
-export function QueryConsole({ connectionId, database }: Props) {
+export function QueryConsole({ tabId, connectionId, database }: Props) {
   const addToast = useToastStore((s) => s.addToast);
+  const setTabTitle = useTabStore((s) => s.setTabTitle);
+  // Identity of the saved query currently in the editor, if any.
+  // Drives the dirty check, the in-place Ctrl/Cmd+S path, and the
+  // "Save changes" button label. `null` until the user loads a
+  // saved query (or saves a brand-new one).
+  const [loadedSavedQuery, setLoadedSavedQuery] = useState<LoadedSavedQuery | null>(null);
   const [sql, setSql] = useState("SELECT 1;");
   const [result, setResult] = useState<QueryResult | null>(null);
   const [explainResult, setExplainResult] = useState<ExplainResult | null>(null);
@@ -295,6 +322,19 @@ export function QueryConsole({ connectionId, database }: Props) {
       label: "Execute Query",
       keybindings: [2048 | 3],
       run: () => { executeRef.current(); },
+    });
+    // Ctrl/Cmd+S: update the loaded saved query in place, or open
+    // the Save dialog for a brand-new query. The binding goes
+    // through a ref so the action always sees the latest closure
+    // without re-registering (Monaco's `addAction` is meant to be
+    // called once per editor lifetime; re-registering on every
+    // state change risks duplicate actions / stuck keybindings).
+    // 2048 = KeyMod.CtrlCmd, 49 = KeyCode.KeyS  → Ctrl/Cmd+S.
+    editor.addAction({
+      id: "save-query",
+      label: "Save Query",
+      keybindings: [2048 | 49],
+      run: () => { saveOrUpdateRef.current(); },
     });
   }, []);
 
@@ -544,6 +584,21 @@ export function QueryConsole({ connectionId, database }: Props) {
     } catch {}
   }, [sql]);
 
+  /**
+   * "Dirty" = the editor's text has diverged from the snapshot of
+   * the saved query it was loaded from. When there's no loaded
+   * saved query, nothing is "dirty" — there's no baseline to
+   * compare against (a brand-new untitled query). Used by:
+   *
+   *   - The Save button label ("Save changes" vs "Save")
+   *   - Whether Ctrl/Cmd+S runs the in-place update vs opens the
+   *     Save dialog
+   */
+  const isDirty = useMemo(
+    () => loadedSavedQuery !== null && sql !== loadedSavedQuery.sql,
+    [loadedSavedQuery, sql],
+  );
+
   const handleSaveQuery = useCallback(() => {
     setSaveQueryName("");
     setShowSaveDialog(true);
@@ -553,23 +608,93 @@ export function QueryConsole({ connectionId, database }: Props) {
   const handleSaveQueryConfirm = useCallback(async () => {
     const name = saveQueryName.trim();
     if (!name) return;
+    // Brand-new save (no loaded saved query). Mint a fresh id, but
+    // immediately adopt it as `loadedSavedQuery` so the next edit
+    // already shows the "Save changes" affordance instead of
+    // re-prompting for a name. Also push the chosen name through
+    // to the tab title.
+    const newId = crypto.randomUUID();
+    const now = Date.now();
     try {
       await api.saveQuery({
-        id: crypto.randomUUID(), name, sql,
+        id: newId, name, sql,
         connection_id: connectionId, database,
-        created_at: Date.now(), updated_at: Date.now(),
+        created_at: now, updated_at: now,
       });
+      setLoadedSavedQuery({ id: newId, name, sql, created_at: now });
+      setTabTitle(tabId, name);
       addToast(`Query "${name}" saved`);
     } catch (e) {
       setError(String(e));
     }
     setShowSaveDialog(false);
-  }, [saveQueryName, sql, connectionId, database, addToast]);
+  }, [saveQueryName, sql, connectionId, database, tabId, setTabTitle, addToast]);
 
-  const handleSelectSavedQuery = useCallback((querySql: string) => {
-    setSql(querySql);
+  /**
+   * In-place update of the currently-loaded saved query. No dialog —
+   * the name is fixed, only the SQL changes. Bound to Ctrl/Cmd+S and
+   * to the "Save changes" toolbar button.
+   *
+   * Held in a ref so the Monaco keybinding (registered once on
+   * editor mount) always sees the latest sql / loadedSavedQuery
+   * without having to re-register on every keystroke.
+   */
+  const handleUpdateLoadedQuery = useCallback(async () => {
+    if (!loadedSavedQuery) return;
+    if (sql === loadedSavedQuery.sql) return; // no-op when clean
+    try {
+      const now = Date.now();
+      await api.saveQuery({
+        id: loadedSavedQuery.id,
+        name: loadedSavedQuery.name,
+        sql,
+        connection_id: connectionId,
+        database,
+        created_at: loadedSavedQuery.created_at,
+        updated_at: now,
+      });
+      setLoadedSavedQuery({ ...loadedSavedQuery, sql });
+      addToast(`Saved changes to "${loadedSavedQuery.name}"`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [loadedSavedQuery, sql, connectionId, database, addToast]);
+
+  /**
+   * Single entry point for the Save toolbar button and Ctrl/Cmd+S:
+   *   - If editing a loaded saved query, update it in place.
+   *   - Otherwise (brand-new query), open the Save dialog to capture
+   *     a name.
+   *
+   * Mirrors standard editor "Save" semantics — Ctrl+S works whether
+   * the file has a name yet or not.
+   */
+  const handleSaveOrUpdate = useCallback(() => {
+    if (loadedSavedQuery) {
+      void handleUpdateLoadedQuery();
+    } else {
+      handleSaveQuery();
+    }
+  }, [loadedSavedQuery, handleUpdateLoadedQuery, handleSaveQuery]);
+
+  // Keep the Monaco-bound keybinding pointed at the latest closure
+  // without having to re-register the action when state changes.
+  const saveOrUpdateRef = useRef(handleSaveOrUpdate);
+  useEffect(() => {
+    saveOrUpdateRef.current = handleSaveOrUpdate;
+  }, [handleSaveOrUpdate]);
+
+  const handleSelectSavedQuery = useCallback((query: SavedQuery) => {
+    setSql(query.sql);
+    setLoadedSavedQuery({
+      id: query.id,
+      name: query.name,
+      sql: query.sql,
+      created_at: query.created_at,
+    });
+    setTabTitle(tabId, query.name);
     setShowSavedQueries(false);
-  }, []);
+  }, [tabId, setTabTitle]);
 
   // ── Resizable split ──
 
@@ -656,9 +781,31 @@ export function QueryConsole({ connectionId, database }: Props) {
           </button>
           <span className="query-hint">Ctrl+Enter to run</span>
           <div className="flex-spacer" />
-          <button className="btn-ghost" onClick={handleSaveQuery} title="Save query">
-            <BookmarkPlus size={14} /> Save
-          </button>
+          {loadedSavedQuery ? (
+            // The user is editing a loaded saved query. Two states:
+            //   - dirty → "Save changes" (active call to action)
+            //   - clean → "Save" (visibly idle, disabled — no work to do)
+            // In both cases the button updates the existing row by
+            // id instead of minting a new one.
+            <button
+              className="btn-ghost"
+              onClick={handleSaveOrUpdate}
+              disabled={!isDirty}
+              title={isDirty ? "Save changes (Ctrl/Cmd+S)" : "No unsaved changes"}
+            >
+              <BookmarkPlus size={14} /> {isDirty ? "Save changes" : "Save"}
+            </button>
+          ) : (
+            // No loaded saved query — first save opens the dialog
+            // to capture a name (still Ctrl/Cmd+S).
+            <button
+              className="btn-ghost"
+              onClick={handleSaveOrUpdate}
+              title="Save query (Ctrl/Cmd+S)"
+            >
+              <BookmarkPlus size={14} /> Save
+            </button>
+          )}
           <button className="btn-ghost" onClick={() => setShowSavedQueries(!showSavedQueries)}>
             <Bookmark size={14} /> Saved
           </button>
