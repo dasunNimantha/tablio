@@ -4,6 +4,7 @@ import {
   AlertCircle,
   Table2,
   Layers,
+  Terminal,
 } from "lucide-react";
 import {
   api,
@@ -14,7 +15,7 @@ import {
   TriggerInfo,
   TableInfo as TableInfoType,
 } from "../../lib/tauri";
-import { useTabStore } from "../../stores/tabStore";
+import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { DataGrid } from "../DataGrid/DataGrid";
 import { SchemaPage } from "./SchemaPage";
 import {
@@ -59,6 +60,25 @@ export function TableView({
   initialSubTab,
 }: Props) {
   const setTabSubTab = useTabStore((s) => s.setTabSubTab);
+  const openTab = useTabStore((s) => s.openTab);
+
+  // Opening a SQL query console scoped to this table used to live
+  // inside the DataGrid toolbar, but it's a "view-level" affordance —
+  // equally useful from the Schema tab where the toolbar isn't
+  // rendered. Lifting it to the TableView header makes it available
+  // in both modes from the same spot, next to the Data/Schema toggle.
+  const handleOpenQuery = useCallback(() => {
+    const tab: TabInfo = {
+      id: `query:${connectionId}:${database}:${table}:${Date.now()}`,
+      type: "query",
+      title: `Query - ${table}`,
+      connectionId,
+      connectionColor,
+      database,
+      schema: "",
+    };
+    openTab(tab);
+  }, [connectionId, connectionColor, database, table, openTab]);
 
   const initialParsed = useMemo(() => parseSubTab(initialSubTab), [initialSubTab]);
   const [mode, setMode] = useState<TableMode>(initialParsed.mode);
@@ -170,6 +190,14 @@ export function TableView({
         </div>
 
         <div className="tv-header-right">
+          <button
+            className="tv-query-btn btn-ghost"
+            onClick={handleOpenQuery}
+            title="Open SQL query console for this database"
+          >
+            <Terminal size={13} aria-hidden="true" />
+            <span>Query</span>
+          </button>
           <div className="tv-mode-switch" role="tablist" aria-label="View mode">
             <button
               role="tab"
