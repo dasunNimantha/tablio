@@ -14,6 +14,10 @@ pub struct TidbDriver {
 
 impl TidbDriver {
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
+        // `DISABLED` (not `PREFERRED`) when the user opts out of SSL —
+        // see `db/mysql.rs::connect` for the full rationale. TiDB
+        // shares the MySQL wire protocol so it inherits the same
+        // legacy-TLS handshake hazard.
         let ssl_mode = if config.ssl {
             if config.trust_server_cert {
                 "REQUIRED"
@@ -21,7 +25,7 @@ impl TidbDriver {
                 "VERIFY_IDENTITY"
             }
         } else {
-            "PREFERRED"
+            "DISABLED"
         };
         let db_segment = if config.database.trim().is_empty() {
             String::new()
@@ -196,7 +200,9 @@ impl DatabaseDriver for TidbDriver {
         let start = Instant::now();
         // TiDB does not support EXPLAIN FORMAT=JSON — use plain EXPLAIN
         let explain_sql = format!("EXPLAIN {}", sql);
-        let rows = sqlx::query(&explain_sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*explain_sql))
+            .fetch_all(&self.pool)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let columns: Vec<String> = rows
@@ -282,10 +288,12 @@ impl DatabaseDriver for TidbDriver {
                 .unwrap_or(0)
         };
 
-        let ts_row = sqlx::query("SELECT CAST(UNIX_TIMESTAMP() * 1000 AS DOUBLE) AS ts")
-            .fetch_one(&self.pool)
-            .await?;
-        let timestamp_ms: f64 = ts_row.try_get::<f64, _>("ts").unwrap_or(0.0);
+        // Local wall clock — see `db/mysql.rs::get_database_stats` for
+        // why we no longer ask the server for the timestamp.
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
 
         Ok(DatabaseStats {
             active_connections: active,
@@ -338,10 +346,92 @@ impl DatabaseDriver for TidbDriver {
     }
 
     async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
+        // TiDB exposes per-query digests via `INFORMATION_SCHEMA.STATEMENTS_SUMMARY`,
+        // gated on `tidb_enable_stmt_summary` (ON by default in 4.0+ but
+        // operators sometimes flip it off to save memory).
+        //
+        // The session variable comes back as BIGINT (0/1), not a string —
+        // forcing a CAST to CHAR sidesteps both the BIGINT-decode surprise
+        // we tripped on in CI and any future TiDB build that flips the
+        // representation back to "ON"/"OFF".
+        let enabled: Option<String> =
+            sqlx::query_scalar("SELECT CAST(@@tidb_enable_stmt_summary AS CHAR)")
+                .fetch_optional(&self.pool)
+                .await?;
+        let on = enabled
+            .as_deref()
+            .map(|s| {
+                let t = s.trim();
+                t == "1" || t.eq_ignore_ascii_case("ON")
+            })
+            .unwrap_or(false);
+        if !on {
+            return Ok(QueryStatsResponse {
+                available: false,
+                kind: QueryStatsKind::TidbStmtSummaryDisabled,
+                message: Some(
+                    "Statement summary is disabled. To enable query statistics:\n\n\
+                     SET GLOBAL tidb_enable_stmt_summary = ON;\n\n\
+                     Then re-run the queries you want to inspect — TiDB only \
+                     records statements after the variable flips on."
+                        .to_string(),
+                ),
+                entries: vec![],
+            });
+        }
+
+        // `*_LATENCY` columns are nanoseconds; divide by 1_000_000.0 to land
+        // in milliseconds (forced float division). `DIGEST` is a 64-char hex
+        // string and won't fit in an `i64`, so `queryid` stays None and the
+        // UI keys off the digest text.
+        //
+        // Rows: TiDB's STATEMENTS_SUMMARY only exposes `AVG_*`/`MAX_*`/
+        // `MIN_*` aggregates for rows — no `SUM_*` column. We multiply
+        // `EXEC_COUNT * AVG_RESULT_ROWS` to recover the total result rows
+        // (analog to MySQL's `SUM_ROWS_SENT`). `AVG_RESULT_ROWS` lands in
+        // TiDB v6.5+; the workspace image is `pingcap/tidb:latest`, so this
+        // is fine on supported versions.
+        let sql = "SELECT \
+                COALESCE(DIGEST_TEXT, '')                            AS query, \
+                COALESCE(SCHEMA_NAME, '')                            AS user, \
+                CAST(EXEC_COUNT AS SIGNED)                           AS calls, \
+                (SUM_LATENCY / 1000000.0)                            AS total_exec_time_ms, \
+                (AVG_LATENCY / 1000000.0)                            AS mean_exec_time_ms, \
+                (MIN_LATENCY / 1000000.0)                            AS min_exec_time_ms, \
+                (MAX_LATENCY / 1000000.0)                            AS max_exec_time_ms, \
+                CAST(EXEC_COUNT * AVG_RESULT_ROWS AS SIGNED)         AS rows_returned \
+            FROM INFORMATION_SCHEMA.STATEMENTS_SUMMARY \
+            WHERE DIGEST_TEXT IS NOT NULL \
+            ORDER BY SUM_LATENCY DESC \
+            LIMIT 200";
+
+        let rows = sqlx::query(sql).fetch_all(&self.pool).await?;
+
+        let entries = rows
+            .iter()
+            .map(|r| QueryStatEntry {
+                query: r.try_get::<String, _>("query").unwrap_or_default(),
+                queryid: None,
+                user: r.try_get::<String, _>("user").unwrap_or_default(),
+                calls: r.try_get::<i64, _>("calls").unwrap_or(0),
+                total_exec_time_ms: r.try_get::<f64, _>("total_exec_time_ms").unwrap_or(0.0),
+                mean_exec_time_ms: r.try_get::<f64, _>("mean_exec_time_ms").unwrap_or(0.0),
+                min_exec_time_ms: r.try_get::<f64, _>("min_exec_time_ms").unwrap_or(0.0),
+                max_exec_time_ms: r.try_get::<f64, _>("max_exec_time_ms").unwrap_or(0.0),
+                rows: r.try_get::<i64, _>("rows_returned").unwrap_or(0),
+                shared_blks_hit: 0,
+                shared_blks_read: 0,
+                cache_hit_ratio: 0.0,
+                total_plan_time_ms: None,
+                mean_plan_time_ms: None,
+            })
+            .collect();
+
         Ok(QueryStatsResponse {
-            available: false,
-            message: Some("Query statistics are not available in TiDB. Use the TiDB Dashboard for query insights.".to_string()),
-            entries: vec![],
+            available: true,
+            kind: QueryStatsKind::Available,
+            message: None,
+            entries,
         })
     }
 }

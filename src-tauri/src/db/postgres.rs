@@ -328,7 +328,9 @@ impl DatabaseDriver for PostgresDriver {
         let pool = self.get_pool(database).await?;
         let start = Instant::now();
         let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", sql);
-        let row = sqlx::query(&explain_sql).fetch_one(&pool).await?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(&*explain_sql))
+            .fetch_one(&pool)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let raw_json: serde_json::Value = row.try_get(0)?;
@@ -405,7 +407,10 @@ impl DatabaseDriver for PostgresDriver {
              LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid"
         );
 
-        let row = sqlx::query(&agg_sql).bind(oid).fetch_one(&pool).await?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(&*agg_sql))
+            .bind(oid)
+            .fetch_one(&pool)
+            .await?;
 
         Ok(TableStats {
             table_name: relname,
@@ -559,6 +564,7 @@ impl DatabaseDriver for PostgresDriver {
         if ext_check.is_none() {
             return Ok(QueryStatsResponse {
                 available: false,
+                kind: QueryStatsKind::PgStatStatementsMissing,
                 message: Some(
                     "The pg_stat_statements extension is not installed. To enable it:\n\n\
                      1. Add to postgresql.conf:\n   shared_preload_libraries = 'pg_stat_statements'\n\n\
@@ -637,6 +643,7 @@ impl DatabaseDriver for PostgresDriver {
 
         Ok(QueryStatsResponse {
             available: true,
+            kind: QueryStatsKind::Available,
             message: None,
             entries,
         })

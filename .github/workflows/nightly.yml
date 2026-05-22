@@ -39,12 +39,40 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install cargo-audit
+        # Use a prebuilt binary; building cargo-audit from source on
+        # every nightly is slow and keeps pulling fresh versions of
+        # `rustsec` whose Cargo.lock can drift in ways unrelated to us.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
       - name: Rust advisory check
         # Surfaces RUSTSEC IDs Dependabot does NOT raise PRs for
         # (yanked crates, unmaintained advisories, license drift).
-        uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        # Cargo manifest lives at src-tauri/, not the repo root.
+        #
+        # Why inline `cargo audit` instead of `rustsec/audit-check`?
+        #   * The action requires `checks: write` permission, which
+        #     this workflow's read-only default does not grant.
+        #   * The action is still on Node 20 (deprecated June 2026).
+        #   * The action publishes a Check Run UI we don't use.
+        #
+        # The `--ignore` list below tracks advisories we cannot fix
+        # ourselves right now. Re-evaluate every release:
+        #   * RUSTSEC-2023-0071 — `rsa` Marvin timing sidechannel.
+        #     No patch upstream; pulled by sqlx-mysql.
+        #   * RUSTSEC-2026-0098 / 0099 / 0104 — `rustls-webpki 0.101.7`
+        #     vulnerabilities. Patched in 0.103.x; we still pull 0.101
+        #     transitively via tauri's HTTP plugin. Bumping rustls is
+        #     a separate, targeted dep update.
+        working-directory: src-tauri
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2026-0098 \
+            --ignore RUSTSEC-2026-0099 \
+            --ignore RUSTSEC-2026-0104
 
       - uses: actions/setup-node@v6
         with:
@@ -152,7 +180,13 @@ jobs:
             version: "5.7"
             test: mysql_integration
             url_env: TEST_MYSQL_URL
-            url: "mysql://root:test@localhost:3306/testdb"
+            # `ssl-mode=DISABLED` is required for the 5.7 image: the
+            # default container ships with a self-signed cert + legacy
+            # TLS suite that sqlx's rustls client cannot negotiate
+            # (`received fatal alert: HandshakeFailure`). Plaintext is
+            # safe here because the server only listens on the runner's
+            # loopback inside the same job.
+            url: "mysql://root:test@localhost:3306/testdb?ssl-mode=DISABLED"
     services:
       postgres:
         image: ${{ matrix.engine == 'postgres' && format('postgres:{0}', matrix.version) || '' }}
@@ -359,7 +393,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       mysql:
-        image: mysql:8.4
+        image: mysql:9.7
         env:
           MYSQL_ROOT_PASSWORD: test
           MYSQL_DATABASE: testdb
@@ -437,7 +471,13 @@ jobs:
   cargo-fuzz:
     name: cargo-fuzz (${{ matrix.target }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Cold cache: the sanitizer-instrumented build pulls in the full
+    # `tablio` path dep (~14m on the GitHub-hosted runner) before the
+    # 5-minute mutation window starts, plus toolchain install and
+    # cargo-fuzz install. 20m used to hit the timeout by seconds; 30m
+    # leaves headroom for slow runners while still catching genuine
+    # hangs.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -463,15 +503,47 @@ jobs:
             src-tauri/fuzz
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        # Use a prebuilt binary instead of `cargo install cargo-fuzz`.
+        # The published `cargo-fuzz 0.13.1` Cargo.lock pins a `rustix` that
+        # uses rustc-internal attributes the current nightly no longer
+        # accepts, so source builds fail. The prebuilt binary sidesteps
+        # the entire compile and the nightly toolchain is still used to
+        # actually run the fuzz target below.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Validate fuzz Cargo.lock is fresh
+        # The fuzz crate is intentionally outside the parent workspace,
+        # so it has its own resolver. Without a committed lockfile, CI
+        # re-resolves the tauri family on every run and can drift
+        # across the codegen/runtime boundary (`ResolvedCommand` field
+        # churn breaks `tauri::generate_handler!` expansion).
+        # `cargo fetch --locked` errors loudly if the lockfile is
+        # missing or out of date, which fails the job before the much
+        # slower `cargo fuzz run` build kicks off. `cargo fuzz run`
+        # itself does not accept `--locked`, so this is the only place
+        # where reproducibility is enforced.
+        run: cargo +nightly fetch --locked --manifest-path src-tauri/fuzz/Cargo.toml
 
       - name: Fuzz ${{ matrix.target }} for 5 minutes
         # `-max_total_time=300` caps each target at 300s of mutation;
         # libFuzzer exits 0 on time-out (no crashes found) and non-zero
         # on a discovered crash, which is exactly the gate we want.
+        #
+        # `--target x86_64-unknown-linux-gnu` is required because the
+        # cargo-fuzz binary distributed via cargo-binstall is itself
+        # statically linked against musl, and cargo-fuzz infers its own
+        # triple as the default. AddressSanitizer (`-Zsanitizer=address`,
+        # used by libfuzzer-sys) is incompatible with statically linked
+        # libc, so the build fails with "sanitizer is incompatible with
+        # statically linked libc, disable it using `-C
+        # target-feature=-crt-static`". Forcing the GNU triple keeps the
+        # sanitizer compatible.
         run: |
           cargo +nightly fuzz run ${{ matrix.target }} \
             --fuzz-dir src-tauri/fuzz \
+            --target x86_64-unknown-linux-gnu \
             -- -max_total_time=300
 
       - name: Upload crash artifacts

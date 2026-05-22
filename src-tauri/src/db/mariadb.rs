@@ -198,7 +198,9 @@ impl DatabaseDriver for MariadbDriver {
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
         let start = Instant::now();
         let explain_sql = format!("EXPLAIN FORMAT=JSON {}", sql);
-        let row = sqlx::query(&explain_sql).fetch_one(&self.pool).await?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(&*explain_sql))
+            .fetch_one(&self.pool)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let raw_text: String = row.try_get(0)?;
@@ -331,10 +333,12 @@ impl DatabaseDriver for MariadbDriver {
                 .unwrap_or(0)
         };
 
-        let ts_row = sqlx::query("SELECT CAST(UNIX_TIMESTAMP() * 1000 AS DOUBLE) AS ts")
-            .fetch_one(&self.pool)
-            .await?;
-        let timestamp_ms: f64 = ts_row.try_get::<f64, _>("ts").unwrap_or(0.0);
+        // Local wall clock — see `db/mysql.rs::get_database_stats` for
+        // why we no longer ask the server for the timestamp.
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
 
         Ok(DatabaseStats {
             active_connections: active,

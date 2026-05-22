@@ -3,6 +3,7 @@ use sqlx::{Column, PgPool, Row, TypeInfo};
 use std::time::Instant;
 
 use crate::models::*;
+use crate::util::sql::{split_sql_statements, statement_is_select_like};
 
 pub fn pg_row_to_json_values(
     row: &sqlx::postgres::PgRow,
@@ -327,13 +328,17 @@ pub async fn pg_create_role(pool: &PgPool, req: &CreateRoleRequest) -> Result<()
         quote_ident(&req.name),
         options.join(" ")
     );
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
 pub async fn pg_drop_role(pool: &PgPool, name: &str) -> Result<()> {
     let sql = format!("DROP ROLE IF EXISTS {}", quote_ident(name));
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -384,7 +389,9 @@ pub async fn pg_alter_role(pool: &PgPool, req: &AlterRoleRequest) -> Result<()> 
         quote_ident(&req.name),
         options.join(" ")
     );
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -955,7 +962,9 @@ pub async fn pg_fetch_rows_impl(
         quote_ident(table),
         where_clause
     );
-    let count_row = sqlx::query(&count_sql).fetch_one(pool).await?;
+    let count_row = sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
+        .fetch_one(pool)
+        .await?;
     let total_rows: i64 = count_row.get("cnt");
 
     let sql = format!(
@@ -968,7 +977,9 @@ pub async fn pg_fetch_rows_impl(
         offset
     );
 
-    let rows = sqlx::query(&sql).fetch_all(pool).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .fetch_all(pool)
+        .await?;
     let col_count = columns.len();
     let data_rows: Vec<Vec<serde_json::Value>> = rows
         .iter()
@@ -986,14 +997,40 @@ pub async fn pg_fetch_rows_impl(
 
 pub async fn pg_execute_query(pool: &PgPool, _database: &str, sql: &str) -> Result<QueryResult> {
     let start = Instant::now();
-    let trimmed = sql.trim().to_uppercase();
-    let is_select = trimmed.starts_with("SELECT")
-        || trimmed.starts_with("WITH")
-        || trimmed.starts_with("SHOW")
-        || trimmed.starts_with("EXPLAIN");
 
-    if is_select {
-        let rows = sqlx::query(sql).fetch_all(pool).await?;
+    // Multi-statement support: split the input on top-level
+    // semicolons (respecting strings, dollar-quoted bodies,
+    // identifiers, and comments). Run every leading statement as a
+    // DDL/DML op and base the final result on the LAST statement's
+    // shape so e.g. `CREATE VIEW v ...; SELECT * FROM v;` returns
+    // rows from the SELECT.
+    //
+    // All statements are run on a single pinned connection so
+    // session-local state (temp tables, transactions, search_path
+    // changes) carries between them.
+    let statements = split_sql_statements(sql);
+    if statements.is_empty() {
+        return Err(anyhow::anyhow!("Query is empty"));
+    }
+
+    let mut conn = pool.acquire().await?;
+
+    // Execute all but the last statement as plain exec — we don't
+    // care about rows from earlier statements, just side effects.
+    for stmt in &statements[..statements.len() - 1] {
+        sqlx::query(sqlx::AssertSqlSafe(stmt.as_str()))
+            .execute(&mut *conn)
+            .await?;
+    }
+
+    let last = statements.last().unwrap().as_str();
+    let last_is_select =
+        statement_is_select_like(last, &["SELECT", "WITH", "SHOW", "EXPLAIN", "VALUES"]);
+
+    if last_is_select {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(last))
+            .fetch_all(&mut *conn)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let columns: Vec<String> = if rows.is_empty() {
@@ -1020,7 +1057,9 @@ pub async fn pg_execute_query(pool: &PgPool, _database: &str, sql: &str) -> Resu
             is_select: true,
         })
     } else {
-        let result = sqlx::query(sql).execute(pool).await?;
+        let result = sqlx::query(sqlx::AssertSqlSafe(last))
+            .execute(&mut *conn)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         Ok(QueryResult {
@@ -1179,7 +1218,9 @@ pub async fn pg_create_table(
         quote_ident(table_name),
         col_defs.join(",\n    ")
     );
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1299,7 +1340,9 @@ pub async fn pg_alter_table(
                 )
             }
         };
-        sqlx::query(&sql).execute(pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(pool)
+            .await?;
     }
 
     Ok(())
@@ -1336,7 +1379,9 @@ pub async fn pg_import_data(
             "INSERT INTO {} ({}) VALUES {}",
             table_ref, col_str, values_str
         );
-        let result = sqlx::query(&sql).execute(&mut *tx).await?;
+        let result = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *tx)
+            .await?;
         total_inserted += result.rows_affected();
     }
 
@@ -1368,7 +1413,9 @@ pub async fn pg_drop_object(
         quote_ident(schema),
         quote_ident(object_name)
     );
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1383,7 +1430,9 @@ pub async fn pg_truncate_table(
         quote_ident(schema),
         quote_ident(table_name)
     );
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1433,7 +1482,12 @@ pub async fn pg_validate_query(pool: &PgPool, sql: &str) -> Result<Option<Valida
         }));
     }
     use sqlx::Executor;
-    match pool.prepare(sql).await {
+    match pool
+        .prepare(
+            <sqlx::AssertSqlSafe<&str> as sqlx::SqlSafeStr>::into_sql_str(sqlx::AssertSqlSafe(sql)),
+        )
+        .await
+    {
         Ok(_) => Ok(None),
         Err(e) => {
             let mut position: Option<usize> = None;
@@ -1481,7 +1535,9 @@ pub async fn pg_apply_changes(pool: &PgPool, changes: &DataChanges) -> Result<()
             set_clause,
             where_clause.join(" AND ")
         );
-        sqlx::query(&sql).execute(&mut *tx).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *tx)
+            .await?;
     }
 
     for insert in &changes.inserts {
@@ -1497,7 +1553,9 @@ pub async fn pg_apply_changes(pool: &PgPool, changes: &DataChanges) -> Result<()
             cols.join(", "),
             vals.join(", ")
         );
-        sqlx::query(&sql).execute(&mut *tx).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *tx)
+            .await?;
     }
 
     for delete in &changes.deletes {
@@ -1514,7 +1572,9 @@ pub async fn pg_apply_changes(pool: &PgPool, changes: &DataChanges) -> Result<()
             fq_table,
             where_clause.join(" AND ")
         );
-        sqlx::query(&sql).execute(&mut *tx).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *tx)
+            .await?;
     }
 
     tx.commit().await?;
@@ -1625,8 +1685,8 @@ mod tests {
     }
     #[test]
     fn json_to_sql_float() {
-        let n = serde_json::Number::from_f64(3.14).unwrap();
-        assert_eq!(json_to_sql_literal(&serde_json::Value::Number(n)), "3.14");
+        let n = serde_json::Number::from_f64(7.25).unwrap();
+        assert_eq!(json_to_sql_literal(&serde_json::Value::Number(n)), "7.25");
     }
     #[test]
     fn json_to_sql_string_simple() {

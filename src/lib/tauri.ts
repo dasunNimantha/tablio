@@ -126,7 +126,12 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
     case "get_server_config":
       return [] as T;
     case "get_query_stats":
-      return { available: false, message: "Mock mode", entries: [] } as T;
+      return {
+        available: false,
+        kind: "pg_stat_statements_missing",
+        message: "Mock mode",
+        entries: [],
+      } as T;
     case "get_app_resource_usage":
       return { memory_mb: 64.5, cpu_percent: 2.3 } as T;
     case "list_known_hosts":
@@ -157,6 +162,33 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       }
       return null as T;
     }
+    case "parse_xlsx_workbook":
+      // Two synthetic sheets so the dialog's sheet picker has
+      // something to render in mock mode + e2e.
+      return {
+        sheet_names: ["Sheet1", "Other"],
+        default_sheet: "Sheet1",
+        sheet: {
+          name: "Sheet1",
+          headers: ["id", "name", "active"],
+          preview_rows: [
+            [1, "Alice", true],
+            [2, "Bob", false],
+          ],
+          total_data_rows: 2,
+          inferred_types: ["number", "string", "bool"],
+        },
+      } as T;
+    case "parse_xlsx_sheet":
+      return {
+        name: (args?.sheetName as string) ?? "Sheet1",
+        headers: ["id", "name", "active"],
+        rows: [
+          [1, "Alice", true],
+          [2, "Bob", false],
+        ],
+        inferred_types: ["number", "string", "bool"],
+      } as T;
     default:
       throw new Error(`Unknown mock command: ${cmd}`);
   }
@@ -436,8 +468,22 @@ export interface QueryStatEntry {
   mean_plan_time_ms: number | null;
 }
 
+/**
+ * Reason-keyed enum that lets the QueryStats UI pick the right "unavailable"
+ * copy and CTA without sniffing message strings. Wire format is snake_case
+ * to match the Rust `QueryStatsKind` enum (`#[serde(rename_all = "snake_case")]`).
+ */
+export type QueryStatsKind =
+  | "available"
+  | "pg_stat_statements_missing"
+  | "mysql_perf_schema_disabled"
+  | "mssql_missing_view_server_state"
+  | "tidb_stmt_summary_disabled"
+  | "engine_unsupported";
+
 export interface QueryStatsResponse {
   available: boolean;
+  kind: QueryStatsKind;
   message: string | null;
   entries: QueryStatEntry[];
 }
@@ -535,6 +581,45 @@ export interface ImportDataRequest {
   table: string;
   columns: string[];
   rows: unknown[][];
+}
+
+/**
+ * Per-column type the backend inferred from the parsed sheet's data
+ * rows. Used by the import dialog to display "this column looks like
+ * a date / number / bool / mixed" hints next to the column mapping.
+ * Wire format mirrors `Vec<&'static str>` from `xlsx_import.rs`.
+ */
+export type XlsxColumnType =
+  | "number"
+  | "date"
+  | "bool"
+  | "string"
+  | "mixed";
+
+export interface XlsxSheetPreview {
+  name: string;
+  headers: string[];
+  preview_rows: unknown[][];
+  total_data_rows: number;
+  inferred_types: XlsxColumnType[];
+}
+
+export interface XlsxWorkbookPreview {
+  sheet_names: string[];
+  default_sheet: string;
+  sheet: XlsxSheetPreview;
+}
+
+/**
+ * Full payload for a single sheet returned by `parse_xlsx_sheet` once
+ * the user has chosen which sheet to import. Mirrors the
+ * `XlsxSheetPayload` Rust struct.
+ */
+export interface XlsxSheetPayload {
+  name: string;
+  headers: string[];
+  rows: unknown[][];
+  inferred_types: XlsxColumnType[];
 }
 
 export interface SavedQuery {
@@ -822,6 +907,15 @@ export const api = {
 
   importData: (request: ImportDataRequest): Promise<number> =>
     invoke("import_data", { request }),
+
+  // The backend deserializes Vec<u8> from a JS Array<number>. Tauri's
+  // IPC bridge does the array-of-bytes round-trip transparently —
+  // there's no need for a separate Buffer / base64 step.
+  parseXlsxWorkbook: (bytes: Uint8Array): Promise<XlsxWorkbookPreview> =>
+    invoke("parse_xlsx_workbook", { bytes: Array.from(bytes) }),
+
+  parseXlsxSheet: (bytes: Uint8Array, sheetName: string): Promise<XlsxSheetPayload> =>
+    invoke("parse_xlsx_sheet", { bytes: Array.from(bytes), sheetName }),
 
   loadSavedQueries: (): Promise<SavedQuery[]> =>
     invoke("load_saved_queries"),

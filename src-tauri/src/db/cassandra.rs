@@ -231,7 +231,18 @@ impl DatabaseDriver for CassandraDriver {
     }
 
     async fn list_tables(&self, database: &str, _schema: &str) -> Result<Vec<TableInfo>> {
-        let result = self
+        // Base tables live in `system_schema.tables`; materialized
+        // views live in `system_schema.views`. The sidebar splits
+        // the result by `table_type`:
+        //   - "BASE TABLE" → "Tables" group
+        //   - "VIEW"       → "Views" group
+        // The frontend's filter is an exact `===` match (see
+        // ObjectTree.tsx), so we MUST emit "BASE TABLE" here, not
+        // "TABLE". The mismatch caused every keyspace's Tables
+        // folder to render as "(empty)" despite the data really
+        // being there in `system_schema.tables`.
+
+        let tables_result = self
             .session
             .query_unpaged(
                 "SELECT table_name FROM system_schema.tables WHERE keyspace_name = ?",
@@ -243,17 +254,45 @@ impl DatabaseDriver for CassandraDriver {
             .map_err(|e| anyhow!("{}", e))?;
 
         let mut tables = Vec::new();
-        if let Ok(rows) = result.rows::<(String,)>() {
+        if let Ok(rows) = tables_result.rows::<(String,)>() {
             for (name,) in rows.flatten() {
                 tables.push(TableInfo {
                     name: name.clone(),
                     schema: database.to_string(),
-                    table_type: "TABLE".to_string(),
+                    table_type: "BASE TABLE".to_string(),
                     row_count_estimate: None,
                     ..Default::default()
                 });
             }
         }
+
+        // Materialized views. Cassandra has had MVs since 3.0;
+        // `system_schema.views` exists on every supported version.
+        // We surface them so the sidebar's "Views" group reflects
+        // what cqlsh's `DESCRIBE` would show.
+        let views_result = self
+            .session
+            .query_unpaged(
+                "SELECT view_name FROM system_schema.views WHERE keyspace_name = ?",
+                (database,),
+            )
+            .await
+            .map_err(|e| anyhow!("{}", e))?
+            .into_rows_result()
+            .map_err(|e| anyhow!("{}", e))?;
+
+        if let Ok(rows) = views_result.rows::<(String,)>() {
+            for (name,) in rows.flatten() {
+                tables.push(TableInfo {
+                    name: name.clone(),
+                    schema: database.to_string(),
+                    table_type: "VIEW".to_string(),
+                    row_count_estimate: None,
+                    ..Default::default()
+                });
+            }
+        }
+
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(tables)
     }
@@ -921,6 +960,7 @@ impl DatabaseDriver for CassandraDriver {
     async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
         Ok(QueryStatsResponse {
             available: false,
+            kind: QueryStatsKind::EngineUnsupported,
             message: Some("Query statistics are not available for Cassandra/ScyllaDB".to_string()),
             entries: vec![],
         })
@@ -1187,8 +1227,8 @@ mod tests {
     #[test]
     fn cql_value_to_json_double() {
         use scylla::value::CqlValue;
-        let val = cql_value_to_json("", &CqlValue::Double(3.14));
-        assert!((val.as_f64().unwrap() - 3.14).abs() < 0.001);
+        let val = cql_value_to_json("", &CqlValue::Double(7.25));
+        assert!((val.as_f64().unwrap() - 7.25).abs() < 0.001);
     }
 
     #[test]

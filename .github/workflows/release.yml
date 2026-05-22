@@ -236,7 +236,11 @@ jobs:
       - name: Run MSSQL integration tests
         env:
           TEST_MSSQL_URL: "mssql://SA:Str0ng_Passw0rd!@localhost:1433/testdb"
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test mssql_integration
+        # `--test-threads=1` serialises the integration suite so
+        # concurrent CREATE TABLE / DROP TABLE calls don't deadlock
+        # on SQL Server's system-catalog locks (error 1205). See
+        # the matching comment in `.github/workflows/ci.yml`.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test mssql_integration -- --test-threads=1
 
   test-cockroachdb:
     name: CockroachDB
@@ -445,19 +449,63 @@ jobs:
       fail-fast: false
       matrix:
         cassandra_version: ["4.0", "4.1", "5.0"]
-    services:
-      cassandra:
-        image: cassandra:${{ matrix.cassandra_version }}
-        ports:
-          - 9042:9042
-        options: >-
-          --health-cmd "cqlsh -e 'describe cluster'"
-          --health-interval 15s
-          --health-timeout 10s
-          --health-retries 15
-          --health-start-period 90s
+    # See `.github/workflows/ci.yml` → `test-cassandra` for the
+    # full context. The short version: Cassandra 4.0+ ships with
+    # materialized views disabled by default, and there's no
+    # `services:` knob to flip them back on. We run Cassandra via
+    # `docker run` so we can override the entrypoint and patch
+    # `cassandra.yaml` before the server boots.
     steps:
       - uses: actions/checkout@v6
+
+      - name: Start Cassandra (with materialized views enabled)
+        env:
+          # The MV-enablement property was renamed mid-4.x:
+          #   - Cassandra 4.0:         `enable_materialized_views`
+          #   - Cassandra 4.1 + 5.0+:  `materialized_views_enabled`
+          # 4.1 is a transition release that knows both names and
+          # refuses to start if both are active, so we always
+          # write exactly one form.
+          MV_SETTING: ${{ matrix.cassandra_version == '4.0' && 'enable_materialized_views' || 'materialized_views_enabled' }}
+        run: |
+          docker run -d --name cassandra-ci \
+            -p 9042:9042 \
+            -e CASSANDRA_CLUSTER_NAME=release-test \
+            -e MV_SETTING="$MV_SETTING" \
+            --entrypoint bash \
+            cassandra:${{ matrix.cassandra_version }} \
+            -c '
+              case "$MV_SETTING" in
+                enable_materialized_views) OTHER=materialized_views_enabled ;;
+                materialized_views_enabled) OTHER=enable_materialized_views ;;
+              esac
+
+              for conf in /etc/cassandra/cassandra.yaml /opt/cassandra/conf/cassandra.yaml; do
+                [ -f "$conf" ] || continue
+                # Delete any line (commented or not) for the
+                # OTHER form so 4.1'"'"'s dual-key check passes.
+                sed -i -E "/^(# *)?${OTHER} *:/d" "$conf"
+                # Set OUR form: uncomment-and-true if commented,
+                # rewrite if already false, append if absent.
+                sed -i -E "s/^# *${MV_SETTING} *:.*/${MV_SETTING}: true/" "$conf"
+                sed -i -E "s/^${MV_SETTING} *: *false.*/${MV_SETTING}: true/" "$conf"
+                if ! grep -qE "^${MV_SETTING}: true" "$conf"; then
+                  printf "\n%s: true\n" "$MV_SETTING" >> "$conf"
+                fi
+              done
+              exec docker-entrypoint.sh cassandra -f
+            '
+
+          for i in $(seq 1 90); do
+            if docker exec cassandra-ci cqlsh -e "DESCRIBE KEYSPACES" >/dev/null 2>&1; then
+              echo "Cassandra ready after ~$((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Cassandra failed to become ready within 180s" >&2
+          docker logs cassandra-ci >&2 || true
+          exit 1
 
       - name: Install Linux dependencies
         run: |
@@ -475,6 +523,10 @@ jobs:
           TEST_CASSANDRA_HOST: "127.0.0.1"
           TEST_CASSANDRA_PORT: "9042"
         run: cargo test --manifest-path src-tauri/Cargo.toml --test cassandra_integration
+
+      - name: Dump Cassandra logs on failure
+        if: failure()
+        run: docker logs cassandra-ci || true
 
   test-scylladb:
     name: ScyllaDB ${{ matrix.scylla_version }}
@@ -714,29 +766,52 @@ jobs:
         id: version
         run: echo "version=$(grep '^version' source/src-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
 
-      - name: Download packages from release
+      - name: Wait for current release's package assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TAG="v${VERSION}"
-          echo "Looking for packages in release $TAG..."
+          echo "Waiting for .deb / .rpm assets to appear on $TAG..."
           for i in $(seq 1 30); do
             ASSETS=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' 2>/dev/null || true)
             if echo "$ASSETS" | grep -qE '\.(deb|rpm)$'; then
-              echo "Found package assets:"
+              echo "Found package assets on $TAG:"
               echo "$ASSETS" | grep -E '\.(deb|rpm)$'
               break
             fi
             echo "Waiting for package assets... (attempt $i/30)"
             sleep 30
           done
-          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.deb" --dir gh-pages/apt/pool --clobber
-          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.rpm" --dir gh-pages/rpm/packages --clobber
-          echo "Downloaded APT:"
-          ls -la gh-pages/apt/pool/
-          echo "Downloaded RPM:"
-          ls -la gh-pages/rpm/packages/
+
+      - name: Download packages from every release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # We rewrite metadata to point at GitHub Releases asset URLs, so the
+          # binaries never end up committed to gh-pages — but dpkg-scanpackages
+          # and createrepo_c still need every package locally to compute hashes
+          # and assemble the index. Pull every release's .deb / .rpm into the
+          # scratch dir; tolerate releases without Linux assets (early versions).
+          mkdir -p gh-pages/apt/pool gh-pages/rpm/packages
+          TAGS=$(gh release list --repo "${{ github.repository }}" --limit 200 --json tagName --jq '.[].tagName')
+          if [ -z "$TAGS" ]; then
+            echo "No releases found — nothing to index" >&2
+            exit 1
+          fi
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "::group::Downloading assets for $tag"
+            gh release download "$tag" --repo "${{ github.repository }}" --pattern "*.deb" \
+              --dir gh-pages/apt/pool --clobber 2>&1 || echo "  (no .deb on $tag)"
+            gh release download "$tag" --repo "${{ github.repository }}" --pattern "*.rpm" \
+              --dir gh-pages/rpm/packages --clobber 2>&1 || echo "  (no .rpm on $tag)"
+            echo "::endgroup::"
+          done <<<"$TAGS"
+          echo "APT pool:"
+          ls -la gh-pages/apt/pool/ || true
+          echo "RPM packages:"
+          ls -la gh-pages/rpm/packages/ || true
 
       - name: Import GPG key
         run: |
@@ -761,6 +836,11 @@ jobs:
         run: |
           cd gh-pages/apt
 
+          # Index every .deb that landed in pool/. The `Filename:` field that
+          # `dpkg-scanpackages` emits is a relative path (`pool/...`); apt only
+          # supports relative paths there (it does `BaseURL + Filename` with
+          # no scheme detection — confirmed empirically), so the binaries
+          # themselves have to live on this Pages site.
           dpkg-scanpackages --multiversion pool > dists/stable/main/binary-amd64/Packages
           gzip -k -f dists/stable/main/binary-amd64/Packages
 
@@ -795,7 +875,13 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           cd gh-pages/rpm
-          createrepo_c --update .
+
+          # Mirror the APT side: the binaries live on Pages and `<location
+          # href="packages/...">` points at them with a relative path.
+          # `--no-database` skips the legacy SQLite copies, which modern dnf /
+          # zypper don't need and which kept inflating the gh-pages working
+          # tree.
+          createrepo_c --no-database --update .
 
           echo "$GPG_PASSPHRASE" > /tmp/gpg-pass
 

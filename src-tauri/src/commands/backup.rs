@@ -1,6 +1,7 @@
 use crate::db::pool::PoolManager;
 use crate::db::ssh_tunnel::{self, EffectiveTarget};
 use crate::models::*;
+use crate::util::path::expand_tilde;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
@@ -241,8 +242,12 @@ pub async fn dump_and_restore(
 #[tauri::command]
 pub async fn backup_database(
     pool: State<'_, Arc<PoolManager>>,
-    request: BackupRequest,
+    mut request: BackupRequest,
 ) -> Result<String, String> {
+    // Most callers come from the native save dialog (already absolute),
+    // but the field is also typeable, so mirror shell tilde expansion.
+    request.output_path = expand_tilde(&request.output_path);
+
     let config = pool
         .get_config(&request.connection_id)
         .await
@@ -260,8 +265,10 @@ pub async fn backup_database(
 #[tauri::command]
 pub async fn restore_database(
     pool: State<'_, Arc<PoolManager>>,
-    request: RestoreRequest,
+    mut request: RestoreRequest,
 ) -> Result<String, String> {
+    request.input_path = expand_tilde(&request.input_path);
+
     let config = pool
         .get_config(&request.connection_id)
         .await
@@ -493,14 +500,16 @@ async fn restore_mysql(config: &ConnectionConfig, req: &RestoreRequest) -> Resul
 }
 
 async fn backup_sqlite(config: &ConnectionConfig, req: &BackupRequest) -> Result<String, String> {
-    tokio::fs::copy(&config.database, &req.output_path)
+    let source = expand_tilde(&config.database);
+    tokio::fs::copy(&source, &req.output_path)
         .await
         .map_err(|e| format!("Failed to copy SQLite file: {}", e))?;
     Ok(format!("Backup completed: {}", req.output_path))
 }
 
 async fn restore_sqlite(config: &ConnectionConfig, req: &RestoreRequest) -> Result<String, String> {
-    tokio::fs::copy(&req.input_path, &config.database)
+    let dest = expand_tilde(&config.database);
+    tokio::fs::copy(&req.input_path, &dest)
         .await
         .map_err(|e| format!("Failed to restore SQLite file: {}", e))?;
     Ok("Restore completed".to_string())

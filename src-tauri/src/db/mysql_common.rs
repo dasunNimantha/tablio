@@ -3,6 +3,115 @@ use sqlx::{Column, MySqlPool, Row, TypeInfo};
 use std::time::Instant;
 
 use crate::models::*;
+use crate::util::sql::{split_sql_statements, statement_is_select_like};
+
+/// Returns true when the server supports `ALTER TABLE ... RENAME COLUMN ... TO ...`.
+///
+/// This is the preferred rename syntax because it preserves every column
+/// attribute (`AUTO_INCREMENT`, `ON UPDATE CURRENT_TIMESTAMP`, generated
+/// expressions, character set, collation, comment) without us having to
+/// enumerate them. It became valid syntax on:
+///
+/// - MySQL 8.0.3 (released 2017-09)
+/// - MariaDB 10.5.2 (released 2020-07)
+/// - TiDB (all supported releases parse it)
+///
+/// Older servers — notably the MySQL 5.7 still in our nightly matrix and
+/// MariaDB 10.4 / earlier — reject it with a 1064 syntax error, so we
+/// detect the version once per call and fall back to `CHANGE COLUMN` only
+/// when we have to. We deliberately use `SELECT VERSION()` (universally
+/// supported) rather than `@@version_compile_id` or similar so this works
+/// on every flavour of the MySQL wire protocol.
+async fn rename_column_supported(pool: &MySqlPool) -> Result<bool> {
+    let row = sqlx::query("SELECT VERSION() AS v").fetch_one(pool).await?;
+    let version: String = row.try_get("v").unwrap_or_default();
+    Ok(version_supports_rename_column(&version))
+}
+
+/// Pure version-string check, split out so it is unit-testable without a
+/// live MySQL connection. `version` is whatever `SELECT VERSION()`
+/// returns, e.g. `"8.0.36"`, `"5.7.44"`, `"10.5.2-MariaDB"`, `"5.7.25-TiDB-v6.5.0"`.
+fn version_supports_rename_column(version: &str) -> bool {
+    // MariaDB always advertises itself in the version string after the
+    // first dash, e.g. `10.5.2-MariaDB-1:10.5.2+maria~focal`. We
+    // identify it on a case-insensitive substring match because the
+    // suffix has shifted across releases.
+    let is_mariadb = version.to_ascii_lowercase().contains("mariadb");
+
+    // TiDB encodes the upstream-MySQL-compatibility version at the
+    // start (`5.7.25-TiDB-v6.5.0`). Its parser accepts RENAME COLUMN
+    // regardless of that prefix, so short-circuit there.
+    if version.to_ascii_lowercase().contains("tidb") {
+        return true;
+    }
+
+    // Strip anything after the first non-version character (`-`, `_`,
+    // ` `) to leave just the dotted numeric prefix.
+    let numeric: String = version
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = numeric.split('.').filter_map(|p| p.parse::<u32>().ok());
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    let patch = parts.next().unwrap_or(0);
+
+    if is_mariadb {
+        // MariaDB 10.5.2+
+        (major, minor, patch) >= (10, 5, 2)
+    } else {
+        // MySQL 8.0.3+
+        (major, minor, patch) >= (8, 0, 3)
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::version_supports_rename_column as v;
+
+    #[test]
+    fn mysql_modern_supported() {
+        assert!(v("8.0.36"));
+        assert!(v("8.0.3"));
+        assert!(v("8.4.0"));
+        assert!(v("9.0.0"));
+    }
+
+    #[test]
+    fn mysql_legacy_unsupported() {
+        assert!(!v("5.7.44"));
+        assert!(!v("5.6.51"));
+        assert!(!v("8.0.2"));
+    }
+
+    #[test]
+    fn mariadb_modern_supported() {
+        assert!(v("10.5.2-MariaDB"));
+        assert!(v("10.6.16-MariaDB-1:10.6.16+maria~ubu2204"));
+        assert!(v("11.4.2-MariaDB"));
+    }
+
+    #[test]
+    fn mariadb_legacy_unsupported() {
+        assert!(!v("10.4.34-MariaDB"));
+        assert!(!v("10.5.1-MariaDB"));
+        assert!(!v("10.3.39-MariaDB"));
+    }
+
+    #[test]
+    fn tidb_always_supported() {
+        assert!(v("5.7.25-TiDB-v6.5.0"));
+        assert!(v("8.0.11-TiDB-v7.5.0"));
+    }
+
+    #[test]
+    fn empty_or_garbage_falls_back_to_change_column() {
+        // Unknown servers err on the side of the universally supported
+        // `CHANGE COLUMN` form rather than risking a 1064.
+        assert!(!v(""));
+        assert!(!v("not-a-version"));
+    }
+}
 
 pub fn mysql_row_to_json_values(
     row: &sqlx::mysql::MySqlRow,
@@ -350,7 +459,9 @@ pub async fn my_list_indexes(
         quote_ident(database),
         quote_ident(table)
     );
-    let rows = sqlx::query(&sql).fetch_all(pool).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .fetch_all(pool)
+        .await?;
 
     let mut index_map: std::collections::HashMap<String, IndexInfo> =
         std::collections::HashMap::new();
@@ -488,7 +599,9 @@ pub async fn my_fetch_rows_impl(
         quote_ident(table),
         where_clause
     );
-    let count_row = sqlx::query(&count_sql).fetch_one(pool).await?;
+    let count_row = sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
+        .fetch_one(pool)
+        .await?;
     let total_rows: i64 = count_row.get("cnt");
 
     let sql = format!(
@@ -501,7 +614,9 @@ pub async fn my_fetch_rows_impl(
         offset
     );
 
-    let rows = sqlx::query(&sql).fetch_all(pool).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .fetch_all(pool)
+        .await?;
     let col_count = columns.len();
     let data_rows: Vec<Vec<serde_json::Value>> = rows
         .iter()
@@ -519,14 +634,40 @@ pub async fn my_fetch_rows_impl(
 
 pub async fn my_execute_query(pool: &MySqlPool, _database: &str, sql: &str) -> Result<QueryResult> {
     let start = Instant::now();
-    let trimmed = sql.trim().to_uppercase();
-    let is_select = trimmed.starts_with("SELECT")
-        || trimmed.starts_with("SHOW")
-        || trimmed.starts_with("DESCRIBE")
-        || trimmed.starts_with("EXPLAIN");
 
-    if is_select {
-        let rows = sqlx::query(sql).fetch_all(pool).await?;
+    // Multi-statement support: see the matching comment in
+    // `pg_common::pg_execute_query`. The same model applies here —
+    // run all leading statements as exec-only, then run the LAST
+    // statement based on its own shape so e.g.
+    // `CREATE VIEW v ...; SELECT * FROM v;` returns rows from the
+    // SELECT instead of `rows_affected = 0`.
+    //
+    // Everything runs on a single pinned connection so session
+    // variables (`SET @x = ...;`) and temp tables survive between
+    // statements.
+    let statements = split_sql_statements(sql);
+    if statements.is_empty() {
+        return Err(anyhow::anyhow!("Query is empty"));
+    }
+
+    let mut conn = pool.acquire().await?;
+
+    for stmt in &statements[..statements.len() - 1] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(stmt.as_str()))
+            .execute(&mut *conn)
+            .await?;
+    }
+
+    let last = statements.last().unwrap().as_str();
+    let last_is_select = statement_is_select_like(
+        last,
+        &["SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "WITH"],
+    );
+
+    if last_is_select {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(last))
+            .fetch_all(&mut *conn)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
         let columns: Vec<String> = if rows.is_empty() {
             vec![]
@@ -550,7 +691,9 @@ pub async fn my_execute_query(pool: &MySqlPool, _database: &str, sql: &str) -> R
             is_select: true,
         })
     } else {
-        let result = sqlx::raw_sql(sql).execute(pool).await?;
+        let result = sqlx::raw_sql(sqlx::AssertSqlSafe(last))
+            .execute(&mut *conn)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
         Ok(QueryResult {
             columns: vec![],
@@ -581,7 +724,9 @@ pub async fn my_get_ddl(
             quote_ident(object_name)
         ),
     };
-    let row = sqlx::query(&sql).fetch_one(pool).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .fetch_one(pool)
+        .await?;
     let ddl: String = row.try_get(1)?;
     Ok(ddl)
 }
@@ -637,7 +782,9 @@ pub async fn my_create_table(
         quote_ident(table_name),
         col_defs.join(",\n    ")
     );
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -711,12 +858,71 @@ pub async fn my_alter_table(
                 )
             }
             AlterTableOperation::RenameColumn { old_name, new_name } => {
-                format!(
-                    "ALTER TABLE {} RENAME COLUMN {} TO {}",
-                    table_ref,
-                    quote_ident(old_name),
-                    quote_ident(new_name)
-                )
+                // Choose the rename syntax based on what the server
+                // supports. `ALTER TABLE ... RENAME COLUMN ... TO ...`
+                // is the right tool because it preserves *every*
+                // column attribute (EXTRA: AUTO_INCREMENT / ON UPDATE
+                // CURRENT_TIMESTAMP, generated-column expressions,
+                // CHARACTER_SET, COLLATION, COMMENT) without us having
+                // to enumerate them. It is, however, only valid on:
+                //   - MySQL 8.0.3+
+                //   - MariaDB 10.5.2+
+                //   - TiDB (all supported releases)
+                // Older servers (notably MySQL 5.7 plus MariaDB 10.4
+                // and earlier) reject it with a 1064 syntax error, so
+                // we fall back to the universal
+                // `CHANGE COLUMN <old> <new> <type>` form there.
+                // `CHANGE COLUMN` requires us to spell the column
+                // definition out, so we capture what we can preserve
+                // from INFORMATION_SCHEMA. This is a best-effort
+                // fallback: EXTRA flags, comments, and generated
+                // expressions are intentionally not carried over —
+                // each requires bespoke escaping and the only servers
+                // that take this branch are EOL or near-EOL.
+                if rename_column_supported(pool).await? {
+                    format!(
+                        "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                        table_ref,
+                        quote_ident(old_name),
+                        quote_ident(new_name)
+                    )
+                } else {
+                    let col_sql = "SELECT CAST(COLUMN_TYPE AS CHAR) AS COLUMN_TYPE, \
+                                           IS_NULLABLE, \
+                                           COLUMN_DEFAULT \
+                                   FROM information_schema.COLUMNS \
+                                   WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?";
+                    let row = sqlx::query(col_sql)
+                        .bind(database)
+                        .bind(&current_table)
+                        .bind(old_name)
+                        .fetch_optional(pool)
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow!("Column {} not found in table {}", old_name, current_table)
+                        })?;
+                    let col_type: String = row.get("COLUMN_TYPE");
+                    let is_nullable: String = row.get("IS_NULLABLE");
+                    let default_value: Option<String> = row.try_get("COLUMN_DEFAULT").ok();
+                    let null_part = if is_nullable.eq_ignore_ascii_case("NO") {
+                        " NOT NULL"
+                    } else {
+                        ""
+                    };
+                    let default_part = match default_value {
+                        Some(d) if !d.is_empty() => format!(" DEFAULT {}", d),
+                        _ => String::new(),
+                    };
+                    format!(
+                        "ALTER TABLE {} CHANGE COLUMN {} {} {}{}{}",
+                        table_ref,
+                        quote_ident(old_name),
+                        quote_ident(new_name),
+                        col_type,
+                        null_part,
+                        default_part
+                    )
+                }
             }
             AlterTableOperation::ChangeColumnType {
                 column_name,
@@ -781,7 +987,9 @@ pub async fn my_alter_table(
                 format!("RENAME TABLE {} TO {}", table_ref, new_ref)
             }
         };
-        sqlx::query(&sql).execute(pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(pool)
+            .await?;
     }
 
     Ok(())
@@ -818,7 +1026,9 @@ pub async fn my_import_data(
             "INSERT INTO {} ({}) VALUES {}",
             table_ref, col_str, values_str
         );
-        let result = sqlx::query(&sql).execute(&mut *tx).await?;
+        let result = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *tx)
+            .await?;
         total_inserted += result.rows_affected();
     }
 
@@ -843,7 +1053,9 @@ pub async fn my_drop_object(
         quote_ident(database),
         quote_ident(object_name)
     );
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -858,7 +1070,9 @@ pub async fn my_truncate_table(
         quote_ident(database),
         quote_ident(table_name)
     );
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -887,7 +1101,9 @@ pub async fn my_cancel_query(pool: &MySqlPool, pid: &str) -> Result<()> {
         .parse()
         .map_err(|_| anyhow!("Invalid PID: must be numeric"))?;
     let sql = format!("KILL QUERY {}", pid_num);
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -899,7 +1115,12 @@ pub async fn my_validate_query(pool: &MySqlPool, sql: &str) -> Result<Option<Val
         }));
     }
     use sqlx::Executor;
-    match pool.prepare(sql).await {
+    match pool
+        .prepare(
+            <sqlx::AssertSqlSafe<&str> as sqlx::SqlSafeStr>::into_sql_str(sqlx::AssertSqlSafe(sql)),
+        )
+        .await
+    {
         Ok(_) => Ok(None),
         Err(e) => {
             let message = if let Some(db_err) = e.as_database_error() {
@@ -943,7 +1164,9 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
             set_clause,
             where_clause.join(" AND ")
         );
-        sqlx::query(&sql).execute(&mut *tx).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *tx)
+            .await?;
     }
 
     for insert in &changes.inserts {
@@ -959,7 +1182,9 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
             cols.join(", "),
             vals.join(", ")
         );
-        sqlx::query(&sql).execute(&mut *tx).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *tx)
+            .await?;
     }
 
     for delete in &changes.deletes {
@@ -976,7 +1201,9 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
             fq_table,
             where_clause.join(" AND ")
         );
-        sqlx::query(&sql).execute(&mut *tx).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&mut *tx)
+            .await?;
     }
 
     tx.commit().await?;
@@ -1009,7 +1236,9 @@ pub async fn my_get_table_stats(
         quote_ident(database),
         quote_ident(table)
     );
-    let count_row = sqlx::query(&count_sql).fetch_one(pool).await?;
+    let count_row = sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
+        .fetch_one(pool)
+        .await?;
     let exact_count: i64 = count_row.try_get("cnt").unwrap_or(0);
 
     let data_bytes = data_length.unwrap_or(0);
@@ -1052,11 +1281,89 @@ pub async fn my_get_server_config(pool: &MySqlPool) -> Result<Vec<ServerConfigEn
         .collect())
 }
 
-pub async fn my_get_query_stats(_pool: &MySqlPool) -> Result<QueryStatsResponse> {
+/// Per-query stats sourced from the always-on (since MySQL 5.6 / MariaDB 10.0)
+/// `performance_schema.events_statements_summary_by_digest` view.
+///
+/// Failure modes the UI cares about (all surface as
+/// `kind = MysqlPerfSchemaDisabled`):
+/// - performance_schema is compiled-out or `performance_schema = OFF`,
+/// - the `*_summary_by_digest` instrument / consumer is disabled,
+/// - the connecting user lacks `SELECT` on `performance_schema`.
+///
+/// Time fields in `performance_schema` are reported in **picoseconds**, so we
+/// divide by `1_000_000_000` to land in milliseconds for the shared
+/// `QueryStatEntry` shape.
+///
+/// MySQL has no shared-buffer / cache-hit equivalent, so `shared_blks_*` and
+/// `cache_hit_ratio` are reported as honest zeros rather than fabricated
+/// numbers. Plan times are `None` for the same reason. The 32-byte hex
+/// `DIGEST` column doesn't fit in `i64`, so `queryid` stays `None` — the
+/// `query` text is the de-facto identifier in the UI.
+pub async fn my_get_query_stats(pool: &MySqlPool) -> Result<QueryStatsResponse> {
+    if let Err(e) =
+        sqlx::query("SELECT 1 FROM performance_schema.events_statements_summary_by_digest LIMIT 1")
+            .fetch_optional(pool)
+            .await
+    {
+        return Ok(QueryStatsResponse {
+            available: false,
+            kind: QueryStatsKind::MysqlPerfSchemaDisabled,
+            message: Some(format!(
+                "Performance Schema digest table is not readable: {e}.\n\n\
+                 To enable query statistics:\n\n\
+                 1. In your my.cnf / my.ini under [mysqld]:\n   performance_schema = ON\n\n\
+                 2. Restart the server.\n\n\
+                 3. Grant the connecting user read access:\n   \
+                 GRANT SELECT ON performance_schema.* TO '<user>'@'<host>';"
+            )),
+            entries: vec![],
+        });
+    }
+
+    // `1000000000.0` (vs `1000000000`) forces float division — without it MySQL
+    // truncates to integer milliseconds and we lose sub-ms precision on cheap
+    // queries.
+    let sql = "SELECT \
+            COALESCE(DIGEST_TEXT, '')                            AS query, \
+            COALESCE(SCHEMA_NAME, '')                            AS user, \
+            CAST(COUNT_STAR AS SIGNED)                           AS calls, \
+            (SUM_TIMER_WAIT / 1000000000.0)                      AS total_exec_time_ms, \
+            (AVG_TIMER_WAIT / 1000000000.0)                      AS mean_exec_time_ms, \
+            (MIN_TIMER_WAIT / 1000000000.0)                      AS min_exec_time_ms, \
+            (MAX_TIMER_WAIT / 1000000000.0)                      AS max_exec_time_ms, \
+            CAST(SUM_ROWS_SENT AS SIGNED)                        AS rows_sent \
+         FROM performance_schema.events_statements_summary_by_digest \
+         WHERE DIGEST_TEXT IS NOT NULL \
+         ORDER BY SUM_TIMER_WAIT DESC \
+         LIMIT 200";
+
+    let rows = sqlx::query(sql).fetch_all(pool).await?;
+
+    let entries = rows
+        .iter()
+        .map(|r| QueryStatEntry {
+            query: r.try_get::<String, _>("query").unwrap_or_default(),
+            queryid: None,
+            user: r.try_get::<String, _>("user").unwrap_or_default(),
+            calls: r.try_get::<i64, _>("calls").unwrap_or(0),
+            total_exec_time_ms: r.try_get::<f64, _>("total_exec_time_ms").unwrap_or(0.0),
+            mean_exec_time_ms: r.try_get::<f64, _>("mean_exec_time_ms").unwrap_or(0.0),
+            min_exec_time_ms: r.try_get::<f64, _>("min_exec_time_ms").unwrap_or(0.0),
+            max_exec_time_ms: r.try_get::<f64, _>("max_exec_time_ms").unwrap_or(0.0),
+            rows: r.try_get::<i64, _>("rows_sent").unwrap_or(0),
+            shared_blks_hit: 0,
+            shared_blks_read: 0,
+            cache_hit_ratio: 0.0,
+            total_plan_time_ms: None,
+            mean_plan_time_ms: None,
+        })
+        .collect();
+
     Ok(QueryStatsResponse {
-        available: false,
-        message: Some("Query statistics are not supported for MySQL. Use performance_schema for similar functionality.".to_string()),
-        entries: vec![],
+        available: true,
+        kind: QueryStatsKind::Available,
+        message: None,
+        entries,
     })
 }
 

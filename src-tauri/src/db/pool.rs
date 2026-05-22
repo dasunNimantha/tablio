@@ -189,8 +189,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let pm = PoolManager::new();
-            let result = pm.get_config("missing").await;
-            let err = result.err().expect("expected error");
+            let err = pm.get_config("missing").await.expect_err("expected error");
             assert!(err.to_string().contains("not found"));
         });
     }

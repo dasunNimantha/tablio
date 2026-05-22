@@ -127,12 +127,27 @@
   margin: 1px 4px;
 }
 
-.tree-node:hover {
-  background: var(--bg-hover);
+/* Single source of truth for the hovered-row background. Anything
+   layered on top of a hovered row (e.g. `.tree-conn-actions`) reads
+   the same variable so its colour is byte-identical, with no alpha
+   compositing in between. A translucent rgba fill would composite
+   differently from any opaque match we tried on the overlay,
+   showing the overlay as a visibly darker rectangle (issue #92). */
+.sidebar {
+  --tree-row-hover-bg: color-mix(in srgb, var(--bg-secondary), white 7%);
 }
 
-.tree-node.leaf:hover {
-  background: var(--bg-hover);
+/* For active connections, the row body and the action-buttons
+   overlay are siblings inside `.tree-conn-row` — the overlay is the
+   topmost hit-test target, so `.tree-node:hover` doesn't fire while
+   the cursor sits on the buttons. The second selector paints the
+   connection's own row body from the wrapper's hover state instead.
+   The `> div > .tree-node` chain restricts the rule to the
+   connection's body only; without it, hovering the overlay would
+   paint every expanded descendant row in the subtree. */
+.tree-node:hover,
+.tree-conn-row:hover > div > .tree-node {
+  background: var(--tree-row-hover-bg);
 }
 
 /* Tables / views / functions only — keep folder & branch labels at base size */
@@ -261,7 +276,12 @@
 
 .tree-label {
   flex: 1 1 auto;
-  min-width: 60px;
+  /* Allow the label to shrink all the way to zero on narrow sidebars
+     so ellipsis kicks in *before* the hover-action overlay starts to
+     clip the visible text. The previous 60px floor was holding the
+     label open and forcing the icons + name into the action buttons
+     (issue #92). */
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -320,6 +340,12 @@
   right: 4px;
   top: 0;
   height: 34px;
+  /* Read the same opaque pre-mixed colour as the hovered row so
+     the overlay's leading edge blends invisibly into the row
+     content. See `.sidebar` above for the variable definition and
+     the rationale (issue #92). */
+  background-color: var(--tree-row-hover-bg);
+  padding-left: 8px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
@@ -503,6 +529,18 @@
 }
 
 .connection-group .tree-root {
+  border-bottom: none;
+}
+
+/* The .tree-root border-bottom above is meant as a divider between
+ * consecutive ungrouped connections. The last ungrouped connection
+ * has nothing below it, so the trailing border reads as a stray hr
+ * (especially obvious with a single connection). Drop it.
+ *
+ * Pairs cleanly with #90: once that adds padding-bottom on
+ * .sidebar-content, this rule still does the right thing because
+ * the last child remains border-less either way. */
+.sidebar-content > .tree-root:last-child {
   border-bottom: none;
 }
 

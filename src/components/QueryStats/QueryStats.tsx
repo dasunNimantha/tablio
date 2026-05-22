@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
-import { api, QueryStatEntry, QueryStatsResponse } from "../../lib/tauri";
+import { useEffect, useState, useCallback, useMemo, type ReactNode } from "react";
+import { api, QueryStatEntry, QueryStatsKind, QueryStatsResponse } from "../../lib/tauri";
 import { usePolling } from "../../hooks/usePolling";
 import { formatQueryDuration as formatDuration, cacheHitClass, speedClass } from "../../lib/dashboardUtils";
 import {
@@ -158,62 +158,19 @@ export function QueryStats({ connectionId }: Props) {
 
   if (data && !data.available) {
     return (
-      <div className="qs-dashboard">
-        <div className="qs-toolbar">
-          <span className="qs-title">Query Statistics</span>
-        </div>
-        <div className="qs-unavailable">
-          <div className="qs-unavailable-icon">
-            <Database size={36} />
-          </div>
-          <h3>pg_stat_statements not enabled</h3>
-          <p>This extension is required to track query performance statistics.</p>
-
-          <div className="qs-setup-card">
-            <div className="qs-setup-steps">
-              <div className="qs-step">
-                <span className="qs-step-num">1</span>
-                <div>
-                  <strong>Add to postgresql.conf</strong>
-                  <code>shared_preload_libraries = 'pg_stat_statements'</code>
-                </div>
-              </div>
-              <div className="qs-step">
-                <span className="qs-step-num">2</span>
-                <div>
-                  <strong>Restart PostgreSQL</strong>
-                  <code>sudo systemctl restart postgresql</code>
-                </div>
-              </div>
-              <div className="qs-step">
-                <span className="qs-step-num">3</span>
-                <div>
-                  <strong>Create the extension</strong>
-                  <code>CREATE EXTENSION pg_stat_statements;</code>
-                </div>
-              </div>
-            </div>
-
-            <div className="qs-setup-actions">
-              <button
-                className="btn-primary qs-enable-btn"
-                onClick={handleEnableExtension}
-                disabled={enabling}
-              >
-                {enabling ? <><Loader2 size={14} className="spin" /> Enabling...</> : "Enable Extension"}
-              </button>
-              <button className="btn-ghost" disabled={checking} onClick={async () => { setChecking(true); await fetchStats(); setChecking(false); }}>
-                {checking ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />} {checking ? "Checking..." : "Check"}
-              </button>
-            </div>
-            {enableError && (
-              <div className="qs-enable-error">
-                <AlertTriangle size={13} /> {enableError}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
+      <UnavailablePanel
+        kind={data.kind}
+        message={data.message}
+        enabling={enabling}
+        enableError={enableError}
+        checking={checking}
+        onEnableExtension={handleEnableExtension}
+        onCheck={async () => {
+          setChecking(true);
+          await fetchStats();
+          setChecking(false);
+        }}
+      />
     );
   }
 
@@ -281,7 +238,7 @@ export function QueryStats({ connectionId }: Props) {
               <th style={{ width: 32 }}></th>
               <th style={{ maxWidth: 420 }}>Query</th>
               <th style={{ width: 90 }} title="Total number of times this query has been executed">Calls</th>
-              <th style={{ width: 90 }} title="PostgreSQL role that executed the query">User</th>
+              <th style={{ width: 90 }} title="Database role or schema that executed the query">User</th>
               <th style={{ width: 110 }} title="Cumulative execution time across all calls">Total Time</th>
               <th style={{ width: 100 }} title="Average execution time per call">Mean Time</th>
               <th style={{ width: 100 }} title="Longest single execution of this query">Max Time</th>
@@ -403,8 +360,161 @@ function QueryRow({
   );
 }
 
+/**
+ * Engine-aware "Query Statistics not available" panel. The PostgreSQL branch
+ * keeps the original copy + the in-app "Enable Extension" CTA verbatim;
+ * other engines render their own copy and (where applicable) a code snippet
+ * the operator can paste, since auto-enabling them requires server config
+ * changes that aren't safe to fire from the client.
+ */
+function UnavailablePanel({
+  kind,
+  message,
+  enabling,
+  enableError,
+  checking,
+  onEnableExtension,
+  onCheck,
+}: {
+  kind: QueryStatsKind;
+  message: string | null;
+  enabling: boolean;
+  enableError: string | null;
+  checking: boolean;
+  onEnableExtension: () => void;
+  onCheck: () => void;
+}) {
+  const refreshButton = (
+    <button className="btn-ghost" disabled={checking} onClick={onCheck}>
+      {checking ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}{" "}
+      {checking ? "Checking..." : "Check"}
+    </button>
+  );
+
+  let title = "Query statistics not available";
+  let subtitle = message ?? "This database engine does not expose per-query statistics.";
+  let steps: { label: string; code: string }[] | null = null;
+  let primaryAction: ReactNode = null;
+
+  switch (kind) {
+    case "pg_stat_statements_missing":
+      title = "pg_stat_statements not enabled";
+      subtitle = "This extension is required to track query performance statistics.";
+      steps = [
+        { label: "Add to postgresql.conf", code: "shared_preload_libraries = 'pg_stat_statements'" },
+        { label: "Restart PostgreSQL", code: "sudo systemctl restart postgresql" },
+        { label: "Create the extension", code: "CREATE EXTENSION pg_stat_statements;" },
+      ];
+      primaryAction = (
+        <button
+          className="btn-primary qs-enable-btn"
+          onClick={onEnableExtension}
+          disabled={enabling}
+        >
+          {enabling ? (
+            <>
+              <Loader2 size={14} className="spin" /> Enabling...
+            </>
+          ) : (
+            "Enable Extension"
+          )}
+        </button>
+      );
+      break;
+    case "mysql_perf_schema_disabled":
+      title = "Performance Schema digest not readable";
+      subtitle =
+        "MySQL/MariaDB exposes per-query stats via performance_schema, but it's either disabled or the connecting user can't read it.";
+      steps = [
+        { label: "Enable in my.cnf under [mysqld]", code: "performance_schema = ON" },
+        { label: "Restart the server", code: "sudo systemctl restart mysqld" },
+        {
+          label: "Grant read access to your user",
+          code: "GRANT SELECT ON performance_schema.* TO '<user>'@'<host>';",
+        },
+      ];
+      break;
+    case "mssql_missing_view_server_state":
+      title = "Missing VIEW SERVER STATE permission";
+      subtitle =
+        "SQL Server's sys.dm_exec_query_stats DMV needs server-level read access. Auto-granting it from the client isn't safe — ask your DBA.";
+      steps = [
+        {
+          label: "Have a sysadmin run",
+          code: "GRANT VIEW SERVER STATE TO [<your_login>];",
+        },
+      ];
+      break;
+    case "tidb_stmt_summary_disabled":
+      title = "Statement summary disabled";
+      subtitle =
+        "TiDB only records per-query digests when tidb_enable_stmt_summary is ON. Flip it on, then re-run the queries you want to inspect.";
+      steps = [
+        { label: "Enable globally", code: "SET GLOBAL tidb_enable_stmt_summary = ON;" },
+      ];
+      break;
+    case "engine_unsupported":
+      title = "Query statistics not supported";
+      subtitle =
+        message ?? "This database engine does not expose a per-query stats catalog.";
+      steps = null;
+      break;
+    case "available":
+      // Defensive: shouldn't reach here when available=false, but render
+      // something coherent if a backend bug ever does.
+      break;
+  }
+
+  return (
+    <div className="qs-dashboard">
+      <div className="qs-toolbar">
+        <span className="qs-title">Query Statistics</span>
+      </div>
+      <div className="qs-unavailable">
+        <div className="qs-unavailable-icon">
+          <Database size={36} />
+        </div>
+        <h3>{title}</h3>
+        <p>{subtitle}</p>
+
+        <div className="qs-setup-card">
+          {steps && steps.length > 0 && (
+            <div className="qs-setup-steps">
+              {steps.map((s, i) => (
+                <div className="qs-step" key={i}>
+                  <span className="qs-step-num">{i + 1}</span>
+                  <div>
+                    <strong>{s.label}</strong>
+                    <code>{s.code}</code>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="qs-setup-actions">
+            {primaryAction}
+            {refreshButton}
+          </div>
+          {enableError && (
+            <div className="qs-enable-error">
+              <AlertTriangle size={13} /> {enableError}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function QueryDetail({ entry }: { entry: QueryStatEntry }) {
   const rowsPerCall = entry.calls > 0 ? entry.rows / entry.calls : 0;
+  // Engines that don't track shared-buffer counters (MySQL, MariaDB, TiDB)
+  // report honest zeros from the backend. Hide the cache panel in that case
+  // so the detail view doesn't suggest fake hit ratios.
+  const hasCacheData =
+    entry.shared_blks_hit + entry.shared_blks_read > 0 ||
+    entry.cache_hit_ratio > 0;
 
   return (
     <div className="qs-detail">
@@ -445,27 +555,29 @@ function QueryDetail({ entry }: { entry: QueryStatEntry }) {
             <dd>{rowsPerCall.toFixed(1)}</dd>
           </dl>
         </div>
-        <div className="qs-detail-section">
-          <h4>Cache</h4>
-          <dl>
-            <dt>Shared blocks hit</dt>
-            <dd>{formatNumber(entry.shared_blks_hit)}</dd>
-            <dt>Shared blocks read</dt>
-            <dd>{formatNumber(entry.shared_blks_read)}</dd>
-            <dt>Hit ratio</dt>
-            <dd>
-              <div className={`qs-cache-bar qs-cache-bar-lg ${cacheHitClass(entry.cache_hit_ratio)}`}>
-                <div
-                  className="qs-cache-fill"
-                  style={{ width: `${Math.min(entry.cache_hit_ratio, 100)}%` }}
-                />
-                <span className="qs-cache-label">
-                  {entry.cache_hit_ratio.toFixed(2)}%
-                </span>
-              </div>
-            </dd>
-          </dl>
-        </div>
+        {hasCacheData && (
+          <div className="qs-detail-section">
+            <h4>Cache</h4>
+            <dl>
+              <dt>Shared blocks hit</dt>
+              <dd>{formatNumber(entry.shared_blks_hit)}</dd>
+              <dt>Shared blocks read</dt>
+              <dd>{formatNumber(entry.shared_blks_read)}</dd>
+              <dt>Hit ratio</dt>
+              <dd>
+                <div className={`qs-cache-bar qs-cache-bar-lg ${cacheHitClass(entry.cache_hit_ratio)}`}>
+                  <div
+                    className="qs-cache-fill"
+                    style={{ width: `${Math.min(entry.cache_hit_ratio, 100)}%` }}
+                  />
+                  <span className="qs-cache-label">
+                    {entry.cache_hit_ratio.toFixed(2)}%
+                  </span>
+                </div>
+              </dd>
+            </dl>
+          </div>
+        )}
       </div>
     </div>
   );

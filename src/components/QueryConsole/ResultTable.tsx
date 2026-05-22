@@ -9,6 +9,7 @@ import { useToastStore } from "../../stores/toastStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { boolLiteral, quoteIdent, quoteQualified } from "../../lib/sqlDialect";
+import { readZoomFactor } from "../../lib/zoom";
 import "../DataGrid/ag-grid-theme.css";
 import "./QueryConsole.css";
 
@@ -139,7 +140,7 @@ interface Props {
   result: QueryResult;
   resultMode: "results" | "explain" | "chart";
   onToggleChart: () => void;
-  onExport: (format: "csv" | "json" | "sql") => void;
+  onExport: (format: "csv" | "json" | "sql" | "xlsx") => void;
   connectionId: string;
   database: string;
   sourceTable: SourceTable | null;
@@ -711,7 +712,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
     const e = event.event as MouseEvent;
     if (!e) return;
     e.preventDefault();
-    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    const z = readZoomFactor();
     setContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx });
   }, []);
 
@@ -940,7 +941,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
           style={{ left: contextMenu.x, top: contextMenu.y }}
           ref={(el) => {
             if (!el) return;
-            const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+            const z = readZoomFactor();
             const cssVh = window.innerHeight / z;
             const cssVw = window.innerWidth / z;
             if (contextMenu.y + el.offsetHeight > cssVh) {

@@ -90,6 +90,39 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Standalone Query button. Lives in the same header row as the         */
+/* Data/Schema toggle, sized to match the segmented control's buttons   */
+/* so the right edge of the header doesn't look unbalanced.             */
+/* ------------------------------------------------------------------ */
+
+.tv-query-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 32px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+
+.tv-query-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border-color: color-mix(in srgb, var(--text-muted) 25%, var(--border));
+}
+
+.tv-query-btn:active {
+  background: var(--bg-secondary);
+}
+
+/* ------------------------------------------------------------------ */
 /* Mode switch (Data / Schema)                                         */
 /* ------------------------------------------------------------------ */
 
@@ -107,7 +140,7 @@
   align-items: center;
   gap: 5px;
   padding: 0 14px;
-  height: 26px;
+  height: 32px;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -173,6 +206,50 @@
   gap: 12px;
   color: var(--text-muted);
   padding: 40px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Column-name filter (Schema view → Columns tab). Issue #60.          */
+/* The same pattern lives in AlterTableDialog so users can filter long */
+/* column lists when reviewing alterations.                            */
+/* ------------------------------------------------------------------ */
+
+.tv-columns-filter {
+  position: sticky;
+  top: 0;
+  z-index: 6; /* above .tv-table thead, which uses z-index: 5 */
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.tv-columns-filter-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.tv-columns-filter-input {
+  flex: 1;
+  height: 28px;
+  padding: 0 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.tv-columns-filter-input:focus {
+  border-color: var(--accent);
+}
+
+.tv-columns-filter-clear {
+  flex-shrink: 0;
+  color: var(--text-muted);
 }
 
 /* ------------------------------------------------------------------ */

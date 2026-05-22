@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use crate::db::DatabaseDriver;
 use crate::models::*;
+use crate::util::path::expand_tilde;
+use crate::util::sql::{split_sql_statements, statement_is_select_like};
 
 pub struct SqliteDriver {
     pool: SqlitePool,
@@ -13,17 +15,55 @@ pub struct SqliteDriver {
 
 impl SqliteDriver {
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
-        let url = if config.database.starts_with("sqlite:") {
-            config.database.clone()
+        // The user-typed value can be either a bare filesystem path
+        // (most common, e.g. `~/database.db` or `./foo.db`) or an
+        // explicit `sqlite:` URL with query params or `sqlite::memory:`.
+        // Tilde-expand the path form so shell conventions work in the
+        // GUI; leave URLs alone because their syntax is sqlx's domain
+        // (apart from a tilde in the path component).
+        let (url, resolved_for_error) = if let Some(rest) = config.database.strip_prefix("sqlite:")
+        {
+            // Preserve `?mode=...` and similar URL params verbatim.
+            let (path_part, query_part) = match rest.find('?') {
+                Some(idx) => (&rest[..idx], &rest[idx..]),
+                None => (rest, ""),
+            };
+            let expanded = expand_tilde(path_part);
+            let url = format!("sqlite:{}{}", expanded, query_part);
+            (url, expanded)
         } else {
-            format!("sqlite:{}", config.database)
+            let resolved = expand_tilde(&config.database);
+            (format!("sqlite:{}", resolved), resolved)
         };
+
+        // Defer existence + permission checking to sqlx so we report
+        // the actual OS error (ENOENT, EACCES, network share offline,
+        // sandbox denial, etc.) instead of guessing. Wrap with the
+        // resolved path so users can tell whether tilde expansion
+        // worked, especially when the input differed from what was
+        // ultimately opened.
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .min_connections(0)
             .idle_timeout(Duration::from_secs(1800))
             .connect(&url)
-            .await?;
+            .await
+            .map_err(|e| {
+                if resolved_for_error != config.database {
+                    anyhow::anyhow!(
+                        "Failed to open SQLite database at {} (resolved from \"{}\"): {}",
+                        resolved_for_error,
+                        config.database,
+                        e
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "Failed to open SQLite database at {}: {}",
+                        resolved_for_error,
+                        e
+                    )
+                }
+            })?;
         Ok(Self { pool })
     }
 }
@@ -62,15 +102,54 @@ fn sqlite_row_to_json_values(
                     serde_json::Value::String(format!("X'{}'", hex_str))
                 })
                 .unwrap_or(serde_json::Value::Null),
-            _ => row
+            "TEXT" => row
                 .try_get::<String, _>(i)
                 .ok()
                 .map(serde_json::Value::String)
                 .unwrap_or(serde_json::Value::Null),
+            // Computed columns (view bodies, SELECT-list expressions
+            // like `strftime() - if(...)`, aggregates) have no declared
+            // type. SQLite gives sqlx a non-static type name and the
+            // earlier branches don't fire. The old fallback tried to
+            // decode the cell as `String` only, which silently failed
+            // for integer / real values and rendered them as NULL —
+            // that's the regression Dialga hit on issue #126 after
+            // v0.4.8 (every cell of his `create view f as select ...`
+            // came back null).
+            //
+            // Probe each concrete sqlx decoder in turn. Order matters:
+            // integer first so a `1+1` cell stays as the number `2`
+            // rather than the string `"2"`; real second so `1.5*2`
+            // stays a number rather than getting truncated to `3` by
+            // i64; string third; explicit null last.
+            _ => decode_dynamic_sqlite_cell(row, i),
         };
         values.push(val);
     }
     values
+}
+
+/// Per-cell decoder for SQLite columns whose declared type isn't one
+/// of the static affinities (`INTEGER` / `REAL` / `TEXT` / `BLOB` /
+/// `BOOLEAN`). The runtime type is inferred from whichever sqlx
+/// decoder accepts the cell first.
+fn decode_dynamic_sqlite_cell(row: &sqlx::sqlite::SqliteRow, i: usize) -> serde_json::Value {
+    if let Ok(Some(n)) = row.try_get::<Option<i64>, _>(i) {
+        return serde_json::Value::Number(n.into());
+    }
+    if let Ok(Some(n)) = row.try_get::<Option<f64>, _>(i) {
+        if let Some(num) = serde_json::Number::from_f64(n) {
+            return serde_json::Value::Number(num);
+        }
+    }
+    if let Ok(Some(s)) = row.try_get::<Option<String>, _>(i) {
+        return serde_json::Value::String(s);
+    }
+    if let Ok(Some(b)) = row.try_get::<Option<Vec<u8>>, _>(i) {
+        let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
+        return serde_json::Value::String(format!("X'{}'", hex));
+    }
+    serde_json::Value::Null
 }
 
 fn quote_ident(name: &str) -> String {
@@ -222,7 +301,9 @@ impl DatabaseDriver for SqliteDriver {
         table: &str,
     ) -> Result<Vec<ColumnInfo>> {
         let sql = format!("PRAGMA table_info({})", quote_ident(table));
-        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(rows
             .iter()
@@ -253,7 +334,9 @@ impl DatabaseDriver for SqliteDriver {
         table: &str,
     ) -> Result<Vec<IndexInfo>> {
         let sql = format!("PRAGMA index_list({})", quote_ident(table));
-        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .fetch_all(&self.pool)
+            .await?;
 
         let mut indexes = Vec::new();
         for r in &rows {
@@ -264,7 +347,9 @@ impl DatabaseDriver for SqliteDriver {
                 .unwrap_or_else(|_| "c".into());
 
             let info_sql = format!("PRAGMA index_info({})", quote_ident(&name));
-            let info_rows = sqlx::query(&info_sql).fetch_all(&self.pool).await?;
+            let info_rows = sqlx::query(sqlx::AssertSqlSafe(&*info_sql))
+                .fetch_all(&self.pool)
+                .await?;
             let columns: Vec<String> = info_rows.iter().map(|ir| ir.get("name")).collect();
 
             indexes.push(IndexInfo {
@@ -364,7 +449,9 @@ impl DatabaseDriver for SqliteDriver {
             quote_ident(table),
             where_clause
         );
-        let count_row = sqlx::query(&count_sql).fetch_one(&self.pool).await?;
+        let count_row = sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
+            .fetch_one(&self.pool)
+            .await?;
         let total_rows: i64 = count_row.get("cnt");
 
         let sql = format!(
@@ -376,7 +463,9 @@ impl DatabaseDriver for SqliteDriver {
             offset
         );
 
-        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .fetch_all(&self.pool)
+            .await?;
         let col_count = columns.len();
         let data_rows: Vec<Vec<serde_json::Value>> = rows
             .iter()
@@ -394,14 +483,66 @@ impl DatabaseDriver for SqliteDriver {
 
     async fn execute_query(&self, _database: &str, sql: &str) -> Result<QueryResult> {
         let start = Instant::now();
-        let trimmed = sql.trim().to_uppercase();
-        let is_select = trimmed.starts_with("SELECT")
-            || trimmed.starts_with("WITH")
-            || trimmed.starts_with("PRAGMA")
-            || trimmed.starts_with("EXPLAIN");
 
-        if is_select {
-            let rows = sqlx::query(sql).fetch_all(&self.pool).await?;
+        // SQLite's `sqlite3_prepare_v2` compiles ONE statement per
+        // call. sqlx's `query().fetch_all()` uses prepare under the
+        // hood, so multi-statement inputs like `CREATE VIEW v ...;
+        // SELECT * FROM v;` only ever compile the first statement —
+        // the trailing SELECT never runs. The previous code routed
+        // on the FIRST keyword of the whole input ("CREATE" → exec
+        // path), which created the view but discarded the SELECT's
+        // rows entirely.
+        //
+        // Fix: split the input into individual statements, run each
+        // one in sequence, and return rows from the LAST one (if
+        // it's SELECT-like). This is what every SQL CLI does
+        // naturally — psql, sqlite3 shell, mysql client — and
+        // matches what users expect when they paste a DDL+DML
+        // script into the Query tab.
+        //
+        // TODO(#XXX): the same fix should be applied to
+        // pg_common::pg_execute_query, mysql_common::my_execute_query,
+        // and mssql::execute_query — they all have the same
+        // first-keyword routing bug. Doing one driver at a time
+        // here to keep the fix scope minimal; this commit is on the
+        // critical path of issue #126 testing.
+        let statements = split_sql_statements(sql);
+
+        // Empty input or only comments / whitespace.
+        if statements.is_empty() {
+            return Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                rows_affected: 0,
+                execution_time_ms: start.elapsed().as_millis() as u64,
+                is_select: false,
+            });
+        }
+
+        // Run every non-last statement as a side-effect execute.
+        // Use rows_affected for any DML the user mixed in but
+        // discard the rowsets — only the last statement's output
+        // is shown to the user, by convention.
+        let mut total_affected: u64 = 0;
+        for stmt in &statements[..statements.len() - 1] {
+            let stmt_owned = stmt.clone();
+            let result = sqlx::query(sqlx::AssertSqlSafe(stmt_owned))
+                .execute(&self.pool)
+                .await?;
+            total_affected = total_affected.saturating_add(result.rows_affected());
+        }
+
+        // Decide how to run the last statement based on its leading
+        // keyword. SELECT / WITH / PRAGMA / EXPLAIN return rows;
+        // everything else just emits rows_affected.
+        let last = statements.last().unwrap().clone();
+        let last_is_select =
+            statement_is_select_like(&last, &["SELECT", "WITH", "PRAGMA", "EXPLAIN"]);
+
+        if last_is_select {
+            let rows = sqlx::query(sqlx::AssertSqlSafe(last))
+                .fetch_all(&self.pool)
+                .await?;
             let elapsed = start.elapsed().as_millis() as u64;
 
             let columns: Vec<String> = if rows.is_empty() {
@@ -428,13 +569,15 @@ impl DatabaseDriver for SqliteDriver {
                 is_select: true,
             })
         } else {
-            let result = sqlx::query(sql).execute(&self.pool).await?;
+            let result = sqlx::query(sqlx::AssertSqlSafe(last))
+                .execute(&self.pool)
+                .await?;
             let elapsed = start.elapsed().as_millis() as u64;
 
             Ok(QueryResult {
                 columns: vec![],
                 rows: vec![],
-                rows_affected: result.rows_affected(),
+                rows_affected: total_affected.saturating_add(result.rows_affected()),
                 execution_time_ms: elapsed,
                 is_select: false,
             })
@@ -444,7 +587,9 @@ impl DatabaseDriver for SqliteDriver {
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
         let start = Instant::now();
         let explain_sql = format!("EXPLAIN QUERY PLAN {}", sql);
-        let rows = sqlx::query(&explain_sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*explain_sql))
+            .fetch_all(&self.pool)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let mut raw_lines = Vec::new();
@@ -501,7 +646,15 @@ impl DatabaseDriver for SqliteDriver {
             }));
         }
         use sqlx::Executor;
-        match self.pool.prepare(sql).await {
+        match self
+            .pool
+            .prepare(
+                <sqlx::AssertSqlSafe<&str> as sqlx::SqlSafeStr>::into_sql_str(sqlx::AssertSqlSafe(
+                    sql,
+                )),
+            )
+            .await
+        {
             Ok(_) => Ok(None),
             Err(e) => {
                 let message = if let Some(db_err) = e.as_database_error() {
@@ -580,7 +733,9 @@ impl DatabaseDriver for SqliteDriver {
             quote_ident(table_name),
             col_defs.join(",\n    ")
         );
-        sqlx::query(&sql).execute(&self.pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -650,7 +805,9 @@ impl DatabaseDriver for SqliteDriver {
         table: &str,
     ) -> Result<TableStats> {
         let count_sql = format!("SELECT COUNT(*) as cnt FROM {}", quote_ident(table));
-        let count_row = sqlx::query(&count_sql).fetch_one(&self.pool).await?;
+        let count_row = sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
+            .fetch_one(&self.pool)
+            .await?;
         let row_count: i64 = count_row.get("cnt");
 
         let size_row = sqlx::query(
@@ -751,7 +908,9 @@ impl DatabaseDriver for SqliteDriver {
                     )
                 }
             };
-            sqlx::query(&sql).execute(&self.pool).await?;
+            sqlx::query(sqlx::AssertSqlSafe(&*sql))
+                .execute(&self.pool)
+                .await?;
         }
 
         Ok(())
@@ -788,7 +947,9 @@ impl DatabaseDriver for SqliteDriver {
                 "INSERT INTO {} ({}) VALUES {}",
                 table_ref, col_str, values_str
             );
-            let result = sqlx::query(&sql).execute(&mut *tx).await?;
+            let result = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+                .execute(&mut *tx)
+                .await?;
             total_inserted += result.rows_affected();
         }
 
@@ -808,13 +969,17 @@ impl DatabaseDriver for SqliteDriver {
             _ => "TABLE",
         };
         let sql = format!("DROP {} IF EXISTS {}", kind, quote_ident(object_name));
-        sqlx::query(&sql).execute(&self.pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     async fn truncate_table(&self, _database: &str, _schema: &str, table_name: &str) -> Result<()> {
         let sql = format!("DELETE FROM {}", quote_ident(table_name));
-        sqlx::query(&sql).execute(&self.pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -851,6 +1016,7 @@ impl DatabaseDriver for SqliteDriver {
     async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
         Ok(QueryStatsResponse {
             available: false,
+            kind: QueryStatsKind::EngineUnsupported,
             message: Some("Query statistics are not supported for SQLite.".to_string()),
             entries: vec![],
         })
@@ -883,7 +1049,9 @@ impl DatabaseDriver for SqliteDriver {
                 set_clause,
                 where_clause.join(" AND ")
             );
-            sqlx::query(&sql).execute(&mut *tx).await?;
+            sqlx::query(sqlx::AssertSqlSafe(&*sql))
+                .execute(&mut *tx)
+                .await?;
         }
 
         for insert in &changes.inserts {
@@ -899,7 +1067,9 @@ impl DatabaseDriver for SqliteDriver {
                 cols.join(", "),
                 vals.join(", ")
             );
-            sqlx::query(&sql).execute(&mut *tx).await?;
+            sqlx::query(sqlx::AssertSqlSafe(&*sql))
+                .execute(&mut *tx)
+                .await?;
         }
 
         for delete in &changes.deletes {
@@ -916,7 +1086,9 @@ impl DatabaseDriver for SqliteDriver {
                 quote_ident(&changes.table),
                 where_clause.join(" AND ")
             );
-            sqlx::query(&sql).execute(&mut *tx).await?;
+            sqlx::query(sqlx::AssertSqlSafe(&*sql))
+                .execute(&mut *tx)
+                .await?;
         }
 
         tx.commit().await?;
@@ -932,6 +1104,9 @@ mod tests {
     fn filter_safe_empty() {
         assert!(!filter_is_unsafe(""));
     }
+
+    // SQL statement splitter tests moved to `util::sql::tests`
+    // since the function is now shared across drivers.
 
     #[test]
     fn filter_safe_expression() {
@@ -1184,5 +1359,223 @@ mod tests {
         assert!(sql_default_is_unsafe("'x'; DROP TABLE users"));
         assert!(sql_default_is_unsafe("'x' -- comment"));
         assert!(sql_default_is_unsafe("'x' /* comment */"));
+    }
+
+    // -----------------------------------------------------------------------
+    // SqliteDriver::connect — regression tests for issue #106
+    // (tilde paths and other path-form handling).
+    // -----------------------------------------------------------------------
+
+    fn sqlite_config(database: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: "test".into(),
+            db_type: DbType::Sqlite,
+            database: database.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Tests that mutate `$HOME` must run one at a time. cargo runs
+    /// tests in parallel by default and `dirs::home_dir()` reads the
+    /// env var lazily, so without serialisation a parallel test can
+    /// flip `$HOME` mid-`connect()` and break tilde resolution.
+    #[cfg(unix)]
+    fn home_env_lock() -> &'static tokio::sync::Mutex<()> {
+        use std::sync::OnceLock;
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// Run `body` with `$HOME` retargeted to `home_dir`, restoring the
+    /// previous value before returning. The lock guarantees no
+    /// sibling test can race on `$HOME` while we're inside.
+    #[cfg(unix)]
+    async fn with_home<F, Fut, T>(home_dir: &std::path::Path, body: F) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let _guard = home_env_lock().lock().await;
+        let original = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", home_dir);
+        }
+        let result = body().await;
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        result
+    }
+
+    /// Helper: open + run `SELECT 1` so we can assert connect+query
+    /// succeed without needing `Debug` on `SqliteDriver`.
+    async fn connect_and_select_one(cfg: &ConnectionConfig) -> Result<i64> {
+        let driver = SqliteDriver::connect(cfg).await?;
+        let row: (i64,) = sqlx::query_as("SELECT 1").fetch_one(&driver.pool).await?;
+        Ok(row.0)
+    }
+
+    /// `connect` opens an existing file when given an absolute path.
+    /// Establishes the baseline before exercising the path-rewriting
+    /// branches.
+    #[tokio::test]
+    async fn connect_opens_existing_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baseline.db");
+        // Touch the file so sqlx (with default `create_if_missing=false`)
+        // will find it.
+        std::fs::File::create(&path).unwrap();
+
+        let cfg = sqlite_config(path.to_str().unwrap());
+        let result = connect_and_select_one(&cfg).await;
+        match result {
+            Ok(v) => assert_eq!(v, 1),
+            Err(e) => panic!("should open existing absolute-path SQLite file: {e:#}"),
+        }
+    }
+
+    /// `connect` expands a leading `~/...` against `$HOME`. We retarget
+    /// `$HOME` to a tempdir so the test never touches the real home,
+    /// then assert that the file opens via the tilde path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_expands_tilde_home_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("tilde-home.db");
+        std::fs::File::create(&db_path).unwrap();
+
+        let result = with_home(dir.path(), || async {
+            let cfg = sqlite_config("~/tilde-home.db");
+            connect_and_select_one(&cfg).await
+        })
+        .await;
+
+        match result {
+            Ok(v) => assert_eq!(v, 1),
+            Err(e) => panic!("tilde path should expand and open: {e:#}"),
+        }
+    }
+
+    /// A non-existent path surfaces an error that mentions both the
+    /// resolved filesystem path and the original user input, so the
+    /// dialog can show a useful diagnostic.
+    #[tokio::test]
+    async fn connect_missing_file_error_mentions_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.db");
+
+        let cfg = sqlite_config(missing.to_str().unwrap());
+        let err = match SqliteDriver::connect(&cfg).await {
+            Ok(_) => panic!("missing file should fail to open"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to open SQLite database"),
+            "expected wrapped error, got: {msg}"
+        );
+        assert!(
+            msg.contains(missing.to_str().unwrap()),
+            "expected resolved path in error, got: {msg}"
+        );
+    }
+
+    /// When the input differs from the resolved path (e.g. a tilde was
+    /// expanded), the error must show *both* so the user can tell
+    /// whether shell-style expansion ran as expected.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_missing_tilde_path_error_shows_both_forms() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = with_home(dir.path(), || async {
+            let cfg = sqlite_config("~/never-created.db");
+            SqliteDriver::connect(&cfg).await
+        })
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("missing tilde path should fail"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("~/never-created.db"),
+            "error should echo original input, got: {msg}"
+        );
+        assert!(
+            msg.contains("never-created.db") && msg.contains("resolved from"),
+            "error should mention resolved path, got: {msg}"
+        );
+    }
+
+    /// `sqlite::memory:` URLs must continue to open in-memory databases
+    /// and not be mistaken for a non-existent file path.
+    #[tokio::test]
+    async fn connect_memory_url_opens_in_memory_db() {
+        let cfg = sqlite_config("sqlite::memory:");
+        let driver = match SqliteDriver::connect(&cfg).await {
+            Ok(d) => d,
+            Err(e) => panic!("in-memory SQLite URL should open: {e:#}"),
+        };
+        sqlx::query("CREATE TABLE t (x INTEGER)")
+            .execute(&driver.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t VALUES (1), (2)")
+            .execute(&driver.pool)
+            .await
+            .unwrap();
+        let row: (i64,) = sqlx::query_as("SELECT count(*) FROM t")
+            .fetch_one(&driver.pool)
+            .await
+            .unwrap();
+        assert_eq!(row.0, 2);
+    }
+
+    /// Query-string params on `sqlite:` URLs (e.g. `?mode=rwc`) must
+    /// reach sqlx untouched so users can opt into create-if-missing
+    /// or read-only behaviour.
+    #[tokio::test]
+    async fn connect_url_with_query_string_creates_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rwc.db");
+        // Note: file does NOT exist beforehand.
+        let url = format!("sqlite:{}?mode=rwc", path.to_string_lossy());
+
+        let cfg = sqlite_config(&url);
+        match connect_and_select_one(&cfg).await {
+            Ok(v) => assert_eq!(v, 1),
+            Err(e) => panic!("?mode=rwc should create the file: {e:#}"),
+        }
+        assert!(
+            path.exists(),
+            "?mode=rwc should have created the database file"
+        );
+    }
+
+    /// Tilde inside the path component of an `sqlite:` URL is also
+    /// expanded — we don't want the URL form to be a footgun where the
+    /// path form works but `sqlite:~/foo` doesn't.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_url_with_tilde_in_path_is_expanded() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("url-tilde.db");
+        std::fs::File::create(&db_path).unwrap();
+
+        let result = with_home(dir.path(), || async {
+            let cfg = sqlite_config("sqlite:~/url-tilde.db");
+            connect_and_select_one(&cfg).await
+        })
+        .await;
+
+        match result {
+            Ok(v) => assert_eq!(v, 1),
+            Err(e) => panic!("tilde inside sqlite: URL should expand and open: {e:#}"),
+        }
     }
 }

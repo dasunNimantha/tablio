@@ -17,13 +17,45 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
-[dependencies.tablio_lib]
+# The parent crate publishes its package as `tablio` and its library as
+# `tablio_lib` (see `[package].name` and `[lib].name` in ../Cargo.toml).
+# Cargo path deps resolve by *package* name, so we depend on `tablio`
+# here; the targets still `use tablio_lib::…` because that is the lib's
+# public crate name.
+#
+# This fuzz crate is intentionally outside the parent workspace (per
+# `[workspace]` below), which means it has its own dependency
+# resolution. To keep the resolved tauri / tauri-build / tauri-codegen
+# / tauri-runtime versions identical to what the parent compiles
+# against (otherwise the codegen + runtime drift across minor
+# releases — e.g. `ResolvedCommand` adding a `referenced_by` field —
+# breaks `tauri::generate_handler!` expansion), the committed
+# `Cargo.lock` next to this manifest pins the same versions the parent
+# uses. CI invokes `cargo fuzz run` which respects the lockfile;
+# regenerate via `cargo +nightly update` only after verifying the new
+# tauri family compiles in both crates.
+[dependencies.tablio]
 path = ".."
 
 # Each fuzz target is its own bin so libfuzzer can link them with a custom
 # `_LLVMFuzzerTestOneInput` entry point. Keep the per-target sections
 # minimal — adding `test = false` and `doc = false` shaves a small but
 # noticeable chunk off cold-build time on CI.
+
+# cargo-fuzz appends `-Cdebug-assertions` to RUSTFLAGS, which only affects
+# *target* crates (the path that consumes `tauri::generate_context!()`).
+# Build-script deps and proc-macros are compiled via `build-override`,
+# which defaults to `debug-assertions = false`. `tauri-utils` gates the
+# `ResolvedCommand::referenced_by` field *and* the `ToTokens` impl that
+# materialises that field on `#[cfg(debug_assertions)]`. When the two
+# compilation contexts disagree, `tauri-build`'s codegen emits a struct
+# literal that omits `referenced_by` while the target-side struct
+# definition still requires it, producing
+#   error[E0063]: missing field `referenced_by` in initializer of `ResolvedCommand`
+# during fuzz builds. Forcing debug-assertions on for build-overrides
+# realigns the two contexts so the generated tokens match the struct shape.
+[profile.release.build-override]
+debug-assertions = true
 
 [[bin]]
 name = "ssh_config"

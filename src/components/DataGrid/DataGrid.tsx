@@ -12,6 +12,7 @@ import {
   ForeignKeyInfo,
   ExplainResult,
 } from "../../lib/tauri";
+import { readZoomFactor } from "../../lib/zoom";
 import { FilterBar } from "./FilterBar";
 import { RowDetailView } from "./RowDetailView";
 import { ExplainView } from "../QueryConsole/ExplainView";
@@ -42,10 +43,9 @@ import {
   ExternalLink,
   Shuffle,
   Trash2,
-  Terminal,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { AllCommunityModule, themeQuartz, type ColDef, type CellClickedEvent, type CellContextMenuEvent, type GridApi, type GridReadyEvent, type IHeaderParams, type SelectionChangedEvent } from "ag-grid-community";
+import { AllCommunityModule, themeQuartz, type ColDef, type CellClickedEvent, type CellContextMenuEvent, type CellKeyDownEvent, type GridApi, type GridReadyEvent, type IHeaderParams, type SelectionChangedEvent } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import "./DataGrid.css";
 import "./ag-grid-theme.css";
@@ -627,6 +627,54 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     setTimeout(() => gridApiRef.current?.ensureIndexVisible(0, "top"), 0);
   };
 
+  // Spreadsheet-style "Down on last row → add new pending row"
+  // (feature #64). The newly-added row goes into the pinned-top
+  // area, same as the toolbar "Add Row" button, so users can save
+  // a batch of inserts in one transaction. We move focus straight
+  // to the first editable cell of the new row so the user can
+  // type immediately without reaching for the mouse.
+  const handleCellKeyDown = useCallback((event: CellKeyDownEvent) => {
+    const ev = event.event as KeyboardEvent | null;
+    if (!ev || ev.key !== "ArrowDown") return;
+    // Modified Down is reserved for selection extension / page nav;
+    // don't hijack those.
+    if (ev.shiftKey || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+
+    // Only react when focus is on an existing data row at the very
+    // bottom of the main grid. The pinned-top area holds in-progress
+    // inserts; chaining Down there would create rows indefinitely.
+    if (event.rowPinned) return;
+    const lastIdx = agRowData.length - 1;
+    if (lastIdx < 0 || event.rowIndex !== lastIdx) return;
+
+    // ag-grid forwards keydown to the cell editor while a cell is
+    // being edited; we don't want to mutate the row set out from
+    // under the editor.
+    const api = event.api;
+    if (api.getEditingCells().length > 0) return;
+
+    if (!data) return;
+    // First non-auto-generated column is the first cell the user
+    // can actually type into. If every column is auto-generated
+    // (a degenerate case but possible for tables with only a
+    // serial PK), there's nothing to focus, so we don't trigger
+    // the shortcut.
+    const firstEditable = data.columns.find((c) => !c.is_auto_generated);
+    if (!firstEditable) return;
+
+    ev.preventDefault();
+
+    // The new pinned row's index = current count of pinned rows
+    // (we're appending). We capture this *before* `handleAddRow`
+    // mutates state so we can target it from a setTimeout that
+    // runs after the next render pass.
+    const newPinnedIdx = pinnedTopRows.length;
+    handleAddRow();
+    setTimeout(() => {
+      gridApiRef.current?.setFocusedCell(newPinnedIdx, firstEditable.name, "top");
+    }, 0);
+  }, [agRowData.length, pinnedTopRows.length, data, handleAddRow]);
+
   const handleDeleteRow = (rowIndex: number) => {
     const pkKey = getPkKey(rowIndex);
     setChanges((prev) => {
@@ -742,13 +790,14 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     }
   };
 
-  const handleExport = async (format: "csv" | "json" | "sql") => {
+  const handleExport = async (format: "csv" | "json" | "sql" | "xlsx") => {
     try {
       const ext = format === "sql" ? "sql" : format;
+      const label = format === "xlsx" ? "Excel" : format.toUpperCase();
       const filePath = await save({
         defaultPath: `${table}.${ext}`,
         filters: [{
-          name: format.toUpperCase(),
+          name: label,
           extensions: [ext],
         }],
       });
@@ -762,7 +811,7 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
         format,
         filter: activeFilter,
       }, filePath);
-      addToast(`Exported ${table} as ${format.toUpperCase()}`);
+      addToast(`Exported ${table} as ${label}`);
     } catch (e) {
       addToast(String(e), "error");
     }
@@ -799,7 +848,7 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     const e = event.event as MouseEvent;
     if (!e) return;
     e.preventDefault();
-    const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+    const z = readZoomFactor();
     setRowContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx });
   }, []);
 
@@ -975,20 +1024,9 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     addToast(`Opened ${fk.referenced_table} — filter by ${fk.referenced_column} = ${JSON.stringify(cellValue)}`);
   }, [connectionId, database, schema, connections, openTab, addToast]);
 
-  const handleOpenQuery = useCallback(() => {
-    const conn = connections.find((c) => c.id === connectionId);
-    const tabId = `query:${connectionId}:${database}:${table}:${Date.now()}`;
-    const tab: TabInfo = {
-      id: tabId,
-      type: "query",
-      title: `Query - ${table}`,
-      connectionId,
-      connectionColor: conn?.color || "#6398ff",
-      database,
-      schema: "",
-    };
-    openTab(tab);
-  }, [connectionId, database, table, connections, openTab]);
+  // `handleOpenQuery` used to live here; it now lives on TableView's
+  // header so the "Query" button is reachable from both Data and Schema
+  // modes (the DataGrid toolbar isn't rendered in Schema mode).
 
   const handleExplainResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1103,13 +1141,6 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
               </div>
             )}
           </div>
-          <button
-            className="btn-ghost"
-            onClick={handleOpenQuery}
-            title="Open SQL query console for this database"
-          >
-            <Terminal size={14} /> Query
-          </button>
           {data && (
             <ColumnOrganizer
               columns={data.columns}
@@ -1256,6 +1287,7 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
           onGridReady={onGridReady}
           onCellClicked={onCellClicked}
           onCellContextMenu={onCellContextMenu}
+          onCellKeyDown={handleCellKeyDown}
           onSortChanged={onSortChanged}
           onSelectionChanged={onSelectionChanged}
           rowSelection={{ mode: "multiRow", checkboxes: false, headerCheckbox: false, enableClickSelection: false }}
@@ -1347,7 +1379,7 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
           style={{ left: rowContextMenu.x, top: rowContextMenu.y }}
           ref={(el) => {
             if (!el) return;
-            const z = parseFloat(document.documentElement.style.zoom || "100") / 100;
+            const z = readZoomFactor();
             const cssVh = window.innerHeight / z;
             const cssVw = window.innerWidth / z;
             if (rowContextMenu.y + el.offsetHeight > cssVh) {

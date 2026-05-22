@@ -1,6 +1,6 @@
 {
   "productName": "Tablio",
-  "version": "0.3.2",
+  "version": "0.4.8",
   "identifier": "com.tablio.app",
   "build": {
     "frontendDist": "../dist",
@@ -16,7 +16,8 @@
         "height": 900,
         "resizable": true,
         "fullscreen": false,
-        "decorations": false
+        "decorations": false,
+        "backgroundColor": "#1e1e22"
       }
     ],
     "security": {

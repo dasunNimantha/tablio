@@ -168,6 +168,27 @@ body,
   -webkit-user-select: none;
 }
 
+/* Chromium / WebView2 (Windows) doesn't grow body's own layout box
+   when `zoom` is applied to it — only its descendants get scaled,
+   `vh` units stay anchored to the unscaled viewport, and `100%` on
+   body keeps resolving against html's CSS dimensions. So `zoom < 100%`
+   leaves an empty band along the bottom and right (body painted
+   smaller than viewport).
+   At `zoom < 100%` we expand body by `1/zoom` so the painted box
+   covers the viewport. At `zoom >= 100%` we *don't* shrink body
+   (which would re-introduce the same band on the other side); we
+   pin it to 100% and let zoomed-up descendants overflow body's box,
+   which is clipped by `body { overflow: hidden }`. `max()` covers
+   both regimes in one rule.
+   WebKit2GTK (Linux) auto-compensates when zoom is on <html>, so
+   we leave it alone there — applying these rules to WebKit would
+   actually break the layout. App.tsx adds `.zoom-compensated` to
+   body on Chromium only. */
+body.zoom-compensated {
+  width: max(100%, calc(100% / var(--app-zoom, 1)));
+  height: max(100%, calc(100% / var(--app-zoom, 1)));
+}
+
 ::-webkit-scrollbar {
   width: 7px;
   height: 7px;
@@ -328,8 +349,16 @@ button {
 .app-root {
   display: flex;
   flex-direction: column;
+  /* Default to `100vh` for WebKit2GTK, where zoom on <html> auto-
+     compensates so `100vh` still resolves to the full window. The
+     Chromium override below switches to `100%` so `.app-root` inherits
+     from the compensated body rather than the unscaled viewport. */
   height: 100vh;
   overflow: hidden;
+}
+
+body.zoom-compensated .app-root {
+  height: 100%;
 }
 
 .app-layout {
@@ -392,6 +421,18 @@ button {
 .sidebar-content {
   flex: 1;
   overflow-y: auto;
+  /* Reserve space at the bottom equal to the status bar so the last
+     row in the tree clears the bar without needing the user to
+     overscroll. Using --statusbar-height keeps the two in lockstep. */
+  padding-bottom: var(--statusbar-height);
+}
+
+/* The last expanded connection's bottom border was rendering at the
+   very edge of the scroll viewport, which made the rule look like an
+   accidental hairline above the status bar. Drop it on the last
+   child so the scroll area ends cleanly. */
+.sidebar-content > .tree-root:last-child {
+  border-bottom: none;
 }
 
 .empty-state {
@@ -521,13 +562,21 @@ select option {
   animation: spin 1s linear infinite;
 }
 
-/* Re-enable text selection for content areas where copy is useful */
+/* Re-enable text selection for content areas where copy is useful.
+ *
+ * The app root is set to `user-select: none` above to avoid the
+ * shimmer-on-drag look in window chrome, but that cascade also
+ * silently blocked users from copying error messages — exactly the
+ * complaint in #126. Add every error / warning / banner / status
+ * surface to this whitelist so a frustrated user can always
+ * highlight + Ctrl-C the message they're stuck on.
+ *
+ * If you add a new error-bearing element anywhere in the app, add
+ * its class here too. */
 input,
 textarea,
 .cell-value,
 .cell-input,
-.query-error,
-.grid-error-banner,
 .dr-log-line,
 .json-tree,
 .info-table td,
@@ -535,7 +584,45 @@ textarea,
 .query-history-sql,
 .confirm-dialog p,
 .empty-state p,
-.cm-editor {
+.cm-editor,
+/* Error / warning / banner / status surfaces (issue #126) */
+.activity-error,
+.connection-form-error,
+.connection-nav-item__error,
+.ddl-error,
+.dr-banner,
+.dr-banner-sub,
+.ec-error,
+.erd-error,
+.field-error,
+.grid-error,
+.grid-error-banner,
+.json-inline-error,
+.json-inline-input-error,
+.known-hosts-dialog__error,
+.pv-error,
+.pv-warning,
+.pv-warnings,
+.qs-capture-banner,
+.qs-capture-banner-text,
+.qs-enable-error,
+.qs-error,
+.qs-samples-error,
+.qs-samples-unavailable,
+.qs-samples-warning,
+.qs-unavailable,
+.query-error,
+.role-error-banner,
+.role-form-error,
+.saved-queries-error,
+.ssh-tunnel-warning,
+.table-stats-error,
+.test-result.error,
+.text-error,
+.toast-message,
+.tree-warning,
+.tv-banner,
+.tv-banner-error {
   user-select: text;
   -webkit-user-select: text;
 }

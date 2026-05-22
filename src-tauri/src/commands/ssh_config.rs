@@ -17,6 +17,7 @@
 //! one-shot dialog assist. The frontend surfaces a clear "advanced
 //! directives ignored" hint when those are present.
 
+use crate::util::path::expand_tilde;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -43,19 +44,6 @@ pub struct ResolvedSshHost {
 
 fn config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".ssh").join("config"))
-}
-
-fn expand_tilde(path: &str) -> String {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(stripped).to_string_lossy().into_owned();
-        }
-    } else if path == "~" {
-        if let Some(home) = dirs::home_dir() {
-            return home.to_string_lossy().into_owned();
-        }
-    }
-    path.to_string()
 }
 
 /// Glob-style match of `pat` against `name` for the OpenSSH-style `*`

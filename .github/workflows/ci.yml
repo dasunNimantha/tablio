@@ -9,6 +9,14 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Default to the minimum scope every job actually needs (read source +
+# upload artifacts). No CI job pushes commits, creates releases or
+# comments on PRs, so we don't need to grant any write scope. Closes
+# the `actions/missing-workflow-permissions` code-scanning alerts and
+# limits blast radius if a step gets compromised.
+permissions:
+  contents: read
+
 jobs:
   changes:
     name: Detect Changes
@@ -52,8 +60,40 @@ jobs:
       - name: TypeScript type check
         run: npx tsc --noEmit
 
-      - name: Run tests
-        run: npm run test
+      # Run vitest with v8 coverage. The lcov + json-summary reporters power
+      # the artifact upload below and the PR job-summary block; the html
+      # reporter gives reviewers a browsable report when they download the
+      # artifact locally.
+      - name: Run tests with coverage
+        run: npm run test -- --coverage
+
+      - name: Frontend coverage summary
+        if: always()
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            {
+              echo "## Frontend coverage (vitest / v8)"
+              echo
+              echo "| Metric | Covered | Total | Pct |"
+              echo "| --- | --- | --- | --- |"
+              node -e '
+                const s = require("./coverage/coverage-summary.json").total;
+                for (const k of ["lines","statements","functions","branches"]) {
+                  const m = s[k];
+                  console.log(`| ${k} | ${m.covered} | ${m.total} | ${m.pct.toFixed(2)}% |`);
+                }
+              '
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload frontend coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-frontend
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: ignore
 
   fmt-and-clippy:
     name: Format & Clippy
@@ -81,6 +121,106 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+  # Backend coverage aggregator. Each per-engine `test-*` job runs its
+  # integration suite under `cargo-llvm-cov` and uploads a per-job
+  # `lcov-<engine>[-version].info` artifact. This job collects every
+  # one of those, merges them into a single `lcov.info` with the `lcov`
+  # CLI, and writes a summary table to the PR's job summary.
+  #
+  # Per-line hit counts get summed when the same line is covered by
+  # multiple engines (e.g. the `pg_common` module is exercised by both
+  # `test-postgres` and `test-cockroachdb`). For *line* coverage that's
+  # exactly what we want — once-covered stays once-covered, and the
+  # totals reflect the union of every engine's exercised paths.
+  #
+  # Coverage is a signal, not a gate — no thresholds today.
+  coverage-backend:
+    name: Backend Coverage
+    needs:
+      - changes
+      - test-postgres
+      - test-mysql
+      - test-mariadb
+      - test-cockroachdb
+      - test-tidb
+      - test-sqlite
+      - test-mssql
+      - test-cassandra
+      - test-scylladb
+      - test-ssh-tunnel
+    # `always()` lets the aggregator still run and publish a partial
+    # report even when one engine job fails or is cancelled. The
+    # `ci-required` aggregator job is what gates the PR, not this one.
+    if: ${{ always() && needs.changes.outputs.backend == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install lcov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lcov
+
+      - name: Download all per-engine coverage artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: lcov-*
+          path: lcov-parts
+          merge-multiple: true
+
+      - name: Merge lcov tracefiles
+        id: merge
+        run: |
+          shopt -s nullglob
+          parts=(lcov-parts/lcov-*.info)
+          if [ ${#parts[@]} -eq 0 ]; then
+            echo "::warning::No per-engine lcov artifacts were found"
+            echo "found=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Found ${#parts[@]} per-engine lcov files:"
+          printf '  %s\n' "${parts[@]}"
+
+          # `lcov --add-tracefile a --add-tracefile b ...` accumulates
+          # hits across files. We pass every part exactly once so the
+          # merged totals reflect the union of engines' coverage.
+          args=()
+          for p in "${parts[@]}"; do
+            args+=(--add-tracefile "$p")
+          done
+          # `--ignore-errors inconsistent` tolerates the small line-
+          # number drift that happens between engines if one build's
+          # source map disagrees with another's (e.g. a comment-only
+          # change between cache invalidations). Without it lcov
+          # bails on the first mismatched file.
+          lcov --ignore-errors inconsistent,empty "${args[@]}" --output-file lcov.info
+          echo "found=${#parts[@]}" >> "$GITHUB_OUTPUT"
+
+      - name: Coverage summary
+        if: ${{ always() && steps.merge.outputs.found != '0' }}
+        run: |
+          # lcov's `--summary` writes overall totals plus per-line /
+          # per-function / per-branch percentages to stderr; redirect
+          # to stdout so it lands in the step summary.
+          {
+            echo "## Backend coverage (cargo-llvm-cov, all engines)"
+            echo
+            echo "Merged from ${{ steps.merge.outputs.found }} per-engine lcov files."
+            echo
+            echo '```'
+            lcov --summary lcov.info 2>&1 || echo "(no coverage data collected)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload merged backend coverage
+        if: ${{ always() && steps.merge.outputs.found != '0' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-backend
+          path: lcov.info
+          retention-days: 14
+          if-no-files-found: ignore
 
   test-postgres:
     name: Postgres ${{ matrix.pg_version }}
@@ -114,17 +254,38 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev patchelf
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Run unit + Postgres integration tests
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run unit + Postgres integration tests with coverage
         env:
           TEST_POSTGRES_URL: "postgres://test:test@localhost:5432/testdb"
         run: |
-          cargo test --manifest-path src-tauri/Cargo.toml --lib
-          cargo test --manifest-path src-tauri/Cargo.toml --test postgres_integration
+          # The Postgres job is also where the lib unit tests run
+          # under coverage. `--no-report` accumulates profraw data;
+          # the final `report` invocation emits a single combined
+          # lcov for this matrix entry.
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --lib --no-report
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --test postgres_integration --no-report
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml report \
+            --lcov --output-path "${{ github.workspace }}/lcov-postgres-${{ matrix.pg_version }}.info"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-postgres-${{ matrix.pg_version }}
+          path: lcov-postgres-${{ matrix.pg_version }}.info
+          retention-days: 1
+          if-no-files-found: ignore
 
   test-mysql:
     name: MySQL ${{ matrix.mysql_version }}
@@ -159,15 +320,32 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev patchelf
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Run MySQL integration tests
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run MySQL integration tests with coverage
         env:
           TEST_MYSQL_URL: "mysql://root:test@localhost:3306/testdb"
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test mysql_integration
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --test mysql_integration \
+            --lcov --output-path "${{ github.workspace }}/lcov-mysql-${{ matrix.mysql_version }}.info"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-mysql-${{ matrix.mysql_version }}
+          path: lcov-mysql-${{ matrix.mysql_version }}.info
+          retention-days: 1
+          if-no-files-found: ignore
 
   test-mariadb:
     name: MariaDB ${{ matrix.mariadb_version }}
@@ -202,15 +380,32 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev patchelf
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Run MariaDB integration tests
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run MariaDB integration tests with coverage
         env:
           TEST_MARIADB_URL: "mysql://root:test@localhost:3306/testdb"
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test mariadb_integration
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --test mariadb_integration \
+            --lcov --output-path "${{ github.workspace }}/lcov-mariadb-${{ matrix.mariadb_version }}.info"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-mariadb-${{ matrix.mariadb_version }}
+          path: lcov-mariadb-${{ matrix.mariadb_version }}.info
+          retention-days: 1
+          if-no-files-found: ignore
 
   test-cockroachdb:
     name: CockroachDB
@@ -237,15 +432,32 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev patchelf
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Run CockroachDB integration tests
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run CockroachDB integration tests with coverage
         env:
           TEST_COCKROACHDB_URL: "postgres://root@localhost:26257/testdb?sslmode=disable"
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test cockroachdb_integration
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --test cockroachdb_integration \
+            --lcov --output-path "${{ github.workspace }}/lcov-cockroachdb.info"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-cockroachdb
+          path: lcov-cockroachdb.info
+          retention-days: 1
+          if-no-files-found: ignore
 
   test-tidb:
     name: TiDB
@@ -272,15 +484,115 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev patchelf
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Run TiDB integration tests
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run TiDB integration tests with coverage
         env:
           TEST_TIDB_URL: "mysql://root@localhost:4000/testdb"
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test tidb_integration
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --test tidb_integration \
+            --lcov --output-path "${{ github.workspace }}/lcov-tidb.info"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-tidb
+          path: lcov-tidb.info
+          retention-days: 1
+          if-no-files-found: ignore
+
+  # SQL Server is wired into PR CI (not just release.yml) because the new
+  # get_query_stats DMV-backed implementation needs continuous coverage.
+  # Single-version (2022) here to keep PR latency in check; the 2019/2022
+  # matrix still runs on release.yml.
+  test-mssql:
+    name: SQL Server
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Str0ng_Passw0rd!"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P 'Str0ng_Passw0rd!' -C -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Str0ng_Passw0rd!' -Q 'SELECT 1'"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 30s
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create test database
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec $(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest) /opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P 'Str0ng_Passw0rd!' -C -Q "SELECT 1" 2>/dev/null || \
+               docker exec $(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest) /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Str0ng_Passw0rd!' -Q "SELECT 1" 2>/dev/null; then
+              echo "SQL Server is ready"
+              break
+            fi
+            echo "Waiting for SQL Server... (attempt $i/30)"
+            sleep 2
+          done
+          CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
+          docker exec "$CONTAINER_ID" bash -c "/opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P 'Str0ng_Passw0rd!' -C -Q 'CREATE DATABASE testdb' 2>/dev/null || /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Str0ng_Passw0rd!' -Q 'CREATE DATABASE testdb'"
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run MSSQL integration tests with coverage
+        env:
+          TEST_MSSQL_URL: "mssql://SA:Str0ng_Passw0rd!@localhost:1433/testdb"
+        # `--test-threads=1` serialises the integration suite so concurrent
+        # `CREATE TABLE` / `DROP TABLE` calls don't deadlock on SQL
+        # Server's system-catalog locks (error 1205 "Transaction was
+        # deadlocked on lock resources with another process and has
+        # been chosen as the deadlock victim"). The deadlock victim is
+        # a perfectly legitimate transient SQL-Server outcome and the
+        # docs recommend rerunning; serialising the suite makes it
+        # never happen in the first place. Trade-off: ~2 minutes
+        # longer wall-clock time. Same pattern as `test-ssh-tunnel`.
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --test mssql_integration \
+            --lcov --output-path "${{ github.workspace }}/lcov-mssql.info" \
+            -- --test-threads=1
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-mssql
+          path: lcov-mssql.info
+          retention-days: 1
+          if-no-files-found: ignore
 
   test-sqlite:
     name: SQLite
@@ -296,13 +608,30 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev patchelf
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Run SQLite integration tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test sqlite_integration
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run SQLite integration tests with coverage
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --test sqlite_integration \
+            --lcov --output-path "${{ github.workspace }}/lcov-sqlite.info"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-sqlite
+          path: lcov-sqlite.info
+          retention-days: 1
+          if-no-files-found: ignore
 
   # Stand up an OpenSSH bastion in front of a Postgres instance so the
   # russh-based SSH tunnel can be exercised end-to-end. The bastion uses
@@ -404,10 +733,16 @@ jobs:
           pg_dump --version
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Start ssh-agent and load test key
         id: sshagent
@@ -424,7 +759,7 @@ jobs:
           echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
           echo "TEST_SSH_AGENT_AVAILABLE=1" >> "$GITHUB_ENV"
 
-      - name: Run SSH tunnel integration tests
+      - name: Run SSH tunnel integration tests with coverage
         env:
           TEST_SSH_HOST: 127.0.0.1
           TEST_SSH_PORT: "2222"
@@ -442,7 +777,20 @@ jobs:
           TEST_SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
           # `SSH_AUTH_SOCK` and `TEST_SSH_AGENT_AVAILABLE` come in via
           # $GITHUB_ENV from the previous step.
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test ssh_tunnel_integration -- --test-threads=1
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml \
+            --test ssh_tunnel_integration \
+            --lcov --output-path "${{ github.workspace }}/lcov-ssh-tunnel.info" \
+            -- --test-threads=1
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-ssh-tunnel
+          path: lcov-ssh-tunnel.info
+          retention-days: 1
+          if-no-files-found: ignore
 
       - name: Dump bastion logs on failure
         if: failure()
@@ -457,19 +805,80 @@ jobs:
       fail-fast: false
       matrix:
         cassandra_version: ["4.0", "4.1", "5.0"]
-    services:
-      cassandra:
-        image: cassandra:${{ matrix.cassandra_version }}
-        ports:
-          - 9042:9042
-        options: >-
-          --health-cmd "cqlsh -e 'describe cluster'"
-          --health-interval 15s
-          --health-timeout 10s
-          --health-retries 15
-          --health-start-period 90s
+    # NOTE: we deliberately don't use a `services:` block here.
+    # The official Cassandra image flipped materialized views to
+    # *experimental and disabled by default* in 4.0, and there's
+    # no env var or `services:` knob to flip them back on. The
+    # only reliable workaround is to patch `cassandra.yaml`
+    # before the server boots, which requires overriding the
+    # entrypoint — something GHA's `services:` syntax doesn't
+    # expose. So we run Cassandra ourselves via `docker run`.
     steps:
       - uses: actions/checkout@v6
+
+      - name: Start Cassandra (with materialized views enabled)
+        env:
+          # The MV-enablement property was renamed during the 4.x
+          # cycle, and 4.1 is a transition release that knows BOTH
+          # names and refuses to start if both are present and
+          # active in the same `cassandra.yaml`:
+          #
+          #   - Cassandra 4.0:         only `enable_materialized_views`
+          #   - Cassandra 4.1 + 5.0+:  use `materialized_views_enabled`
+          #     (4.1's startup check emits
+          #      "migrate old -> new: [enable_materialized_views ->
+          #      materialized_views_enabled]" if you write the old name)
+          #
+          # 4.0 is the only matrix entry that must use the old name.
+          MV_SETTING: ${{ matrix.cassandra_version == '4.0' && 'enable_materialized_views' || 'materialized_views_enabled' }}
+        run: |
+          docker run -d --name cassandra-ci \
+            -p 9042:9042 \
+            -e CASSANDRA_CLUSTER_NAME=ci-test \
+            -e MV_SETTING="$MV_SETTING" \
+            --entrypoint bash \
+            cassandra:${{ matrix.cassandra_version }} \
+            -c '
+              # Strip the OTHER form first. Cassandra 4.1 ships
+              # both names in its default yaml as a transition aid
+              # and rejects boot if both are active. By deleting
+              # the form we are not writing, we guarantee exactly
+              # one MV setting reaches the server.
+              case "$MV_SETTING" in
+                enable_materialized_views) OTHER=materialized_views_enabled ;;
+                materialized_views_enabled) OTHER=enable_materialized_views ;;
+              esac
+
+              for conf in /etc/cassandra/cassandra.yaml /opt/cassandra/conf/cassandra.yaml; do
+                [ -f "$conf" ] || continue
+                # Delete any line (commented or not) for the
+                # OTHER form so the dual-key check on 4.1 passes.
+                sed -i -E "/^(# *)?${OTHER} *:/d" "$conf"
+                # Set OUR form: uncomment-and-true if commented,
+                # rewrite if already set to false, append if absent.
+                sed -i -E "s/^# *${MV_SETTING} *:.*/${MV_SETTING}: true/" "$conf"
+                sed -i -E "s/^${MV_SETTING} *: *false.*/${MV_SETTING}: true/" "$conf"
+                if ! grep -qE "^${MV_SETTING}: true" "$conf"; then
+                  printf "\n%s: true\n" "$MV_SETTING" >> "$conf"
+                fi
+              done
+              exec docker-entrypoint.sh cassandra -f
+            '
+
+          # Wait for native protocol ready. cqlsh exit code is the
+          # canonical readiness signal — it requires the cluster
+          # to have finished schema bootstrap, not just opened the
+          # socket.
+          for i in $(seq 1 90); do
+            if docker exec cassandra-ci cqlsh -e "DESCRIBE KEYSPACES" >/dev/null 2>&1; then
+              echo "Cassandra ready after ~$((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Cassandra failed to become ready within 180s" >&2
+          docker logs cassandra-ci >&2 || true
+          exit 1
 
       - name: Install Linux dependencies
         run: |
@@ -477,16 +886,37 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev patchelf
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Run Cassandra integration tests
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run Cassandra integration tests with coverage
         env:
           TEST_CASSANDRA_HOST: "127.0.0.1"
           TEST_CASSANDRA_PORT: "9042"
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test cassandra_integration
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --test cassandra_integration \
+            --lcov --output-path "${{ github.workspace }}/lcov-cassandra-${{ matrix.cassandra_version }}.info"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-cassandra-${{ matrix.cassandra_version }}
+          path: lcov-cassandra-${{ matrix.cassandra_version }}.info
+          retention-days: 1
+          if-no-files-found: ignore
+
+      - name: Dump Cassandra logs on failure
+        if: failure()
+        run: docker logs cassandra-ci || true
 
   test-scylladb:
     name: ScyllaDB ${{ matrix.scylla_version }}
@@ -517,16 +947,33 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev patchelf
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Run ScyllaDB integration tests
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run ScyllaDB integration tests with coverage
         env:
           TEST_CASSANDRA_HOST: "127.0.0.1"
           TEST_CASSANDRA_PORT: "9042"
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test cassandra_integration
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --test cassandra_integration \
+            --lcov --output-path "${{ github.workspace }}/lcov-scylladb-${{ matrix.scylla_version }}.info"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-scylladb-${{ matrix.scylla_version }}
+          path: lcov-scylladb-${{ matrix.scylla_version }}.info
+          retention-days: 1
+          if-no-files-found: ignore
 
   test-e2e:
     name: E2E Tests
@@ -608,6 +1055,7 @@ jobs:
       - test-postgres
       - test-mysql
       - test-mariadb
+      - test-mssql
       - test-cockroachdb
       - test-tidb
       - test-sqlite

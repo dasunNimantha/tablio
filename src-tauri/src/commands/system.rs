@@ -1,5 +1,7 @@
 use serde::Serialize;
+#[cfg(target_os = "linux")]
 use std::sync::Mutex;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 #[cfg(not(target_os = "linux"))]
 use sysinfo::ProcessRefreshKind;
@@ -23,13 +25,19 @@ pub struct AppResourceUsage {
 /// fell behind on Tauri IPC, the WebKit IPC socket's Recv-Q backed
 /// up, and the entire UI froze — recoverable only by restarting the
 /// app. See `fix/resource-monitor-fd-leak`.
+///
+/// Only the Linux fast path consumes this state; the macOS/Windows
+/// fallback in [`read_cpu_percent`] uses sysinfo's own back-to-back
+/// snapshot mechanism and doesn't carry any cached jiffy count, so we
+/// gate the cache (and its `Duration`/`Instant`/`Mutex` imports) to
+/// `target_os = "linux"` to keep non-Linux builds warning-free.
+#[cfg(target_os = "linux")]
 struct CpuSample {
     /// Last `(now, /proc/self/stat utime+stime in jiffies)` we observed.
-    /// Linux fast path only; other platforms always set this to `None`
-    /// and rely on the sysinfo fallback inside [`read_cpu_percent`].
     last: Option<(Instant, u64)>,
 }
 
+#[cfg(target_os = "linux")]
 static CPU_SAMPLE: std::sync::LazyLock<Mutex<CpuSample>> =
     std::sync::LazyLock::new(|| Mutex::new(CpuSample { last: None }));
 
@@ -222,13 +230,20 @@ mod tests {
     }
 
     /// Regression for the fd-leak fix: hammering the command in a
-    /// tight loop must not balloon our open-fd count. We allow some
-    /// slack for the test harness itself, but anything beyond a
-    /// handful of additional fds across 50 calls indicates a
-    /// per-call leak has crept back in.
+    /// tight loop must not balloon our open-fd count. The original bug
+    /// leaked one fd per call, so a real regression would push fd
+    /// growth into the dozens (50+ over this loop). We give a generous
+    /// slack here because the runner itself can churn a few fds between
+    /// the two snapshots (tokio worker wakeups, sysinfo's transient
+    /// /proc reads, GitHub-Actions cgroup probes) — anything below
+    /// `MAX_FD_GROWTH` is well below leak territory and within normal
+    /// CI jitter.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn get_app_resource_usage_does_not_leak_fds() {
+        const MAX_FD_GROWTH: usize = 15;
+        const ITERATIONS: usize = 50;
+
         fn open_fd_count() -> usize {
             std::fs::read_dir("/proc/self/fd")
                 .map(|d| d.count())
@@ -240,14 +255,16 @@ mod tests {
             let _ = get_app_resource_usage().await.unwrap();
         }
         let before = open_fd_count();
-        for _ in 0..50 {
+        for _ in 0..ITERATIONS {
             let _ = get_app_resource_usage().await.unwrap();
         }
         let after = open_fd_count();
         let growth = after.saturating_sub(before);
         assert!(
-            growth <= 5,
-            "open-fd count grew by {growth} over 50 calls (before={before}, after={after}); the resource monitor is leaking again"
+            growth <= MAX_FD_GROWTH,
+            "open-fd count grew by {growth} over {ITERATIONS} calls (before={before}, after={after}); \
+             the resource monitor is leaking again. A real per-call leak would show ~{ITERATIONS} growth \
+             — anything in the single digits is CI-side jitter."
         );
     }
 

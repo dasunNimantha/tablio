@@ -215,8 +215,8 @@ async fn mariadb_list_indexes() {
     let idx = driver.list_indexes(&db, &db, &tbl).await.unwrap();
     let names: Vec<&str> = idx.iter().map(|i| i.name.as_str()).collect();
     assert!(names.contains(&"PRIMARY"));
-    assert!(names.iter().any(|n| *n == "idx_name"));
-    assert!(names.iter().any(|n| *n == "uq_id_name"));
+    assert!(names.contains(&"idx_name"));
+    assert!(names.contains(&"uq_id_name"));
 
     let idx_name = idx.iter().find(|i| i.name == "idx_name").unwrap();
     assert!(!idx_name.is_unique);
@@ -1316,13 +1316,6 @@ async fn mariadb_get_server_config() {
 }
 
 #[tokio::test]
-async fn mariadb_get_query_stats() {
-    let (driver, _db) = mariadb_driver!();
-    let qs = driver.get_query_stats().await.unwrap();
-    assert!(!qs.available);
-}
-
-#[tokio::test]
 async fn mariadb_list_roles() {
     let (driver, _db) = mariadb_driver!();
     let roles = driver.list_roles().await.unwrap();
@@ -1454,4 +1447,68 @@ async fn validate_query_empty_string() {
     let (driver, db) = mariadb_driver!();
     let result = driver.validate_query(&db, "").await.unwrap();
     assert!(result.is_some(), "empty SQL should be an error");
+}
+
+#[tokio::test]
+async fn mariadb_get_query_stats_ok_or_perf_schema_message() {
+    let (driver, _db) = mariadb_driver!();
+    let res = driver.get_query_stats().await;
+    assert!(res.is_ok(), "get_query_stats returned: {:?}", res.err());
+    let qs = res.unwrap();
+    if qs.available {
+        assert_eq!(qs.kind, QueryStatsKind::Available);
+        assert!(qs.message.is_none());
+    } else {
+        assert_eq!(qs.kind, QueryStatsKind::MysqlPerfSchemaDisabled);
+        let msg = qs.message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("performance_schema") || msg.contains("Performance Schema"),
+            "unexpected unavailable message: {msg}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-statement execute_query (PR #131 follow-up)
+// ---------------------------------------------------------------------------
+
+// MariaDB shares mysql_common's `my_execute_query`, so the same
+// multi-statement fix benefits MariaDB too. Verify with the same
+// CREATE VIEW + SELECT shape that triggered the original bug.
+#[tokio::test]
+async fn mariadb_multi_statement_create_view_then_select_returns_rows() {
+    let (driver, db) = mariadb_driver!();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let tbl = format!("mar_mst_t_{}", &suffix[..8]);
+    let view = format!("mar_mst_v_{}", &suffix[..8]);
+    let script = format!(
+        "CREATE TABLE `{db}`.`{tbl}` (x INT); \
+         INSERT INTO `{db}`.`{tbl}` VALUES (1), (2), (3); \
+         CREATE VIEW `{db}`.`{view}` AS \
+            SELECT x, CASE WHEN x % 2 = 0 THEN 'even' ELSE 'odd' END AS parity \
+            FROM `{db}`.`{tbl}`; \
+         SELECT * FROM `{db}`.`{view}` ORDER BY x;"
+    );
+    let result = driver
+        .execute_query(&db, &script)
+        .await
+        .expect("multi-statement script failed");
+
+    assert!(result.is_select);
+    assert_eq!(result.rows.len(), 3);
+    let parities: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.get(1).and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(parities, vec!["odd", "even", "odd"]);
+
+    driver
+        .execute_query(&db, &format!("DROP VIEW IF EXISTS `{db}`.`{view}`"))
+        .await
+        .ok();
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS `{db}`.`{tbl}`"))
+        .await
+        .ok();
 }

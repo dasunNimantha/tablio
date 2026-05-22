@@ -136,7 +136,102 @@ async fn cassandra_create_and_list_tables() {
         .unwrap();
 
     let tables = driver.list_tables(&ks, &ks).await.unwrap();
-    assert!(tables.iter().any(|t| t.name == tbl));
+    let found = tables
+        .iter()
+        .find(|t| t.name == tbl)
+        .expect("created table not surfaced by list_tables");
+
+    // Regression for the empty-Tables-folder bug: the Cassandra
+    // driver used to emit `table_type: "TABLE"` while the rest of
+    // Tablio's drivers (and the sidebar's filter) expect
+    // `"BASE TABLE"`. The mismatch caused every keyspace's
+    // "Tables" folder to render as "(empty)" even though the table
+    // was right there in `system_schema.tables`.
+    assert_eq!(
+        found.table_type, "BASE TABLE",
+        "Cassandra driver must emit the same `table_type` the sidebar filters on \
+         (other drivers all return \"BASE TABLE\" for base tables)"
+    );
+    assert_eq!(found.schema, ks);
+
+    teardown_keyspace(&driver, &ks).await;
+}
+
+#[tokio::test]
+async fn cassandra_list_tables_includes_materialized_views() {
+    // Materialized views live in `system_schema.views`, not
+    // `system_schema.tables`. Before this fix they were never
+    // listed at all because `list_tables` only queried the latter.
+    // Now they should surface alongside base tables with
+    // `table_type = "VIEW"`, which routes them into the sidebar's
+    // "Views" group.
+    //
+    // Cassandra 4.0+ flipped MVs to *experimental and disabled by
+    // default*, so `CREATE MATERIALIZED VIEW` is rejected unless
+    // the server was started with `enable_materialized_views: true`
+    // (4.x) or `materialized_views_enabled: true` (5.x). Our CI
+    // workflow patches the right key into `cassandra.yaml` before
+    // launching each service container (see `.github/workflows/ci.yml`
+    // → `test-cassandra`), so this test exercises the full MV path
+    // on every supported version.
+    //
+    // If you see a "Materialized views are disabled" error when
+    // running this test against your own cluster, set the matching
+    // option in your `cassandra.yaml` and restart the server.
+    let driver = create_driver().await;
+    let ks = setup_keyspace(&driver).await;
+    let base_tbl = unique_table("mv_src");
+    let mv_name = unique_table("mv_view");
+
+    driver
+        .execute_query(
+            "",
+            &format!(
+                "CREATE TABLE {ks}.{base_tbl} \
+                 (id uuid PRIMARY KEY, owner text, name text)"
+            ),
+        )
+        .await
+        .unwrap();
+
+    // The view must be filtered on every PK column being non-null.
+    // Cassandra requires `owner` to be a clustering key so the view
+    // has a defined sort order over the source table.
+    driver
+        .execute_query(
+            "",
+            &format!(
+                "CREATE MATERIALIZED VIEW {ks}.{mv_name} AS \
+                 SELECT id, owner, name FROM {ks}.{base_tbl} \
+                 WHERE owner IS NOT NULL AND id IS NOT NULL \
+                 PRIMARY KEY (owner, id)"
+            ),
+        )
+        .await
+        .expect(
+            "CREATE MATERIALIZED VIEW failed — if the server says MVs are \
+             disabled, see .github/workflows/ci.yml → test-cassandra for \
+             how to enable them via cassandra.yaml",
+        );
+
+    let tables = driver.list_tables(&ks, &ks).await.unwrap();
+
+    let base = tables
+        .iter()
+        .find(|t| t.name == base_tbl)
+        .expect("base table missing from list_tables");
+    assert_eq!(base.table_type, "BASE TABLE");
+
+    let mv = tables
+        .iter()
+        .find(|t| t.name == mv_name)
+        .expect("materialized view missing from list_tables");
+    assert_eq!(
+        mv.table_type, "VIEW",
+        "materialized views must use table_type=\"VIEW\" so the sidebar's \
+         Views group renders them"
+    );
+    assert_eq!(mv.schema, ks);
 
     teardown_keyspace(&driver, &ks).await;
 }

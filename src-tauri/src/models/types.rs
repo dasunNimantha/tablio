@@ -428,9 +428,24 @@ pub struct QueryStatEntry {
     pub mean_plan_time_ms: Option<f64>,
 }
 
+/// Reason-keyed enum the frontend uses to pick the right "unavailable" copy
+/// and CTA without sniffing `message` strings. New variants must be added in
+/// lock-step with `src/types/queryStats.ts` (the wire format is snake_case).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryStatsKind {
+    Available,
+    PgStatStatementsMissing,
+    MysqlPerfSchemaDisabled,
+    MssqlMissingViewServerState,
+    TidbStmtSummaryDisabled,
+    EngineUnsupported,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryStatsResponse {
     pub available: bool,
+    pub kind: QueryStatsKind,
     pub message: Option<String>,
     pub entries: Vec<QueryStatEntry>,
 }
@@ -811,11 +826,41 @@ mod tests {
 
     #[test]
     fn query_stats_response_unavailable() {
-        let json = r#"{"available": false, "message": "Extension not installed", "entries": []}"#;
+        let json = r#"{"available": false, "kind": "pg_stat_statements_missing", "message": "Extension not installed", "entries": []}"#;
         let resp: QueryStatsResponse = serde_json::from_str(json).unwrap();
         assert!(!resp.available);
+        assert_eq!(resp.kind, QueryStatsKind::PgStatStatementsMissing);
         assert_eq!(resp.message.unwrap(), "Extension not installed");
         assert!(resp.entries.is_empty());
+    }
+
+    #[test]
+    fn query_stats_kind_wire_format_is_snake_case() {
+        // The TS type union must match the Rust enum byte-for-byte. If you
+        // add a variant on either side, this test forces the contract check.
+        let cases = [
+            (QueryStatsKind::Available, "\"available\""),
+            (
+                QueryStatsKind::PgStatStatementsMissing,
+                "\"pg_stat_statements_missing\"",
+            ),
+            (
+                QueryStatsKind::MysqlPerfSchemaDisabled,
+                "\"mysql_perf_schema_disabled\"",
+            ),
+            (
+                QueryStatsKind::MssqlMissingViewServerState,
+                "\"mssql_missing_view_server_state\"",
+            ),
+            (
+                QueryStatsKind::TidbStmtSummaryDisabled,
+                "\"tidb_stmt_summary_disabled\"",
+            ),
+            (QueryStatsKind::EngineUnsupported, "\"engine_unsupported\""),
+        ];
+        for (k, expected) in cases {
+            assert_eq!(serde_json::to_string(&k).unwrap(), expected);
+        }
     }
 
     #[test]
@@ -989,6 +1034,7 @@ mod tests {
     fn query_stats_response_with_entries() {
         let resp = QueryStatsResponse {
             available: true,
+            kind: QueryStatsKind::Available,
             message: None,
             entries: vec![QueryStatEntry {
                 query: "SELECT 1".into(),

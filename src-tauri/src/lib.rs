@@ -2,6 +2,7 @@ pub mod commands;
 pub mod db;
 pub mod export;
 pub mod models;
+pub mod util;
 
 use commands::backup::*;
 use commands::connection::*;
@@ -14,6 +15,7 @@ use commands::saved_queries::*;
 use commands::schema::*;
 use commands::ssh_config::*;
 use commands::system::*;
+use commands::xlsx_import::*;
 use db::pool::PoolManager;
 use std::sync::Arc;
 
@@ -77,6 +79,8 @@ pub fn run() {
             forget_known_host,
             ssh_config_lookup,
             get_app_resource_usage,
+            parse_xlsx_workbook,
+            parse_xlsx_sheet,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

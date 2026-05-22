@@ -337,7 +337,9 @@ impl DatabaseDriver for CockroachdbDriver {
         let pool = self.get_pool(database).await?;
         let start = Instant::now();
         let explain_sql = format!("EXPLAIN {}", sql);
-        let rows = sqlx::query(&explain_sql).fetch_all(&pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*explain_sql))
+            .fetch_all(&pool)
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         let raw_text = rows
@@ -511,6 +513,7 @@ impl DatabaseDriver for CockroachdbDriver {
     async fn get_query_stats(&self) -> Result<QueryStatsResponse> {
         Ok(QueryStatsResponse {
             available: false,
+            kind: QueryStatsKind::EngineUnsupported,
             message: Some(
                 "Query statistics (pg_stat_statements) are not available in CockroachDB. \
                 Use the CockroachDB Admin UI for query insights."

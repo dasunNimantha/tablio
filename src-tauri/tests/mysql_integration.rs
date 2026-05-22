@@ -222,8 +222,8 @@ async fn mysql_list_indexes() {
     let idx = driver.list_indexes(&db, &db, &tbl).await.unwrap();
     let names: Vec<&str> = idx.iter().map(|i| i.name.as_str()).collect();
     assert!(names.contains(&"PRIMARY"));
-    assert!(names.iter().any(|n| *n == "idx_name"));
-    assert!(names.iter().any(|n| *n == "uq_id_name"));
+    assert!(names.contains(&"idx_name"));
+    assert!(names.contains(&"uq_id_name"));
 
     let idx_name = idx.iter().find(|i| i.name == "idx_name").unwrap();
     assert!(!idx_name.is_unique);
@@ -1355,14 +1355,6 @@ async fn mysql_get_server_config() {
 }
 
 #[tokio::test]
-async fn mysql_get_query_stats() {
-    let (driver, _db) = mysql_driver!();
-    let qs = driver.get_query_stats().await.unwrap();
-    assert!(!qs.available);
-    assert!(qs.message.is_some());
-}
-
-#[tokio::test]
 async fn mysql_list_roles() {
     let (driver, _db) = mysql_driver!();
     let roles = driver.list_roles().await.unwrap();
@@ -1794,9 +1786,12 @@ async fn validate_query_empty_string() {
 
 const MYSQL_BIG_DATA_ROWS: i64 = 1_000_000;
 
-/// MySQL has no `generate_series`, so we materialise a million rows by
-/// chained joins on a CTE numbers table. Faster than a million round-trips
-/// and works on every supported MySQL/MariaDB version.
+/// MySQL has no `generate_series`, so we materialise a million rows by a
+/// 6-way cross-join on a small persistent digits helper table. This works
+/// identically on MySQL and MariaDB without depending on session-scoped
+/// state: the previous CTE-based approach issued
+/// `SET SESSION cte_max_recursion_depth` and the recursive `INSERT` on
+/// separate sqlx pool checkouts, so the bump never reached the recursion.
 async fn mysql_seed_million_rows(
     driver: &MysqlDriver,
     db: &str,
@@ -1811,26 +1806,34 @@ async fn mysql_seed_million_rows(
     );
     driver.execute_query(db, &create_sql).await?;
 
-    // Recursive CTE produces the integers 1..=N in a single statement.
-    // MySQL caps `cte_max_recursion_depth` at 1000 by default; bump it
-    // to N so we can fan out without partitioning the insert.
-    let bump = format!(
-        "SET SESSION cte_max_recursion_depth = {n}",
-        n = MYSQL_BIG_DATA_ROWS + 1
-    );
-    let _ = driver.execute_query(db, &bump).await; // ignored on MariaDB
+    // Persistent (non-temporary) helper table so the digits survive
+    // every pool-connection checkout. Six joins over 0..=9 generate the
+    // 1_000_000-row sequence in a single INSERT.
+    let digits_table = format!("`{db}`.`tablio_digits_seed_{table}`");
+    let drop_digits = format!("DROP TABLE IF EXISTS {digits_table}");
+    driver.execute_query(db, &drop_digits).await?;
+    let create_digits = format!("CREATE TABLE {digits_table} (d TINYINT NOT NULL PRIMARY KEY)");
+    driver.execute_query(db, &create_digits).await?;
+    let fill_digits =
+        format!("INSERT INTO {digits_table} (d) VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)");
+    driver.execute_query(db, &fill_digits).await?;
 
     let insert_sql = format!(
         "INSERT INTO `{db}`.`{table}` (id, payload) \
-         WITH RECURSIVE seq(n) AS ( \
-             SELECT 1 \
-             UNION ALL \
-             SELECT n + 1 FROM seq WHERE n < {n} \
-         ) \
-         SELECT n, CONCAT('row-', n) FROM seq",
+         SELECT n, CONCAT('row-', n) FROM ( \
+             SELECT (d6.d * 100000 + d5.d * 10000 + d4.d * 1000 \
+                     + d3.d * 100 + d2.d * 10 + d1.d) + 1 AS n \
+             FROM {dt} d1 \
+             CROSS JOIN {dt} d2 CROSS JOIN {dt} d3 \
+             CROSS JOIN {dt} d4 CROSS JOIN {dt} d5 CROSS JOIN {dt} d6 \
+         ) AS series \
+         WHERE n <= {n}",
+        dt = digits_table,
         n = MYSQL_BIG_DATA_ROWS
     );
     driver.execute_query(db, &insert_sql).await?;
+
+    driver.execute_query(db, &drop_digits).await?;
     Ok(())
 }
 
@@ -1887,4 +1890,148 @@ async fn million_row_paginate() {
     );
 
     mysql_drop_table_silent(&driver, &db, &table).await;
+}
+
+#[tokio::test]
+async fn my_get_query_stats_ok_or_perf_schema_message() {
+    let (driver, _db) = mysql_driver!();
+    let res = driver.get_query_stats().await;
+    assert!(res.is_ok(), "get_query_stats returned: {:?}", res.err());
+    let qs = res.unwrap();
+    if qs.available {
+        assert_eq!(qs.kind, QueryStatsKind::Available);
+        assert!(qs.message.is_none());
+    } else {
+        assert_eq!(qs.kind, QueryStatsKind::MysqlPerfSchemaDisabled);
+        let msg = qs.message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("performance_schema") || msg.contains("Performance Schema"),
+            "unexpected unavailable message: {msg}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-statement execute_query (PR #131 follow-up)
+// ---------------------------------------------------------------------------
+
+// Mirrors the same fix in sqlite + postgres. The MySQL driver used
+// to route based on the FIRST keyword of the input, so a
+// `CREATE VIEW ...; SELECT * FROM v;` would create the view but
+// throw away the SELECT's rows.
+#[tokio::test]
+async fn mysql_multi_statement_create_view_then_select_returns_rows() {
+    let (driver, db) = mysql_driver!();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let tbl = format!("mst_t_{}", &suffix[..8]);
+    let view = format!("mst_v_{}", &suffix[..8]);
+    let script = format!(
+        "CREATE TABLE `{db}`.`{tbl}` (x INT); \
+         INSERT INTO `{db}`.`{tbl}` VALUES (1), (2), (3); \
+         CREATE VIEW `{db}`.`{view}` AS \
+            SELECT x, CASE WHEN x % 2 = 0 THEN 'even' ELSE 'odd' END AS parity \
+            FROM `{db}`.`{tbl}`; \
+         SELECT * FROM `{db}`.`{view}` ORDER BY x;"
+    );
+    let result = driver
+        .execute_query(&db, &script)
+        .await
+        .expect("multi-statement script failed");
+
+    assert!(result.is_select);
+    assert_eq!(result.rows.len(), 3);
+    let parities: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.get(1).and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(parities, vec!["odd", "even", "odd"]);
+
+    driver
+        .execute_query(&db, &format!("DROP VIEW IF EXISTS `{db}`.`{view}`"))
+        .await
+        .ok();
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS `{db}`.`{tbl}`"))
+        .await
+        .ok();
+}
+
+// MySQL-specific: backtick-quoted identifier with an embedded
+// semicolon must not split the statement. The splitter is the
+// only thing that prevents this from corrupting the batch.
+#[tokio::test]
+async fn mysql_multi_statement_semicolon_in_backtick_identifier_is_safe() {
+    let (driver, db) = mysql_driver!();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let tbl = format!("mst_q_{}", &suffix[..8]);
+    // Column named "weird;name" — perfectly legal MySQL identifier
+    // when backticked.
+    let script = format!(
+        "CREATE TABLE `{db}`.`{tbl}` (`weird;name` INT); \
+         INSERT INTO `{db}`.`{tbl}` (`weird;name`) VALUES (42); \
+         SELECT `weird;name` FROM `{db}`.`{tbl}`;"
+    );
+    let result = driver
+        .execute_query(&db, &script)
+        .await
+        .expect("backtick-with-semicolon script failed");
+    assert!(result.is_select);
+    let v = result
+        .rows
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+    assert_eq!(v, 42);
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS `{db}`.`{tbl}`"))
+        .await
+        .ok();
+}
+
+// All-DDL script with no trailing SELECT — should run every
+// statement and return `is_select = false`.
+#[tokio::test]
+async fn mysql_multi_statement_all_ddl_no_rows() {
+    let (driver, db) = mysql_driver!();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let t1 = format!("mst_a_{}", &suffix[..8]);
+    let t2 = format!("mst_b_{}", &suffix[..8]);
+    let script = format!("CREATE TABLE `{db}`.`{t1}` (x INT); CREATE TABLE `{db}`.`{t2}` (y INT);");
+    let result = driver
+        .execute_query(&db, &script)
+        .await
+        .expect("DDL script failed");
+    assert!(!result.is_select);
+    assert!(result.rows.is_empty());
+
+    let check = driver
+        .execute_query(
+            &db,
+            &format!(
+                "SELECT COUNT(*) AS n FROM information_schema.tables \
+                 WHERE table_schema = '{db}' \
+                 AND table_name IN ('{t1}', '{t2}')"
+            ),
+        )
+        .await
+        .expect("post-check failed");
+    let n = check
+        .rows
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|u| u as i64)))
+        .unwrap_or(-1);
+    assert_eq!(n, 2);
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS `{db}`.`{t1}`"))
+        .await
+        .ok();
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS `{db}`.`{t2}`"))
+        .await
+        .ok();
 }

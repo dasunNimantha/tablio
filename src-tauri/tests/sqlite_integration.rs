@@ -53,6 +53,126 @@ async fn sqlite_test_connection() {
     let _ = std::fs::remove_file(&path);
 }
 
+// Regression for issue #126: the bundled SQLite was 3.46.0 which is
+// missing several modern built-ins, notably `if(cond, a, b)` which
+// arrived in 3.48. Failure mode looked like
+// `error returned from database: no such function if`. Asserting both
+// the version floor and a positive `if()` call locks in the dep bump.
+#[tokio::test]
+async fn sqlite_bundled_engine_is_at_least_3_48() {
+    let (driver, path) = create_driver().await;
+    let result = driver.execute_query(DB, "SELECT sqlite_version()").await;
+    let _ = std::fs::remove_file(&path);
+    let result = result.expect("sqlite_version() query failed");
+    // sqlite_version() returns a single column with one row.
+    let row = result
+        .rows
+        .first()
+        .expect("sqlite_version() returned no rows");
+    let version_str = row
+        .first()
+        .and_then(|v| v.as_str())
+        .expect("sqlite_version() did not return a string");
+    let mut parts = version_str.split('.');
+    let major: u32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("could not parse major");
+    let minor: u32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("could not parse minor");
+    assert!(
+        (major, minor) >= (3, 48),
+        "bundled SQLite must be >= 3.48 (got {version_str}); see issue #126"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_if_function_works() {
+    let (driver, path) = create_driver().await;
+    // `if()` is the function the user's view in issue #126 depends on.
+    // Returns the second arg when the first is truthy, third otherwise.
+    let result = driver
+        .execute_query(DB, "SELECT if(1, 'yes', 'no') AS r")
+        .await;
+    let _ = std::fs::remove_file(&path);
+    let result = result.expect("`if()` query failed — bundled SQLite likely < 3.48");
+    let row = result.rows.first().expect("if() returned no rows");
+    let value = row.first().and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(value, "yes", "if(1, 'yes', 'no') should return 'yes'");
+}
+
+// Regression for the bug surfaced during #126 testing: multi-statement
+// input like `CREATE VIEW v ...; SELECT * FROM v;` was creating the
+// view (executed via the single-statement `.execute()` path which
+// silently runs every statement in the batch) but discarding the
+// trailing SELECT's rows because the input was routed to the exec
+// path based on the FIRST keyword ("CREATE"). The fix is to split
+// the input into statements and decide row-vs-affected behaviour
+// from the LAST statement.
+#[tokio::test]
+async fn sqlite_multi_statement_create_view_then_select_returns_rows() {
+    let (driver, path) = create_driver().await;
+    let script = "CREATE TABLE t (x INTEGER); \
+                  INSERT INTO t VALUES (1), (2), (3); \
+                  CREATE VIEW v AS SELECT x, if(x % 2 = 0, 'even', 'odd') AS parity FROM t; \
+                  SELECT * FROM v ORDER BY x;";
+    let result = driver.execute_query(DB, script).await;
+    let _ = std::fs::remove_file(&path);
+    let result = result.expect("multi-statement script failed to execute");
+
+    // The user's complaint: they got "no rows" even though the view
+    // worked. After the fix we should see all 3 rows from the trailing
+    // SELECT, with the parity column computed by `if()`.
+    assert!(
+        result.is_select,
+        "is_select should be true because the LAST statement is a SELECT"
+    );
+    assert_eq!(
+        result.rows.len(),
+        3,
+        "expected 3 rows from `SELECT * FROM v`"
+    );
+    let parities: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.get(1).and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(parities, vec!["odd", "even", "odd"]);
+}
+
+#[tokio::test]
+async fn sqlite_multi_statement_all_ddl_returns_rows_affected_zero() {
+    // The other direction of the fix: a script that's only DDL
+    // (no trailing SELECT) should still execute every statement
+    // and report success, not erroneously try to fetch rows.
+    let (driver, path) = create_driver().await;
+    let script = "CREATE TABLE a (x INT); CREATE TABLE b (y INT); CREATE INDEX i ON a(x);";
+    let result = driver.execute_query(DB, script).await;
+
+    // Verify all three statements ran by inspecting sqlite_master.
+    let post = driver
+        .execute_query(
+            DB,
+            "SELECT name FROM sqlite_master WHERE type IN ('table','index') ORDER BY name",
+        )
+        .await;
+    let _ = std::fs::remove_file(&path);
+
+    let result = result.expect("DDL script failed");
+    assert!(!result.is_select);
+    assert!(result.rows.is_empty());
+
+    let post = post.expect("post-check failed");
+    let names: Vec<&str> = post
+        .rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(names, vec!["a", "b", "i"]);
+}
+
 // ---------------------------------------------------------------------------
 // Catalog
 // ---------------------------------------------------------------------------
@@ -1517,5 +1637,120 @@ async fn sqlite_alter_role_unsupported() {
 async fn sqlite_cancel_query() {
     let (driver, path) = create_driver().await;
     driver.cancel_query("0").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #126 follow-up: views with computed expressions returned NULL
+// for every cell.
+//
+// Reproducer from the user comment on the original issue:
+//
+//   create table income as select current_date as date, 100 as amount;
+//   create view f as select
+//     strftime('%Y',date)-if(cast(strftime('%m',date) as int)<4, 1, 0) year,
+//     round(total(amount),2) as net_income from income group by year;
+//   select * from f;
+//
+// Expected: year = some integer (e.g. 2026), net_income = 100.0
+// Actual on v0.4.8: year = NULL, net_income = NULL.
+//
+// Root cause: `sqlite_row_to_json_values` in src/db/sqlite.rs matches
+// on `col.type_info().name()`. For a view's computed column there's no
+// declared type, so the driver returns whatever sqlite reports
+// per-cell at runtime — which is *not* one of "INTEGER" / "REAL" /
+// "TEXT" / "BLOB" / "BOOLEAN", so the function falls through to the
+// String branch. An integer cell can't be decoded as String, sqlx
+// returns Err, `.ok()` swallows it, and the cell renders as NULL.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sqlite_view_with_computed_columns_does_not_return_null() {
+    let (driver, path) = create_driver().await;
+
+    driver
+        .execute_query(
+            DB,
+            "create table income as select current_date as date, 100 as amount;",
+        )
+        .await
+        .expect("create table failed");
+
+    driver
+        .execute_query(
+            DB,
+            "create view f as select \
+               strftime('%Y',date)-if(cast(strftime('%m',date) as int)<4, 1, 0) year, \
+               round(total(amount),2) as net_income from income group by year;",
+        )
+        .await
+        .expect("create view failed");
+
+    let result = driver
+        .execute_query(DB, "select * from f;")
+        .await
+        .expect("select from view failed");
+
+    assert_eq!(result.rows.len(), 1, "expected exactly one row");
+    let row = &result.rows[0];
+    assert_eq!(row.len(), 2, "expected exactly two columns");
+
+    // Both columns should have real values, not null. The exact
+    // year depends on the current date and the fiscal-year-style
+    // `if(month < 4, 1, 0)` adjustment, so we don't pin the exact
+    // value; we only assert the cells came back non-null.
+    assert!(
+        !row[0].is_null(),
+        "year column came back NULL — issue #126 reproduction. Driver: {:?}",
+        row[0]
+    );
+    assert!(
+        !row[1].is_null(),
+        "net_income column came back NULL — issue #126 reproduction. Driver: {:?}",
+        row[1]
+    );
+
+    // net_income is round(total(100), 2) on one row, which must be
+    // 100.0 (or the integer 100). Accept either shape; both are
+    // legitimate JSON encodings.
+    let net_income = row[1]
+        .as_f64()
+        .or_else(|| row[1].as_i64().map(|n| n as f64))
+        .unwrap_or_else(|| panic!("net_income not numeric: {:?}", row[1]));
+    assert!(
+        (net_income - 100.0).abs() < 0.001,
+        "net_income = {}, expected 100.0",
+        net_income
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// Smaller, more targeted version of the same bug for stable regression
+// coverage: any SELECT-only query whose columns are pure expressions
+// (no underlying table) used to surface as NULL because the column
+// type names from sqlx-sqlite don't match the static type strings.
+#[tokio::test]
+async fn sqlite_select_of_pure_expressions_returns_real_values() {
+    let (driver, path) = create_driver().await;
+
+    let result = driver
+        .execute_query(
+            DB,
+            "select 1+1 as sum_val, 1.5*2 as prod_val, 'hi' as label_val;",
+        )
+        .await
+        .expect("select of pure expressions failed");
+
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    assert_eq!(row.len(), 3);
+
+    // Three pure expressions — integer, real, text. Before the
+    // type-fallback fix every one of these came back as NULL.
+    assert!(!row[0].is_null(), "1+1 came back NULL: {:?}", row[0]);
+    assert!(!row[1].is_null(), "1.5*2 came back NULL: {:?}", row[1]);
+    assert!(!row[2].is_null(), "'hi' came back NULL: {:?}", row[2]);
+
     let _ = std::fs::remove_file(&path);
 }

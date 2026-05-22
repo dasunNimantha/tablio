@@ -2,8 +2,10 @@ import { useState, useRef, useEffect } from "react";
 import { Download } from "lucide-react";
 import "./ExportMenu.css";
 
+export type ExportFormat = "csv" | "json" | "sql" | "xlsx";
+
 interface Props {
-  onExport: (format: "csv" | "json" | "sql") => void;
+  onExport: (format: ExportFormat) => void;
 }
 
 export function ExportMenu({ onExport }: Props) {
@@ -54,6 +56,14 @@ export function ExportMenu({ onExport }: Props) {
             }}
           >
             Export as SQL
+          </button>
+          <button
+            onClick={() => {
+              onExport("xlsx");
+              setOpen(false);
+            }}
+          >
+            Export as Excel
           </button>
         </div>
       )}

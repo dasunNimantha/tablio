@@ -205,8 +205,8 @@ async fn tidb_list_indexes() {
     let idx = driver.list_indexes(&db, &db, &tbl).await.unwrap();
     let names: Vec<&str> = idx.iter().map(|i| i.name.as_str()).collect();
     assert!(names.contains(&"PRIMARY"));
-    assert!(names.iter().any(|n| *n == "idx_name"));
-    assert!(names.iter().any(|n| *n == "uq_id_name"));
+    assert!(names.contains(&"idx_name"));
+    assert!(names.contains(&"uq_id_name"));
 
     driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }
@@ -1217,13 +1217,6 @@ async fn tidb_get_server_config() {
 }
 
 #[tokio::test]
-async fn tidb_get_query_stats() {
-    let (driver, _db) = tidb_driver!();
-    let qs = driver.get_query_stats().await.unwrap();
-    assert!(!qs.available);
-}
-
-#[tokio::test]
 async fn tidb_list_roles() {
     let (driver, _db) = tidb_driver!();
     let roles = driver.list_roles().await;
@@ -1355,4 +1348,23 @@ async fn validate_query_empty_string() {
     let (driver, db) = tidb_driver!();
     let result = driver.validate_query(&db, "").await.unwrap();
     assert!(result.is_some(), "empty SQL should be an error");
+}
+
+#[tokio::test]
+async fn tidb_get_query_stats_ok_or_stmt_summary_message() {
+    let (driver, _db) = tidb_driver!();
+    let res = driver.get_query_stats().await;
+    assert!(res.is_ok(), "get_query_stats returned: {:?}", res.err());
+    let qs = res.unwrap();
+    if qs.available {
+        assert_eq!(qs.kind, QueryStatsKind::Available);
+        assert!(qs.message.is_none());
+    } else {
+        assert_eq!(qs.kind, QueryStatsKind::TidbStmtSummaryDisabled);
+        let msg = qs.message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("tidb_enable_stmt_summary") || msg.contains("Statement summary"),
+            "unexpected unavailable message: {msg}"
+        );
+    }
 }
