@@ -522,3 +522,214 @@ describe("SQL validation line/column computation", () => {
     expect(computeLineCol("", 0)).toEqual({ line: 1, col: 1 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Saved-queries UX (issue #153): editing a query loaded from a saved row
+// should not mint a duplicate row on save, Ctrl/Cmd+S should update in
+// place, and the Save button label should reflect whether the editor's
+// SQL has diverged from the loaded snapshot.
+//
+// The component itself is a React+Monaco+Tauri stack; here we extract the
+// pure decision-making — dirty check, save-action routing, button label —
+// and lock those down with table-driven tests.
+// ---------------------------------------------------------------------------
+
+interface LoadedSavedQuery {
+  id: string;
+  name: string;
+  sql: string;
+  created_at: number;
+}
+
+function isDirty(loaded: LoadedSavedQuery | null, currentSql: string): boolean {
+  return loaded !== null && currentSql !== loaded.sql;
+}
+
+type SaveRoute = "update-in-place" | "open-save-dialog";
+
+/**
+ * Decides whether Ctrl/Cmd+S (or a Save button click) should update
+ * the loaded saved query in place, or open the Save dialog to capture
+ * a name for a brand-new query. Mirrors `handleSaveOrUpdate` in
+ * QueryConsole.tsx. The actual update is then itself a no-op when
+ * the editor's content matches the loaded snapshot — that's modelled
+ * by `shouldPerformInPlaceSave`.
+ */
+function saveActionRoute(loaded: LoadedSavedQuery | null): SaveRoute {
+  return loaded ? "update-in-place" : "open-save-dialog";
+}
+
+function shouldPerformInPlaceSave(loaded: LoadedSavedQuery | null, currentSql: string): boolean {
+  if (!loaded) return false;
+  return currentSql !== loaded.sql;
+}
+
+type SaveButtonLabel = "Save" | "Save changes";
+
+interface SaveButtonState {
+  label: SaveButtonLabel;
+  disabled: boolean;
+}
+
+/**
+ * Mirrors the toolbar Save button's two-prong logic in
+ * QueryConsole.tsx — the label changes to "Save changes" only when
+ * a saved query is loaded AND its SQL has diverged; otherwise the
+ * button shows "Save". When a saved query is loaded but the editor
+ * is clean, the button is visibly idle (disabled) to communicate
+ * "there's nothing to save right now".
+ */
+function saveButtonState(loaded: LoadedSavedQuery | null, currentSql: string): SaveButtonState {
+  if (!loaded) {
+    return { label: "Save", disabled: false };
+  }
+  const dirty = currentSql !== loaded.sql;
+  return {
+    label: dirty ? "Save changes" : "Save",
+    disabled: !dirty,
+  };
+}
+
+const fixture: LoadedSavedQuery = {
+  id: "abc-123",
+  name: "Monthly Report",
+  sql: "SELECT * FROM orders WHERE created_at >= now() - interval '30 days';",
+  created_at: 1_700_000_000_000,
+};
+
+describe("isDirty (issue #153)", () => {
+  it("returns false when no saved query is loaded — there's no baseline", () => {
+    expect(isDirty(null, "SELECT 1;")).toBe(false);
+    expect(isDirty(null, "")).toBe(false);
+  });
+
+  it("returns false when the editor exactly matches the loaded snapshot", () => {
+    expect(isDirty(fixture, fixture.sql)).toBe(false);
+  });
+
+  it("returns true on any divergence — whitespace counts", () => {
+    expect(isDirty(fixture, fixture.sql + " ")).toBe(true);
+  });
+
+  it("returns true after a real edit", () => {
+    expect(isDirty(fixture, fixture.sql.replace("orders", "invoices"))).toBe(true);
+  });
+
+  it("returns true when the editor clears the SQL", () => {
+    expect(isDirty(fixture, "")).toBe(true);
+  });
+});
+
+describe("saveActionRoute (Ctrl/Cmd+S routing)", () => {
+  it("opens the Save dialog when no saved query is loaded — standard editor 'untitled' semantics", () => {
+    expect(saveActionRoute(null)).toBe("open-save-dialog");
+  });
+
+  it("updates in place when a saved query is loaded — even if currently clean", () => {
+    // Routing is purely about WHICH path to take; the in-place
+    // path itself is what no-ops on clean. Splitting these
+    // concerns lets the Save button stay disabled when clean
+    // while the keybinding remains harmlessly registered.
+    expect(saveActionRoute(fixture)).toBe("update-in-place");
+  });
+});
+
+describe("shouldPerformInPlaceSave (issue #153)", () => {
+  it("never fires when no saved query is loaded", () => {
+    expect(shouldPerformInPlaceSave(null, "SELECT 1;")).toBe(false);
+  });
+
+  it("fires when the loaded query is dirty", () => {
+    expect(shouldPerformInPlaceSave(fixture, fixture.sql + "\n-- edit")).toBe(true);
+  });
+
+  it("is a no-op when the loaded query is clean — Ctrl/Cmd+S on an unchanged saved query mustn't bump updated_at", () => {
+    expect(shouldPerformInPlaceSave(fixture, fixture.sql)).toBe(false);
+  });
+});
+
+describe("saveButtonState (Save / Save changes label)", () => {
+  it("shows enabled 'Save' when no saved query is loaded", () => {
+    expect(saveButtonState(null, "SELECT 1;")).toEqual({
+      label: "Save",
+      disabled: false,
+    });
+  });
+
+  it("shows enabled 'Save' even when SQL is empty and no saved query is loaded", () => {
+    // Empty-SQL guard is not in this layer — the save dialog itself
+    // checks that the chosen name is non-empty. The button should
+    // remain interactive so the user can still open the dialog.
+    expect(saveButtonState(null, "")).toEqual({
+      label: "Save",
+      disabled: false,
+    });
+  });
+
+  it("shows disabled 'Save' when a saved query is loaded and the editor matches it", () => {
+    expect(saveButtonState(fixture, fixture.sql)).toEqual({
+      label: "Save",
+      disabled: true,
+    });
+  });
+
+  it("shows enabled 'Save changes' when a saved query is loaded and the editor diverges", () => {
+    expect(saveButtonState(fixture, fixture.sql.replace("orders", "invoices"))).toEqual({
+      label: "Save changes",
+      disabled: false,
+    });
+  });
+
+  it("treats whitespace-only edits as dirty — the user might have intentionally added trailing whitespace", () => {
+    expect(saveButtonState(fixture, fixture.sql + "\n")).toEqual({
+      label: "Save changes",
+      disabled: false,
+    });
+  });
+});
+
+describe("First-save-of-untitled lifecycle (issue #153)", () => {
+  // After the user clicks Save on a brand-new query and the dialog
+  // confirms with a name, the QueryConsole adopts the freshly-saved
+  // row as `loadedSavedQuery`. The next keystroke / re-save should
+  // then take the in-place update path, not open the dialog again.
+  //
+  // This test models the post-save state and asserts the same
+  // pure helpers above flip into "saved query" mode.
+
+  it("post-first-save: routing flips to in-place update", () => {
+    const justSaved: LoadedSavedQuery = {
+      id: "new-id-456",
+      name: "Untitled #1",
+      sql: "SELECT 1;",
+      created_at: Date.now(),
+    };
+    expect(saveActionRoute(justSaved)).toBe("update-in-place");
+  });
+
+  it("post-first-save: button shows disabled 'Save' (clean — nothing to save yet)", () => {
+    const justSaved: LoadedSavedQuery = {
+      id: "new-id-456",
+      name: "Untitled #1",
+      sql: "SELECT 1;",
+      created_at: Date.now(),
+    };
+    expect(saveButtonState(justSaved, justSaved.sql)).toEqual({
+      label: "Save",
+      disabled: true,
+    });
+  });
+
+  it("post-first-save then user edits: button flips to enabled 'Save changes'", () => {
+    const justSaved: LoadedSavedQuery = {
+      id: "new-id-456",
+      name: "Untitled #1",
+      sql: "SELECT 1;",
+      created_at: Date.now(),
+    };
+    expect(saveButtonState(justSaved, "SELECT 2;")).toEqual({
+      label: "Save changes",
+      disabled: false,
+    });
+  });
+});

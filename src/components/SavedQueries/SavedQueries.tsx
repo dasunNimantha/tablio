@@ -4,7 +4,17 @@ import { X, Loader2, Trash2 } from "lucide-react";
 import "./SavedQueries.css";
 
 interface Props {
-  onSelectQuery: (sql: string) => void;
+  /**
+   * Receives the entire `SavedQuery` so the parent can adopt the
+   * saved-query identity (id + name) — used by the QueryConsole to
+   * set the tab title, enable the in-place save / Ctrl+S flow, and
+   * switch the toolbar button to "Save changes". The previous
+   * signature passed only `sql`, which dropped that identity on the
+   * floor and forced every save to mint a new row.
+   *
+   * See issue #153.
+   */
+  onSelectQuery: (query: SavedQuery) => void;
   onClose: () => void;
 }
 
@@ -78,7 +88,7 @@ export function SavedQueries({ onSelectQuery, onClose }: Props) {
               <div
                 key={query.id}
                 className="saved-queries-item"
-                onClick={() => onSelectQuery(query.sql)}
+                onClick={() => onSelectQuery(query)}
               >
                 <div className="saved-queries-item-main">
                   <span className="saved-queries-name">{query.name}</span>
