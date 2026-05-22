@@ -786,9 +786,13 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
             //   - dirty → "Save changes" (active call to action)
             //   - clean → "Save" (visibly idle, disabled — no work to do)
             // In both cases the button updates the existing row by
-            // id instead of minting a new one.
+            // id instead of minting a new one. The `data-testid` is
+            // stable across all variants so e2e selectors don't have
+            // to track the user-visible label or title (which now
+            // legitimately changes based on state).
             <button
               className="btn-ghost"
+              data-testid="save-query-btn"
               onClick={handleSaveOrUpdate}
               disabled={!isDirty}
               title={isDirty ? "Save changes (Ctrl/Cmd+S)" : "No unsaved changes"}
@@ -800,6 +804,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
             // to capture a name (still Ctrl/Cmd+S).
             <button
               className="btn-ghost"
+              data-testid="save-query-btn"
               onClick={handleSaveOrUpdate}
               title="Save query (Ctrl/Cmd+S)"
             >
