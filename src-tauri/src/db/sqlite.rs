@@ -102,15 +102,54 @@ fn sqlite_row_to_json_values(
                     serde_json::Value::String(format!("X'{}'", hex_str))
                 })
                 .unwrap_or(serde_json::Value::Null),
-            _ => row
+            "TEXT" => row
                 .try_get::<String, _>(i)
                 .ok()
                 .map(serde_json::Value::String)
                 .unwrap_or(serde_json::Value::Null),
+            // Computed columns (view bodies, SELECT-list expressions
+            // like `strftime() - if(...)`, aggregates) have no declared
+            // type. SQLite gives sqlx a non-static type name and the
+            // earlier branches don't fire. The old fallback tried to
+            // decode the cell as `String` only, which silently failed
+            // for integer / real values and rendered them as NULL —
+            // that's the regression Dialga hit on issue #126 after
+            // v0.4.8 (every cell of his `create view f as select ...`
+            // came back null).
+            //
+            // Probe each concrete sqlx decoder in turn. Order matters:
+            // integer first so a `1+1` cell stays as the number `2`
+            // rather than the string `"2"`; real second so `1.5*2`
+            // stays a number rather than getting truncated to `3` by
+            // i64; string third; explicit null last.
+            _ => decode_dynamic_sqlite_cell(row, i),
         };
         values.push(val);
     }
     values
+}
+
+/// Per-cell decoder for SQLite columns whose declared type isn't one
+/// of the static affinities (`INTEGER` / `REAL` / `TEXT` / `BLOB` /
+/// `BOOLEAN`). The runtime type is inferred from whichever sqlx
+/// decoder accepts the cell first.
+fn decode_dynamic_sqlite_cell(row: &sqlx::sqlite::SqliteRow, i: usize) -> serde_json::Value {
+    if let Ok(Some(n)) = row.try_get::<Option<i64>, _>(i) {
+        return serde_json::Value::Number(n.into());
+    }
+    if let Ok(Some(n)) = row.try_get::<Option<f64>, _>(i) {
+        if let Some(num) = serde_json::Number::from_f64(n) {
+            return serde_json::Value::Number(num);
+        }
+    }
+    if let Ok(Some(s)) = row.try_get::<Option<String>, _>(i) {
+        return serde_json::Value::String(s);
+    }
+    if let Ok(Some(b)) = row.try_get::<Option<Vec<u8>>, _>(i) {
+        let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
+        return serde_json::Value::String(format!("X'{}'", hex));
+    }
+    serde_json::Value::Null
 }
 
 fn quote_ident(name: &str) -> String {
