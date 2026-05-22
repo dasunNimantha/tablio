@@ -90,6 +90,39 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Standalone Query button. Lives in the same header row as the         */
+/* Data/Schema toggle, sized to match the segmented control's buttons   */
+/* so the right edge of the header doesn't look unbalanced.             */
+/* ------------------------------------------------------------------ */
+
+.tv-query-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 32px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+
+.tv-query-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border-color: color-mix(in srgb, var(--text-muted) 25%, var(--border));
+}
+
+.tv-query-btn:active {
+  background: var(--bg-secondary);
+}
+
+/* ------------------------------------------------------------------ */
 /* Mode switch (Data / Schema)                                         */
 /* ------------------------------------------------------------------ */
 

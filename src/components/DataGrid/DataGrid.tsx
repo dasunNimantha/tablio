@@ -43,7 +43,6 @@ import {
   ExternalLink,
   Shuffle,
   Trash2,
-  Terminal,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { AllCommunityModule, themeQuartz, type ColDef, type CellClickedEvent, type CellContextMenuEvent, type CellKeyDownEvent, type GridApi, type GridReadyEvent, type IHeaderParams, type SelectionChangedEvent } from "ag-grid-community";
@@ -1025,20 +1024,9 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     addToast(`Opened ${fk.referenced_table} — filter by ${fk.referenced_column} = ${JSON.stringify(cellValue)}`);
   }, [connectionId, database, schema, connections, openTab, addToast]);
 
-  const handleOpenQuery = useCallback(() => {
-    const conn = connections.find((c) => c.id === connectionId);
-    const tabId = `query:${connectionId}:${database}:${table}:${Date.now()}`;
-    const tab: TabInfo = {
-      id: tabId,
-      type: "query",
-      title: `Query - ${table}`,
-      connectionId,
-      connectionColor: conn?.color || "#6398ff",
-      database,
-      schema: "",
-    };
-    openTab(tab);
-  }, [connectionId, database, table, connections, openTab]);
+  // `handleOpenQuery` used to live here; it now lives on TableView's
+  // header so the "Query" button is reachable from both Data and Schema
+  // modes (the DataGrid toolbar isn't rendered in Schema mode).
 
   const handleExplainResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1153,13 +1141,6 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
               </div>
             )}
           </div>
-          <button
-            className="btn-ghost"
-            onClick={handleOpenQuery}
-            title="Open SQL query console for this database"
-          >
-            <Terminal size={14} /> Query
-          </button>
           {data && (
             <ColumnOrganizer
               columns={data.columns}
