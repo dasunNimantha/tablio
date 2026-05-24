@@ -2132,3 +2132,356 @@ async fn mssql_multi_statement_all_ddl_no_rows() {
         .await
         .ok();
 }
+
+// ---------------------------------------------------------------------------
+// alter_table: editor-driven multi-op sequences (issue #59 follow-up)
+// ---------------------------------------------------------------------------
+// Includes a regression test for the `current_table` cursor: the MSSQL
+// driver previously computed the fully-qualified `fq` once before the
+// op loop, so ops after a RenameTable would target the old (now-gone)
+// table name. The fix tracks `current_table` like every other driver.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mssql_alter_table_rename_then_change_type_same_column() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_seq_rn_ct");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE dbo.{tbl} (pk INT PRIMARY KEY, legacy_id INT)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO dbo.{tbl} VALUES (1, 42)"))
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::RenameColumn {
+                    old_name: "legacy_id".into(),
+                    new_name: "id".into(),
+                },
+                AlterTableOperation::ChangeColumnType {
+                    column_name: "id".into(),
+                    new_type: "BIGINT".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, SCHEMA, &tbl).await.unwrap();
+    let id = cols.iter().find(|c| c.name == "id").unwrap();
+    assert!(id.data_type.to_lowercase().contains("bigint"));
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS dbo.{tbl}"))
+        .await
+        .ok();
+}
+
+/// Regression: rename_table + alter columns in one call. Pre-fix the
+/// AddColumn would target the OLD name (which sp_rename already
+/// removed) and fail with "invalid object name".
+#[tokio::test]
+async fn mssql_alter_table_rename_table_then_alter_columns() {
+    let (driver, db) = mssql_driver!();
+    let old = unique_table("ms_rn_then");
+    let new_name = unique_table("ms_rn_then_new");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE dbo.{old} (id INT PRIMARY KEY, status NVARCHAR(40))"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            SCHEMA,
+            &old,
+            &[
+                AlterTableOperation::RenameTable {
+                    new_name: new_name.clone(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "created_at".into(),
+                        data_type: "DATETIME2".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+                AlterTableOperation::DropColumn {
+                    column_name: "status".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, SCHEMA, &new_name).await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"created_at"));
+    assert!(!names.contains(&"status"));
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS dbo.{new_name}"))
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn mssql_alter_table_drop_then_add_same_name() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_drop_add");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE dbo.{tbl} (id INT PRIMARY KEY, payload NVARCHAR(MAX))"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::DropColumn {
+                    column_name: "payload".into(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "payload".into(),
+                        data_type: "INT".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, SCHEMA, &tbl).await.unwrap();
+    let payload = cols.iter().find(|c| c.name == "payload").unwrap();
+    assert!(payload.data_type.to_lowercase().contains("int"));
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS dbo.{tbl}"))
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn mssql_alter_table_empty_operations_is_noop() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_noop");
+
+    driver
+        .execute_query(&db, &format!("CREATE TABLE dbo.{tbl} (id INT PRIMARY KEY)"))
+        .await
+        .unwrap();
+    driver
+        .alter_table(&db, SCHEMA, &tbl, &[])
+        .await
+        .expect("empty operations should be a successful no-op");
+    let cols = driver.list_columns(&db, SCHEMA, &tbl).await.unwrap();
+    assert_eq!(cols.len(), 1);
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS dbo.{tbl}"))
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn mssql_alter_table_set_nullable_both_directions() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_null");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE dbo.{tbl} (id INT PRIMARY KEY, note NVARCHAR(40) NOT NULL)"),
+        )
+        .await
+        .unwrap();
+
+    // Make it nullable.
+    driver
+        .alter_table(
+            &db,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::SetNullable {
+                column_name: "note".into(),
+                nullable: true,
+            }],
+        )
+        .await
+        .unwrap();
+    let cols = driver.list_columns(&db, SCHEMA, &tbl).await.unwrap();
+    assert!(cols.iter().find(|c| c.name == "note").unwrap().is_nullable);
+
+    // Flip back to NOT NULL.
+    driver
+        .alter_table(
+            &db,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::SetNullable {
+                column_name: "note".into(),
+                nullable: false,
+            }],
+        )
+        .await
+        .unwrap();
+    let cols = driver.list_columns(&db, SCHEMA, &tbl).await.unwrap();
+    assert!(!cols.iter().find(|c| c.name == "note").unwrap().is_nullable);
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS dbo.{tbl}"))
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn mssql_alter_table_set_then_clear_default_cycle() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_def_cycle");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE dbo.{tbl} (id INT PRIMARY KEY, status NVARCHAR(40))"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::SetDefault {
+                column_name: "status".into(),
+                default_value: Some("'new'".into()),
+            }],
+        )
+        .await
+        .unwrap();
+    let cols = driver.list_columns(&db, SCHEMA, &tbl).await.unwrap();
+    let status = cols.iter().find(|c| c.name == "status").unwrap();
+    assert!(
+        status
+            .default_value
+            .as_deref()
+            .unwrap_or("")
+            .contains("new"),
+        "default should be applied"
+    );
+
+    driver
+        .alter_table(
+            &db,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::SetDefault {
+                column_name: "status".into(),
+                default_value: None,
+            }],
+        )
+        .await
+        .unwrap();
+    let cols = driver.list_columns(&db, SCHEMA, &tbl).await.unwrap();
+    let status = cols.iter().find(|c| c.name == "status").unwrap();
+    assert!(status.default_value.is_none(), "default should be cleared");
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS dbo.{tbl}"))
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn mssql_alter_table_rename_nonexistent_column_errors() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_rn_bad");
+
+    driver
+        .execute_query(&db, &format!("CREATE TABLE dbo.{tbl} (id INT PRIMARY KEY)"))
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            &db,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::RenameColumn {
+                old_name: "nope".into(),
+                new_name: "noooo".into(),
+            }],
+        )
+        .await;
+    assert!(result.is_err());
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS dbo.{tbl}"))
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn mssql_alter_table_add_duplicate_column_errors() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_dup");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE dbo.{tbl} (id INT PRIMARY KEY, status NVARCHAR(40))"),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            &db,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::AddColumn {
+                column: ColumnDefinition {
+                    name: "status".into(),
+                    data_type: "NVARCHAR(40)".into(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                },
+            }],
+        )
+        .await;
+    assert!(result.is_err());
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE IF EXISTS dbo.{tbl}"))
+        .await
+        .ok();
+}

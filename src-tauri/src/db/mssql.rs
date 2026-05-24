@@ -1216,8 +1216,16 @@ impl DatabaseDriver for MssqlDriver {
         operations: &[AlterTableOperation],
     ) -> Result<()> {
         self.use_database(database).await?;
-        let fq = format!("{}.{}", bracket(schema), bracket(table_name));
+        // Track the live table name across the loop so ops queued
+        // after `RenameTable` target the renamed object (matches
+        // pg_alter_table / my_alter_table / sqlite alter_table).
+        // Previously `fq` was computed once and went stale after a
+        // rename, which silently broke editor saves that paired
+        // rename_table with column alterations.
+        let mut current_table = table_name.to_string();
+        let mut current_name_for_rename = table_name.to_string();
         for op in operations {
+            let fq = format!("{}.{}", bracket(schema), bracket(&current_table));
             let stmt = match op {
                 AlterTableOperation::AddColumn { column } => {
                     let null = if column.is_nullable {
@@ -1240,7 +1248,7 @@ impl DatabaseDriver for MssqlDriver {
                     let current = format!(
                         "{}.{}.{}",
                         schema.replace('\'', "''"),
-                        table_name.replace('\'', "''"),
+                        current_table.replace('\'', "''"),
                         old_name.replace('\'', "''")
                     );
                     format!(
@@ -1262,19 +1270,24 @@ impl DatabaseDriver for MssqlDriver {
                     let current = format!(
                         "{}.{}",
                         schema.replace('\'', "''"),
-                        table_name.replace('\'', "''")
+                        current_name_for_rename.replace('\'', "''")
                     );
-                    format!(
+                    let stmt = format!(
                         "EXEC sp_rename N'{}', N'{}'",
                         current,
                         new_name.replace('\'', "''")
-                    )
+                    );
+                    // Advance the live table name so subsequent ops in
+                    // this same call qualify against the renamed object.
+                    current_table = new_name.clone();
+                    current_name_for_rename = new_name.clone();
+                    stmt
                 }
                 AlterTableOperation::SetNullable {
                     column_name,
                     nullable,
                 } => {
-                    let cols = self.list_columns(database, schema, table_name).await?;
+                    let cols = self.list_columns(database, schema, &current_table).await?;
                     let col = cols
                         .iter()
                         .find(|c| c.name == *column_name)
@@ -1307,7 +1320,7 @@ impl DatabaseDriver for MssqlDriver {
                                  INNER JOIN sys.tables t ON c.object_id = t.object_id \
                                  INNER JOIN sys.schemas s ON t.schema_id = s.schema_id \
                                  WHERE s.name = N'{}' AND t.name = N'{}' AND c.name = N'{}'",
-                                schema.replace('\'', "''"), table_name.replace('\'', "''"), column_name.replace('\'', "''")
+                                schema.replace('\'', "''"), current_table.replace('\'', "''"), column_name.replace('\'', "''")
                             );
                         let (_, rows) = self.run_select(&find_constraint).await?;
                         if let Some(constraint_name) = rows
