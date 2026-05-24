@@ -100,7 +100,12 @@
   align-items: center;
   gap: 6px;
   padding: 0 12px;
-  height: 32px;
+  /* Match the outer height of the .tv-mode-switch sibling so the
+   * Query / Data / Schema row reads as one toolbar. Mode-switch is
+   * a flex container with 1px border + 2px padding + 32px inner
+   * button + 2px padding + 1px border = 38px outer; we match it
+   * here. */
+  height: 38px;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
