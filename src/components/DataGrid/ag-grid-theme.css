@@ -3,6 +3,13 @@
   height: 100%;
 }
 
+/* Note: the user-configurable editor font preferences (#62) do NOT
+ * apply via this stylesheet. AG Grid emits its own runtime CSS via
+ * `themeQuartz.withParams({ fontSize })` with higher specificity
+ * than any static rule we could write, so the font-family / size
+ * are wired through the theme API in DataGrid.tsx and
+ * ResultTable.tsx instead. */
+
 /* Suppress all cell focus/editing animations */
 .ag-grid-wrapper .ag-cell,
 .ag-grid-wrapper .ag-cell-focus,

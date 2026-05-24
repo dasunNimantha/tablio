@@ -1,0 +1,104 @@
+/* Preferences dialog (issue #62). Reuses the Connection Dialog
+ * chrome (`.connection-dialog`, `.connection-dialog-body`,
+ * `.connection-dialog-nav`, `.connection-section-card`, …) so the
+ * left-rail nav + section-card layout matches; only the dialog-
+ * level width and a few preferences-specific controls live here. */
+
+/* Connection dialog ships at min(840px, 100vw-32px) which is too
+ * roomy for the two-row preferences content. Cap a bit tighter and
+ * let the height auto-fit the active section so the empty space
+ * doesn't dominate. */
+.preferences-dialog.connection-dialog {
+  width: min(720px, calc(100vw - 32px));
+  min-width: min(640px, calc(100vw - 32px));
+  height: min(72vh, 540px);
+}
+
+/* CustomSelect → match the height + typography of the size-input
+ * sibling on the same form-row so the controls align cleanly. The
+ * select takes the wide column; the size input takes the narrow
+ * column (see .preferences-size-group). */
+.preferences-font-select {
+  display: flex;
+  width: 100%;
+}
+
+.preferences-font-select .cs-trigger {
+  width: 100%;
+  height: 34px;
+  font-size: 13px;
+}
+
+/* The size group sits beside the family dropdown in a `.form-row`
+ * — flex children both default to flex: 0 1 auto, so we pin a
+ * narrow basis so the dropdown takes the rest. */
+.preferences-size-group {
+  flex: 0 0 130px;
+}
+
+.preferences-size-input {
+  height: 34px;
+  padding: 0 10px;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+.preferences-size-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+/* The font-family field needs to grow to fill the remaining row
+ * width. `.form-row` already lays children out as flex; the
+ * dropdown's wrapping `.form-group` has no explicit grow so we set
+ * it here. */
+.preferences-dialog .form-row > .form-group:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Live preview strip under the fields. Reads the same CSS vars as
+ * the rest of the app so changes are immediately visible. */
+.preferences-preview {
+  padding: 12px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preferences-preview-ui {
+  font-family: var(--font-sans);
+  font-size: var(--ui-font-size);
+}
+
+.preferences-preview-editor {
+  font-family: var(--font-mono);
+  font-size: var(--editor-font-size);
+}
+
+/* Reset button: ghost styling with a subtle icon. The footer's
+ * `.dialog-footer-left` slot positions it on the left, mirroring
+ * the connection dialog's secondary action placement. */
+.preferences-reset-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  color: var(--text-secondary);
+}
+
+.preferences-reset-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}

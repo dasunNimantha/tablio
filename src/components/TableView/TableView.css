@@ -112,8 +112,14 @@
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  color: var(--text-muted);
-  background: transparent;
+  /* `--text-muted` against a transparent background made the
+   * button read as disabled. The segmented Data/Schema control
+   * gets away with `--text-muted` because its parent has a
+   * `--bg-tertiary` background that frames the dim text; this
+   * button is standalone so it needs a punchier resting color
+   * to look interactive. */
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   cursor: pointer;
@@ -122,7 +128,7 @@
 
 .tv-header-right .tv-query-btn:hover {
   color: var(--text-primary);
-  background: var(--bg-tertiary);
+  background: var(--bg-hover);
   border-color: color-mix(in srgb, var(--text-muted) 25%, var(--border));
 }
 

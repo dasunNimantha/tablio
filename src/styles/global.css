@@ -115,6 +115,17 @@
   --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace,
     Menlo, Monaco, "Cascadia Mono", monospace;
 
+  /* User-configurable font sizes (issue #62). Applied to <body>
+   * (so all UI text inherits) and to Monaco / AG Grid cells (so
+   * code / data rendering respects the editor pref independently
+   * from the surrounding chrome). Defaults match the values
+   * previously hardcoded in App-wide styles + the Monaco editors,
+   * so first-launch looks identical to before the preference
+   * landed. `userSettingsStore` overrides both via setProperty on
+   * documentElement. */
+  --ui-font-size: 13px;
+  --editor-font-size: 14px;
+
   --radius-xs: 3px;
   --radius-sm: 5px;
   --radius-md: 8px;
@@ -166,6 +177,15 @@ body,
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* `--ui-font-size` is the single source of truth for UI text size
+ * (issue #62). It seeds body, then every component CSS file that
+ * sets its own absolute font-size still inherits from this baseline
+ * when not explicitly overridden. */
+body {
+  font-family: var(--font-sans);
+  font-size: var(--ui-font-size);
 }
 
 /* Chromium / WebView2 (Windows) doesn't grow body's own layout box

@@ -150,7 +150,11 @@
   padding: 9px 12px !important;
   font-size: 15px !important;
   line-height: 1.4 !important;
-  font-family: "Inter", var(--font-sans) !important;
+  /* Was hardcoded as `"Inter", var(--font-sans)` which bypassed
+   * the user-configurable UI font (#62). Read the CSS variable
+   * directly so the Monaco hover tooltip follows the same family
+   * the rest of the UI does. */
+  font-family: var(--font-sans) !important;
   color: var(--text-primary) !important;
 }
 

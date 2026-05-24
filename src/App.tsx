@@ -14,10 +14,13 @@ import { ToastContainer } from "./components/Toast/Toast";
 import { PassphrasePrompt } from "./components/PassphrasePrompt";
 import { HostKeyMismatchPrompt } from "./components/HostKeyMismatchPrompt";
 import { KnownHostsDialog } from "./components/KnownHostsDialog";
+import { PreferencesDialog } from "./components/Preferences/PreferencesDialog";
 import { useConnectionStore } from "./stores/connectionStore";
 import { useTabStore } from "./stores/tabStore";
+import { useUserSettingsStore } from "./stores/userSettingsStore";
+import { applyFontSettings } from "./lib/applyFontSettings";
 import { loader } from "@monaco-editor/react";
-import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick, ShieldCheck, Settings } from "lucide-react";
+import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick, ShieldCheck, Settings, Sliders } from "lucide-react";
 import { themes, getThemeById, applyTheme } from "./lib/themes";
 import { syncMonacoTheme } from "./lib/monacoTheme";
 import { api } from "./lib/tauri";
@@ -134,6 +137,7 @@ export default function App() {
   const [showThemePicker, setShowThemePicker] = useState(false);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [showKnownHosts, setShowKnownHosts] = useState(false);
+  const [showPreferences, setShowPreferences] = useState(false);
   const zoomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const themePickerRef = useRef<HTMLDivElement>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
@@ -248,6 +252,16 @@ export default function App() {
     applyTheme(t);
     localStorage.setItem("tablio-theme", themeId);
   }, [themeId]);
+
+  // User-configurable font preferences (issue #62). Subscribe to the
+  // store and push the values onto documentElement's CSS variables
+  // every time they change. The CSS rest of the app already reads
+  // `var(--font-sans / --font-mono / --ui-font-size / --editor-font-size)`,
+  // so a single write here flips the whole UI live with no remount.
+  const userSettings = useUserSettingsStore((s) => s.settings);
+  useEffect(() => {
+    applyFontSettings(userSettings);
+  }, [userSettings]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -473,6 +487,17 @@ export default function App() {
                     <div className="theme-picker-group-label">Settings</div>
                     <button
                       className="theme-picker-item"
+                      data-testid="preferences-menu-item"
+                      onClick={() => {
+                        setShowSettingsMenu(false);
+                        setShowPreferences(true);
+                      }}
+                    >
+                      <Sliders size={13} />
+                      <span className="theme-picker-name">Preferences</span>
+                    </button>
+                    <button
+                      className="theme-picker-item"
                       onClick={() => {
                         setShowSettingsMenu(false);
                         setShowKnownHosts(true);
@@ -540,6 +565,9 @@ export default function App() {
       <ToastContainer />
       <PassphrasePrompt />
       <HostKeyMismatchPrompt />
+      {showPreferences && (
+        <PreferencesDialog onClose={() => setShowPreferences(false)} />
+      )}
       <KnownHostsDialog
         open={showKnownHosts}
         onClose={() => setShowKnownHosts(false)}
