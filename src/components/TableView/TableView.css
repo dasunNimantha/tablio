@@ -95,7 +95,11 @@
 /* so the right edge of the header doesn't look unbalanced.             */
 /* ------------------------------------------------------------------ */
 
-.tv-query-btn {
+/* Compound selector .tv-header-right .tv-query-btn so we win against
+ * the global .btn-ghost rule (which also sets `height: 30px`); both
+ * single-class selectors have identical specificity and the cascade
+ * order was leaving us 30px tall in some bundles. */
+.tv-header-right .tv-query-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -117,13 +121,13 @@
   transition: color 0.12s, background 0.12s, border-color 0.12s;
 }
 
-.tv-query-btn:hover {
+.tv-header-right .tv-query-btn:hover {
   color: var(--text-primary);
   background: var(--bg-tertiary);
   border-color: color-mix(in srgb, var(--text-muted) 25%, var(--border));
 }
 
-.tv-query-btn:active {
+.tv-header-right .tv-query-btn:active {
   background: var(--bg-secondary);
 }
 

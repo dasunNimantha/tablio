@@ -228,7 +228,7 @@ export function TableView({
 
         <div className="tv-header-right">
           <button
-            className="tv-query-btn btn-ghost"
+            className="tv-query-btn"
             onClick={handleOpenQuery}
             title="Open SQL query console for this database"
           >
