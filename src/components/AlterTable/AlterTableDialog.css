@@ -89,45 +89,138 @@
 }
 
 .alter-table-add-btn {
-  height: 30px;
-  padding: 0 10px;
+  /* Sized to match the sibling search input exactly so the toolbar
+   * row reads as one band. Global `button { height: 34px }` was
+   * winning earlier in some bundles via cascade order, so we
+   * explicitly box this in with border-box + line-height. */
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  line-height: 1;
+  padding: 0 12px;
   font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+  /* Pin sizing so a long badge group on the right can't squash it. */
+  flex-shrink: 0;
+}
+
+.alter-table-add-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: color-mix(in srgb, var(--text-muted) 25%, var(--border));
 }
 
 /* Column-name filter row (#60). Sits above the columns table so
  * users can narrow a 100-column list to whatever they're looking
  * for. Local state, cleared when the dialog unmounts. */
-.alter-table-columns-filter {
+/* Toolbar row: search + Add Column grouped on the left, row-status
+ * badges anchored on the right. Replaces the previous "Columns"
+ * section header (which was redundant with the table directly
+ * below) and the standalone summary band. */
+.alter-table-toolbar-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-  padding: 6px 8px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.alter-table-toolbar-left {
+  display: flex;
+  align-items: stretch; /* let children fill the row height pixel-for-pixel */
+  gap: 8px;
+  min-width: 0;
+  /* Cap the left group so the badges always have room — without
+   * this the search input's flex-basis would push the right side
+   * off-edge on narrow viewports. */
+  flex: 1 1 auto;
+  height: 32px;
+}
+
+/* Force every direct child of the toolbar-left group to the exact
+ * same outer height as the row. Defensive — both .alter-table-add-btn
+ * and the search wrapper already set 32px individually, but a stray
+ * global rule has bitten us once already (button { height: 34px }),
+ * so we lock the row height at the parent too. */
+.alter-table-toolbar-left > * {
+  height: 32px;
+  box-sizing: border-box;
+}
+
+.alter-table-toolbar-left .alter-table-columns-filter-input {
+  height: 100%;
+}
+
+.alter-table-columns-filter {
+  position: relative;
+  /* Cap the search width — it doesn't need to stretch across the
+   * whole panel and the visual mass at full width competes with
+   * the column table below. */
+  flex: 0 1 340px;
+  min-width: 220px;
+  margin-bottom: 0;
 }
 
 .alter-table-columns-filter-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
   color: var(--text-muted);
-  flex-shrink: 0;
+  pointer-events: none;
+  z-index: 1;
 }
 
 .alter-table-columns-filter-input {
-  flex: 1;
-  height: 26px;
-  padding: 0 6px;
-  background: transparent;
-  border: none;
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px; /* matches .alter-table-add-btn so the toolbar lines up */
+  padding: 0 30px 0 28px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: 12px;
   outline: none;
+  transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
+}
+
+.alter-table-columns-filter-input:focus {
+  border-color: var(--accent);
+  background: var(--bg-secondary);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 .alter-table-columns-filter-clear {
-  flex-shrink: 0;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
+  cursor: pointer;
+}
+
+.alter-table-columns-filter-clear:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
 }
 
 .alter-table-columns-empty {
@@ -306,6 +399,12 @@
   display: flex;
   align-items: center;
   min-height: 32px;
+  /* Critical for column alignment: without `min-width: 0` a flex
+   * item refuses to shrink below its intrinsic content width, so a
+   * long DEFAULT value (e.g. `nextval('foo_id_seq'::regclass)`)
+   * stretches the cell past its flex allotment and offsets every
+   * row's right-hand columns. */
+  min-width: 0;
 }
 
 .alter-table-cell--name {
@@ -333,10 +432,17 @@
 }
 
 .editable-cell {
-  display: flex;
-  align-items: center;
+  display: block;
   width: 100%;
+  min-width: 0;
   min-height: 32px;
+  /* Single-line ellipsis so long values (sequence-based defaults,
+   * long expressions) don't push the row taller or wider than its
+   * peers. A tooltip on hover surfaces the full text. */
+  line-height: 32px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-family: var(--font-mono);
   font-size: 12px;
   padding: 4px 8px;
@@ -409,7 +515,14 @@
   border-radius: var(--radius-md);
   background: var(--bg-tertiary);
   padding: 12px 14px;
-  overflow-x: auto;
+  /* Real working area for the SQL — was previously hugging its
+   * content which made multi-statement previews look squashed
+   * inside a 1-line strip. Min-height covers the empty/single-line
+   * case; max-height plus overflow-y keeps long previews from
+   * pushing the column list off-screen. */
+  min-height: 140px;
+  max-height: 320px;
+  overflow: auto;
 }
 
 .ddl-preview-label {

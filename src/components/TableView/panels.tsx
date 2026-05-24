@@ -62,25 +62,27 @@ export function ColumnsPanel({
   return (
     <>
       <div className="tv-columns-filter">
-        <Search size={13} className="tv-columns-filter-icon" />
-        <input
-          className="tv-columns-filter-input"
-          type="text"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Search columns..."
-          aria-label="Filter columns by name"
-        />
-        {filter && (
-          <button
-            type="button"
-            className="btn-icon tv-columns-filter-clear"
-            onClick={() => setFilter("")}
-            aria-label="Clear column filter"
-          >
-            <X size={13} />
-          </button>
-        )}
+        <div className="tv-columns-search">
+          <Search size={13} className="tv-columns-filter-icon" />
+          <input
+            className="tv-columns-filter-input"
+            type="text"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Search columns..."
+            aria-label="Filter columns by name"
+          />
+          {filter && (
+            <button
+              type="button"
+              className="btn-icon tv-columns-filter-clear"
+              onClick={() => setFilter("")}
+              aria-label="Clear column filter"
+            >
+              <X size={13} />
+            </button>
+          )}
+        </div>
         {onEnterEdit && (
           <button
             type="button"

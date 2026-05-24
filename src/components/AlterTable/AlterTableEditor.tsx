@@ -454,81 +454,85 @@ export function AlterTableEditor({
   // own toolbar for "inline") differs.
   const body = (
     <>
-      <div className="alter-table-summary">
-        <div className="alter-table-summary-main">
-          <div className="alter-table-summary-title">
-            Review changes before applying
-          </div>
-          <div className="alter-table-summary-path">
-            {database}.{schema}.{tableName}
-          </div>
-          <div className="alter-table-summary-note">
-            Click a column type to change it, or double-click a name
-            or default value to edit it inline.
+      {variant === "modal" && (
+        <div className="alter-table-summary">
+          <div className="alter-table-summary-main">
+            <div className="alter-table-summary-path">
+              {database}.{schema}.{tableName}
+            </div>
           </div>
         </div>
-        <div className="alter-table-summary-badges">
-          <span className="alter-table-badge">
-            {columns.length} existing columns
-          </span>
-          <span className="alter-table-badge">
-            {modifiedExistingCount} modified
-          </span>
-          <span
-            className={`alter-table-badge ${
-              pendingChangeCount > 0 ? "alter-table-badge--pending" : ""
-            }`}
-          >
-            {pendingChangeCount} pending{" "}
-            {pendingChangeCount === 1 ? "change" : "changes"}
-          </span>
-        </div>
-      </div>
+      )}
 
-      <div className="form-row">
-        <div className="form-group flex-1">
-          <label>Schema</label>
-          <input value={`${database}.${schema}`} disabled />
+      {variant === "modal" && (
+        <div className="form-row">
+          <div className="form-group flex-1">
+            <label>Schema</label>
+            <input value={`${database}.${schema}`} disabled />
+          </div>
+          <div className="form-group flex-1">
+            <label>Table Name</label>
+            <input
+              value={tableNameLocal}
+              onChange={(e) => setTableNameLocal(e.target.value)}
+              placeholder="table_name"
+            />
+          </div>
         </div>
-        <div className="form-group flex-1">
-          <label>Table Name</label>
-          <input
-            value={tableNameLocal}
-            onChange={(e) => setTableNameLocal(e.target.value)}
-            placeholder="table_name"
-          />
-        </div>
-      </div>
+      )}
 
       <div className="form-group">
-        <div className="alter-table-section-header">
-          <label>Columns</label>
-          <button className="btn-ghost alter-table-add-btn" onClick={addColumn}>
-            <Plus size={14} /> Add Column
-          </button>
-        </div>
-
-        {/* Column-name filter (#60). */}
-        <div className="alter-table-columns-filter">
-          <Search size={13} className="alter-table-columns-filter-icon" />
-          <input
-            type="text"
-            className="alter-table-columns-filter-input"
-            value={columnFilter}
-            onChange={(e) => setColumnFilter(e.target.value)}
-            placeholder="Search columns..."
-            aria-label="Filter columns by name"
-          />
-          {columnFilter && (
+        {/* Toolbar row: search + Add Column on the left as a grouped
+         *  action pair, row-status badges anchored on the right. The
+         *  former "Columns" section header is gone — the columns
+         *  table directly below makes its purpose obvious. */}
+        <div className="alter-table-toolbar-row">
+          <div className="alter-table-toolbar-left">
+            <div className="alter-table-columns-filter">
+              <Search size={13} className="alter-table-columns-filter-icon" />
+              <input
+                type="text"
+                className="alter-table-columns-filter-input"
+                value={columnFilter}
+                onChange={(e) => setColumnFilter(e.target.value)}
+                placeholder="Search columns..."
+                aria-label="Filter columns by name"
+              />
+              {columnFilter && (
+                <button
+                  type="button"
+                  className="alter-table-columns-filter-clear"
+                  onClick={() => setColumnFilter("")}
+                  aria-label="Clear column filter"
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </div>
             <button
-              type="button"
-              className="btn-icon alter-table-columns-filter-clear"
-              onClick={() => setColumnFilter("")}
-              aria-label="Clear column filter"
+              className="alter-table-add-btn"
+              onClick={addColumn}
+              title="Add a new column to this table"
             >
-              <X size={13} />
+              <Plus size={14} /> Add Column
             </button>
-          )}
+          </div>
+          <div className="alter-table-summary-badges">
+            <span className="alter-table-badge">
+              {columns.length} existing columns
+            </span>
+            <span className="alter-table-badge">
+              {modifiedExistingCount} modified
+            </span>
+            <span
+              className={`alter-table-badge ${
+                pendingChangeCount > 0 ? "alter-table-badge--pending" : ""
+              }`}
+            >
+              {pendingChangeCount} pending{" "}
+              {pendingChangeCount === 1 ? "change" : "changes"}
+            </span>
+          </div>
         </div>
 
         <div className="alter-table-columns">
@@ -585,18 +589,34 @@ export function AlterTableEditor({
                   }
                 />
               </div>
-              <div style={{ width: 40 }} />
-              <input
-                style={{ flex: 1 }}
-                value={col.default_value}
-                onChange={(e) =>
-                  updatePendingColumn(idx, "default_value", e.target.value)
-                }
-                placeholder="default"
+              {/* Match the existing-row PK spacer's display/justify
+               *  rules so column widths align pixel-for-pixel between
+               *  pending-new and existing rows. */}
+              <div
+                style={{
+                  width: 40,
+                  display: "flex",
+                  justifyContent: "center",
+                }}
               />
+              {/* Default input wrapped in the same .alter-table-cell as
+               *  the existing rows' span — without the wrapper the bare
+               *  input had a different flex baseline + missing min-width:0,
+               *  visibly offsetting the trailing X button against
+               *  neighbouring rows. */}
+              <div style={{ flex: 1 }} className="alter-table-cell">
+                <input
+                  value={col.default_value}
+                  onChange={(e) =>
+                    updatePendingColumn(idx, "default_value", e.target.value)
+                  }
+                  placeholder="default"
+                />
+              </div>
               <button
-                className="btn-icon"
+                className="btn-icon drop-column-btn"
                 onClick={() => removePendingColumn(idx)}
+                title="Remove this new column"
               >
                 <X size={12} />
               </button>
@@ -757,7 +777,11 @@ export function AlterTableEditor({
                   ) : (
                     <span
                       className="editable-cell"
-                      title="Double-click to edit default value"
+                      title={
+                        eff.default
+                          ? `${eff.default} — double-click to edit`
+                          : "Double-click to edit default value"
+                      }
                       onDoubleClick={() =>
                         setEditingCell({
                           type: "existing",
