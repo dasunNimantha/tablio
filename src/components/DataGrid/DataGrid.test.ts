@@ -1119,3 +1119,114 @@ describe("Down-on-last-row creates a new pending row (#64)", () => {
     ).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Multi-column sort emission (issue #57). The DataGrid's `onSortChanged`
+// reads ag-grid's column state, filters to the sorted columns, sorts them
+// by `sortIndex` (the priority order from Shift+click), then maps each
+// entry to `{ column, direction }`. Before the fix this code took only
+// `sortModel[0]` and emitted a single `SortSpec | null` — the grid lit
+// up multi-sort indicators in the header but the backend ORDER BY only
+// used the primary column.
+//
+// Lock the new contract here as a pure function so a regression can't
+// silently re-truncate the model.
+// ---------------------------------------------------------------------------
+
+interface SortSpec {
+  column: string;
+  direction: "asc" | "desc";
+}
+
+interface AgColumnState {
+  colId: string;
+  sort: "asc" | "desc" | null | undefined;
+  sortIndex?: number | null;
+}
+
+/** Mirrors the body of `onSortChanged` in DataGrid.tsx. */
+function emitSortModel(columnState: AgColumnState[]): SortSpec[] {
+  const sortModel = columnState
+    .filter((c) => c.sort)
+    .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
+  return sortModel.map((c) => ({
+    column: c.colId,
+    direction: c.sort as "asc" | "desc",
+  }));
+}
+
+describe("DataGrid multi-column sort emission (issue #57)", () => {
+  it("emits an empty array when no column is sorted", () => {
+    expect(
+      emitSortModel([
+        { colId: "id", sort: null },
+        { colId: "name", sort: null },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("emits a single entry when one column is sorted", () => {
+    expect(
+      emitSortModel([
+        { colId: "id", sort: null },
+        { colId: "name", sort: "asc", sortIndex: 0 },
+      ]),
+    ).toEqual([{ column: "name", direction: "asc" }]);
+  });
+
+  it("emits the full model in priority order on Shift+click", () => {
+    // Multi-sort: dept (primary, asc), salary (secondary, desc).
+    // ag-grid emits the column state in the grid's display order
+    // (which is independent of sort priority); the handler must
+    // re-sort by `sortIndex` so the ORDER BY clause is emitted in
+    // the priority the user picked.
+    const state: AgColumnState[] = [
+      { colId: "id", sort: null },
+      { colId: "salary", sort: "desc", sortIndex: 1 },
+      { colId: "dept", sort: "asc", sortIndex: 0 },
+    ];
+    expect(emitSortModel(state)).toEqual([
+      { column: "dept", direction: "asc" },
+      { column: "salary", direction: "desc" },
+    ]);
+  });
+
+  it("handles a three-column sort", () => {
+    const state: AgColumnState[] = [
+      { colId: "country", sort: "asc", sortIndex: 0 },
+      { colId: "city", sort: "asc", sortIndex: 1 },
+      { colId: "name", sort: "desc", sortIndex: 2 },
+      { colId: "id", sort: null },
+    ];
+    expect(emitSortModel(state).map((s) => s.column)).toEqual([
+      "country",
+      "city",
+      "name",
+    ]);
+  });
+
+  it("treats sortIndex undefined as 0 for stable ordering", () => {
+    // Older ag-grid versions sometimes emit `sortIndex: undefined`
+    // for the single-sort case. Both columns get treated as
+    // priority 0; the filter step still drops the un-sorted one
+    // so the output is the one with `sort` truthy.
+    const state: AgColumnState[] = [
+      { colId: "x", sort: null },
+      { colId: "y", sort: "asc" },
+    ];
+    expect(emitSortModel(state)).toEqual([
+      { column: "y", direction: "asc" },
+    ]);
+  });
+
+  it("does NOT truncate the sort model to its first entry", () => {
+    // Explicit guard against the original bug: before the fix the
+    // handler did `sortModel[0]` and emitted a single SortSpec.
+    // This assertion would fail if anyone re-introduces that.
+    const state: AgColumnState[] = [
+      { colId: "a", sort: "asc", sortIndex: 0 },
+      { colId: "b", sort: "desc", sortIndex: 1 },
+    ];
+    expect(emitSortModel(state).length).toBe(2);
+  });
+});

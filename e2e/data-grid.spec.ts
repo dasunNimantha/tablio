@@ -45,7 +45,11 @@ test.describe("Data grid — toolbar", () => {
   });
 
   test("Query button opens query console tab", async ({ page }) => {
-    await page.locator(".btn-ghost[title='Open SQL query console for this database']").click();
+    // The Query button moved from the DataGrid toolbar to the
+    // TableView header and dropped its `.btn-ghost` class
+    // (the global rule was clobbering its height). Now it's the
+    // dedicated `.tv-query-btn` in `.tv-header-right`.
+    await page.locator(".tv-query-btn").click();
     await expect(page.locator(".query-console")).toBeVisible({ timeout: 5000 });
   });
 

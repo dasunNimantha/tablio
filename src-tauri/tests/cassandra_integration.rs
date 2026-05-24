@@ -458,14 +458,14 @@ async fn cassandra_fetch_rows() {
     }
 
     let data = driver
-        .fetch_rows(&ks, &ks, &tbl, 0, 3, None, None)
+        .fetch_rows(&ks, &ks, &tbl, 0, 3, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.rows.len(), 3);
     assert_eq!(data.columns.len(), 3);
 
     let data_all = driver
-        .fetch_rows(&ks, &ks, &tbl, 0, 100, None, None)
+        .fetch_rows(&ks, &ks, &tbl, 0, 100, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data_all.rows.len(), 5);

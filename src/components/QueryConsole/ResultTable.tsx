@@ -8,6 +8,7 @@ import { ExportMenu } from "../ExportMenu";
 import { useToastStore } from "../../stores/toastStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { useConnectionStore } from "../../stores/connectionStore";
+import { useUserSettingsStore } from "../../stores/userSettingsStore";
 import { boolLiteral, quoteIdent, quoteQualified } from "../../lib/sqlDialect";
 import { readZoomFactor } from "../../lib/zoom";
 import "../DataGrid/ag-grid-theme.css";
@@ -59,28 +60,34 @@ function ResultDataTypeHeader(props: IHeaderParams & { dataType?: string; isPk?:
   );
 }
 
-const gridTheme = themeQuartz.withParams({
-  backgroundColor: "var(--bg-secondary)",
-  foregroundColor: "var(--text-primary)",
-  headerBackgroundColor: "var(--bg-header)",
-  accentColor: "var(--accent)",
-  borderColor: "var(--border)",
-  columnBorder: true,
-  oddRowBackgroundColor: "var(--bg-primary)",
-  rowHoverColor: "var(--bg-hover)",
-  selectedRowBackgroundColor: "var(--bg-selected)",
-  headerTextColor: "var(--text-secondary)",
-  cellTextColor: "var(--text-primary)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 14,
-  headerFontSize: 12,
-  rowHeight: 32,
-  headerHeight: 34,
-  cellHorizontalPadding: 10,
-  wrapperBorderRadius: 0,
-  borderRadius: 0,
-  headerColumnResizeHandleColor: "transparent",
-});
+/**
+ * AG Grid theme that respects the user's editor-font preference
+ * (issue #62). Rebuilt per render when the size changes.
+ */
+function buildResultTableTheme(editorFontSize: number) {
+  return themeQuartz.withParams({
+    backgroundColor: "var(--bg-secondary)",
+    foregroundColor: "var(--text-primary)",
+    headerBackgroundColor: "var(--bg-header)",
+    accentColor: "var(--accent)",
+    borderColor: "var(--border)",
+    columnBorder: true,
+    oddRowBackgroundColor: "var(--bg-primary)",
+    rowHoverColor: "var(--bg-hover)",
+    selectedRowBackgroundColor: "var(--bg-selected)",
+    headerTextColor: "var(--text-secondary)",
+    cellTextColor: "var(--text-primary)",
+    fontFamily: "var(--font-mono)",
+    fontSize: editorFontSize,
+    headerFontSize: 12,
+    rowHeight: 32,
+    headerHeight: 34,
+    cellHorizontalPadding: 10,
+    wrapperBorderRadius: 0,
+    borderRadius: 0,
+    headerColumnResizeHandleColor: "transparent",
+  });
+}
 
 export interface SourceTable {
   schema: string;
@@ -203,6 +210,15 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
   const addToast = useToastStore((s) => s.addToast);
   const openTab = useTabStore((s) => s.openTab);
   const connections = useConnectionStore((s) => s.connections);
+  // Editor font preference flows into the result-table theme via
+  // the AG Grid params API (see DataGrid for the same pattern).
+  const editorFontSize = useUserSettingsStore(
+    (s) => s.settings.editorFontSize,
+  );
+  const gridTheme = useMemo(
+    () => buildResultTableTheme(editorFontSize),
+    [editorFontSize],
+  );
   const gridApiRef = useRef<GridApi | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [showSearch, setShowSearch] = useState(false);

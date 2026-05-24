@@ -33,7 +33,13 @@ test.describe("Query console — editor and toolbar", () => {
   });
 
   test("save button is present", async ({ page }) => {
-    await expect(page.locator(".query-toolbar .btn-ghost[title='Save query']")).toBeVisible();
+    // Selecting by `data-testid` instead of the `title` attribute
+    // because the title string varies by state in the real UI:
+    //   - no saved query loaded → "Save query (Ctrl/Cmd+S)"
+    //   - saved query loaded + dirty → "Save changes (Ctrl/Cmd+S)"
+    //   - saved query loaded + clean → "No unsaved changes"
+    // The testid is stable across all three. See issue #153 / PR #154.
+    await expect(page.locator("[data-testid='save-query-btn']")).toBeVisible();
   });
 
   test("saved, history, and suggest buttons are present", async ({ page }) => {
@@ -136,52 +142,52 @@ test.describe("Query console — save query", () => {
   });
 
   test("save button opens save dialog", async ({ page }) => {
-    await page.locator(".query-toolbar .btn-ghost[title='Save query']").click();
+    await page.locator("[data-testid='save-query-btn']").click();
     await expect(page.locator(".save-query-dialog")).toBeVisible();
     await expect(page.locator(".save-query-input")).toBeVisible();
   });
 
   test("save dialog has Cancel and Save buttons", async ({ page }) => {
-    await page.locator(".query-toolbar .btn-ghost[title='Save query']").click();
+    await page.locator("[data-testid='save-query-btn']").click();
     await expect(page.locator(".save-query-actions .btn-secondary", { hasText: "Cancel" })).toBeVisible();
     await expect(page.locator(".save-query-actions .btn-primary", { hasText: "Save" })).toBeVisible();
   });
 
   test("save is disabled when name is empty", async ({ page }) => {
-    await page.locator(".query-toolbar .btn-ghost[title='Save query']").click();
+    await page.locator("[data-testid='save-query-btn']").click();
     const saveBtn = page.locator(".save-query-actions .btn-primary", { hasText: "Save" });
     await expect(saveBtn).toBeDisabled();
   });
 
   test("save is enabled when name is filled", async ({ page }) => {
-    await page.locator(".query-toolbar .btn-ghost[title='Save query']").click();
+    await page.locator("[data-testid='save-query-btn']").click();
     await page.locator(".save-query-input").fill("My Query");
     const saveBtn = page.locator(".save-query-actions .btn-primary", { hasText: "Save" });
     await expect(saveBtn).toBeEnabled();
   });
 
   test("cancel closes save dialog", async ({ page }) => {
-    await page.locator(".query-toolbar .btn-ghost[title='Save query']").click();
+    await page.locator("[data-testid='save-query-btn']").click();
     await page.locator(".save-query-actions .btn-secondary", { hasText: "Cancel" }).click();
     await expect(page.locator(".save-query-dialog")).not.toBeVisible();
   });
 
   test("save with name closes dialog", async ({ page }) => {
-    await page.locator(".query-toolbar .btn-ghost[title='Save query']").click();
+    await page.locator("[data-testid='save-query-btn']").click();
     await page.locator(".save-query-input").fill("Test Query");
     await page.locator(".save-query-actions .btn-primary", { hasText: "Save" }).click();
     await expect(page.locator(".save-query-dialog")).not.toBeVisible();
   });
 
   test("Enter key in name input saves", async ({ page }) => {
-    await page.locator(".query-toolbar .btn-ghost[title='Save query']").click();
+    await page.locator("[data-testid='save-query-btn']").click();
     await page.locator(".save-query-input").fill("Enter Query");
     await page.locator(".save-query-input").press("Enter");
     await expect(page.locator(".save-query-dialog")).not.toBeVisible();
   });
 
   test("Escape key in name input closes dialog", async ({ page }) => {
-    await page.locator(".query-toolbar .btn-ghost[title='Save query']").click();
+    await page.locator("[data-testid='save-query-btn']").click();
     await page.locator(".save-query-input").press("Escape");
     await expect(page.locator(".save-query-dialog")).not.toBeVisible();
   });

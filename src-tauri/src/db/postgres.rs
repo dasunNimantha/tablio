@@ -316,7 +316,7 @@ impl DatabaseDriver for PostgresDriver {
         table: &str,
         offset: u64,
         limit: u64,
-        sort: Option<SortSpec>,
+        sort: Vec<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData> {
         let pool = self.get_pool(database).await?;

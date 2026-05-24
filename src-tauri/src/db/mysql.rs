@@ -187,7 +187,7 @@ impl DatabaseDriver for MysqlDriver {
         table: &str,
         offset: u64,
         limit: u64,
-        sort: Option<SortSpec>,
+        sort: Vec<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData> {
         let columns = self.list_columns(database, database, table).await?;

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Search, X } from "lucide-react";
+import { Search, X, Pencil } from "lucide-react";
 import {
   ColumnInfo,
   IndexInfo,
@@ -20,9 +20,23 @@ import {
 interface ColumnsPanelProps {
   columns: ColumnInfo[];
   foreignKeys: ForeignKeyInfo[];
+  /**
+   * When provided, renders an "Edit" button next to the column-name
+   * filter. Clicking it should swap the read-only panel for the
+   * Alter Table editor — that wiring lives in {@link SchemaPage}.
+   * Issue #59.
+   *
+   * Left optional so this component still works for any future
+   * call site that wants a strictly read-only columns view.
+   */
+  onEnterEdit?: () => void;
 }
 
-export function ColumnsPanel({ columns, foreignKeys }: ColumnsPanelProps) {
+export function ColumnsPanel({
+  columns,
+  foreignKeys,
+  onEnterEdit,
+}: ColumnsPanelProps) {
   const fksByColumn = useMemo(() => {
     const m = new Map<string, ForeignKeyInfo[]>();
     for (const fk of foreignKeys) {
@@ -48,23 +62,37 @@ export function ColumnsPanel({ columns, foreignKeys }: ColumnsPanelProps) {
   return (
     <>
       <div className="tv-columns-filter">
-        <Search size={13} className="tv-columns-filter-icon" />
-        <input
-          className="tv-columns-filter-input"
-          type="text"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Search columns..."
-          aria-label="Filter columns by name"
-        />
-        {filter && (
+        <div className="tv-columns-search">
+          <Search size={13} className="tv-columns-filter-icon" />
+          <input
+            className="tv-columns-filter-input"
+            type="text"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Search columns..."
+            aria-label="Filter columns by name"
+          />
+          {filter && (
+            <button
+              type="button"
+              className="btn-icon tv-columns-filter-clear"
+              onClick={() => setFilter("")}
+              aria-label="Clear column filter"
+            >
+              <X size={13} />
+            </button>
+          )}
+        </div>
+        {onEnterEdit && (
           <button
             type="button"
-            className="btn-icon tv-columns-filter-clear"
-            onClick={() => setFilter("")}
-            aria-label="Clear column filter"
+            className="tv-columns-edit-btn"
+            onClick={onEnterEdit}
+            title="Edit table columns"
+            data-testid="schema-edit-btn"
           >
-            <X size={13} />
+            <Pencil size={13} />
+            <span>Edit</span>
           </button>
         )}
       </div>

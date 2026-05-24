@@ -456,7 +456,7 @@ async fn mariadb_fetch_rows_empty_table() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 0);
@@ -495,7 +495,7 @@ async fn mariadb_fetch_rows_with_data() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -526,14 +526,14 @@ async fn mariadb_fetch_rows_pagination() {
         .unwrap();
 
     let page1 = driver
-        .fetch_rows(&db, &db, &tbl, 0, 5, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 5, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(page1.rows.len(), 5);
     assert_eq!(page1.total_rows, 10);
 
     let page2 = driver
-        .fetch_rows(&db, &db, &tbl, 5, 5, None, None)
+        .fetch_rows(&db, &db, &tbl, 5, 5, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(page2.rows.len(), 5);
@@ -570,10 +570,10 @@ async fn mariadb_fetch_rows_sort_asc_desc() {
             &tbl,
             0,
             10,
-            Some(SortSpec {
+            vec![SortSpec {
                 column: "name".into(),
                 direction: SortDirection::Asc,
-            }),
+            }],
             None,
         )
         .await
@@ -588,10 +588,10 @@ async fn mariadb_fetch_rows_sort_asc_desc() {
             &tbl,
             0,
             10,
-            Some(SortSpec {
+            vec![SortSpec {
                 column: "name".into(),
                 direction: SortDirection::Desc,
-            }),
+            }],
             None,
         )
         .await
@@ -625,7 +625,7 @@ async fn mariadb_fetch_rows_filter() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, Some("`val` > 15".into()))
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), Some("`val` > 15".into()))
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -657,7 +657,7 @@ async fn mariadb_fetch_rows_null_values() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -701,7 +701,7 @@ async fn mariadb_fetch_rows_various_data_types() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 10, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -842,7 +842,7 @@ async fn mariadb_apply_changes_insert() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -887,7 +887,7 @@ async fn mariadb_apply_changes_update() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.rows[0][1], serde_json::json!("new"));
@@ -931,7 +931,7 @@ async fn mariadb_apply_changes_delete() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -1119,7 +1119,7 @@ async fn mariadb_alter_table_set_default() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 10, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.rows[0][1], serde_json::json!(5));
@@ -1184,7 +1184,7 @@ async fn mariadb_truncate_table() {
 
     driver.truncate_table(&db, &db, &tbl).await.unwrap();
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 0);
@@ -1251,7 +1251,7 @@ async fn mariadb_import_data() {
     assert_eq!(n, 2);
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 10, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -1404,7 +1404,7 @@ async fn mariadb_no_db_fetch_rows_on_specific_database() {
 
     let driver = mariadb_driver_no_db!();
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -1511,4 +1511,341 @@ async fn mariadb_multi_statement_create_view_then_select_returns_rows() {
         .execute_query(&db, &format!("DROP TABLE IF EXISTS `{db}`.`{tbl}`"))
         .await
         .ok();
+}
+
+// ---------------------------------------------------------------------------
+// alter_table: editor-driven multi-op sequences (issue #59 follow-up)
+// ---------------------------------------------------------------------------
+// MariaDB shares the mysql_common alter_table implementation, but we keep
+// the tests separate so per-engine regressions surface clearly in CI.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mariadb_alter_table_rename_then_change_type_same_column() {
+    let (driver, db) = mariadb_driver!();
+    let tbl = unique_table("mdb_seq_rn_ct");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{tbl}` (pk INT PRIMARY KEY, legacy_id INT)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO `{tbl}` VALUES (1, 42)"))
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[
+                AlterTableOperation::RenameColumn {
+                    old_name: "legacy_id".into(),
+                    new_name: "id".into(),
+                },
+                AlterTableOperation::ChangeColumnType {
+                    column_name: "id".into(),
+                    new_type: "BIGINT".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, &db, &tbl).await.unwrap();
+    let id = cols.iter().find(|c| c.name == "id").unwrap();
+    assert!(id.data_type.to_lowercase().contains("bigint"));
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mariadb_alter_table_rename_table_then_alter_columns() {
+    let (driver, db) = mariadb_driver!();
+    let old = unique_table("mdb_rn_then");
+    let new_name = unique_table("mdb_rn_then_new");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{old}` (id INT PRIMARY KEY, status TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &old,
+            &[
+                AlterTableOperation::RenameTable {
+                    new_name: new_name.clone(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "created_at".into(),
+                        data_type: "DATETIME".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+                AlterTableOperation::DropColumn {
+                    column_name: "status".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, &db, &new_name).await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"created_at"));
+    assert!(!names.contains(&"status"));
+
+    driver
+        .drop_object(&db, &db, &new_name, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mariadb_alter_table_drop_then_add_same_name() {
+    let (driver, db) = mariadb_driver!();
+    let tbl = unique_table("mdb_drop_add");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY, payload TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[
+                AlterTableOperation::DropColumn {
+                    column_name: "payload".into(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "payload".into(),
+                        data_type: "JSON".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, &db, &tbl).await.unwrap();
+    let payload = cols.iter().find(|c| c.name == "payload").unwrap();
+    let dt = payload.data_type.to_lowercase();
+    // MariaDB stores JSON as a LONGTEXT alias internally; accept either.
+    assert!(dt.contains("json") || dt.contains("longtext"));
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mariadb_alter_table_kitchen_sink_one_call() {
+    let (driver, db) = mariadb_driver!();
+    let tbl = unique_table("mdb_kitchen");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY, a INT, b TEXT, c TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[
+                AlterTableOperation::RenameColumn {
+                    old_name: "a".into(),
+                    new_name: "alpha".into(),
+                },
+                AlterTableOperation::ChangeColumnType {
+                    column_name: "alpha".into(),
+                    new_type: "BIGINT".into(),
+                },
+                AlterTableOperation::DropColumn {
+                    column_name: "b".into(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "tag".into(),
+                        data_type: "VARCHAR(32)".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+                AlterTableOperation::SetNullable {
+                    column_name: "c".into(),
+                    nullable: false,
+                },
+                AlterTableOperation::SetDefault {
+                    column_name: "c".into(),
+                    default_value: Some("'pending'".into()),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, &db, &tbl).await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"alpha"));
+    assert!(!names.contains(&"a"));
+    assert!(!names.contains(&"b"));
+    assert!(names.contains(&"c"));
+    assert!(names.contains(&"tag"));
+    let alpha = cols.iter().find(|c| c.name == "alpha").unwrap();
+    assert!(alpha.data_type.to_lowercase().contains("bigint"));
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mariadb_alter_table_empty_operations_is_noop() {
+    let (driver, db) = mariadb_driver!();
+    let tbl = unique_table("mdb_noop");
+
+    driver
+        .execute_query(&db, &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY)"))
+        .await
+        .unwrap();
+    driver
+        .alter_table(&db, &db, &tbl, &[])
+        .await
+        .expect("empty operations should be a successful no-op");
+    let cols = driver.list_columns(&db, &db, &tbl).await.unwrap();
+    assert_eq!(cols.len(), 1);
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mariadb_alter_table_add_not_null_default_backfills_existing_rows() {
+    let (driver, db) = mariadb_driver!();
+    let tbl = unique_table("mdb_backfill");
+
+    driver
+        .execute_query(&db, &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY)"))
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO `{tbl}` VALUES (1), (2)"))
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[AlterTableOperation::AddColumn {
+                column: ColumnDefinition {
+                    name: "status".into(),
+                    data_type: "VARCHAR(20)".into(),
+                    is_nullable: false,
+                    is_primary_key: false,
+                    default_value: Some("'pending'".into()),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .execute_query(&db, &format!("SELECT status FROM `{tbl}` ORDER BY id"))
+        .await
+        .unwrap();
+    let values: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(values, vec!["pending", "pending"]);
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mariadb_alter_table_rename_nonexistent_column_errors() {
+    let (driver, db) = mariadb_driver!();
+    let tbl = unique_table("mdb_rn_bad");
+
+    driver
+        .execute_query(&db, &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY)"))
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[AlterTableOperation::RenameColumn {
+                old_name: "nope".into(),
+                new_name: "noooo".into(),
+            }],
+        )
+        .await;
+    assert!(result.is_err());
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mariadb_alter_table_add_duplicate_column_errors() {
+    let (driver, db) = mariadb_driver!();
+    let tbl = unique_table("mdb_dup");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY, status TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[AlterTableOperation::AddColumn {
+                column: ColumnDefinition {
+                    name: "status".into(),
+                    data_type: "TEXT".into(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                },
+            }],
+        )
+        .await;
+    assert!(result.is_err());
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }

@@ -413,7 +413,7 @@ impl DatabaseDriver for CassandraDriver {
         table: &str,
         offset: u64,
         limit: u64,
-        sort: Option<SortSpec>,
+        sort: Vec<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData> {
         let columns = self.list_columns(database, database, table).await?;
@@ -464,15 +464,32 @@ impl DatabaseDriver for CassandraDriver {
 
         let mut cql = format!("SELECT * FROM {}{}", qualified, where_clause);
 
-        if let Some(ref s) = sort {
-            cql.push_str(&format!(
-                " ORDER BY {} {}",
-                quote_ident(&s.column),
-                match s.direction {
-                    SortDirection::Asc => "ASC",
-                    SortDirection::Desc => "DESC",
-                }
-            ));
+        if !sort.is_empty() {
+            // CQL `ORDER BY` is only valid on a partition's
+            // clustering columns and only in the table's defined
+            // clustering order (or its strict reverse). Tablio
+            // can't statically know which columns are clustering
+            // keys at this layer, so we just pass the user-picked
+            // sort vec through and let the Cassandra server be
+            // the gatekeeper: legal orderings work, illegal ones
+            // surface as an execution error. Multi-column sort
+            // (issue #57) follows the same rule — typically only
+            // useful when the user is sorting by the clustering
+            // columns in clustering order.
+            let parts: Vec<String> = sort
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{} {}",
+                        quote_ident(&s.column),
+                        match s.direction {
+                            SortDirection::Asc => "ASC",
+                            SortDirection::Desc => "DESC",
+                        }
+                    )
+                })
+                .collect();
+            cql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
 
         // Saturating add prevents an integer overflow if the caller

@@ -57,6 +57,33 @@
   overflow: hidden;
 }
 
+/* Portal variant — the dropdown is rendered to document.body so it
+ * can escape any ancestor overflow:hidden container (modals, sticky
+ * toolbars, sidebar panels). Coordinates are computed inline via
+ * getBoundingClientRect; the z-index is bumped above the dialog
+ * overlay (which uses z-index ~1000 in this app) so the popover
+ * always stays on top. */
+.cs-dropdown--portal {
+  z-index: 2000;
+  margin-top: 0;
+  /* `.cs-dropdown` sets `min-width: 100%`, which under
+   * `position: absolute` resolves against the wrapper trigger and
+   * keeps the popover at least trigger-width. But this portal
+   * variant uses `position: fixed`, so 100% resolves against the
+   * viewport instead — the popover would stretch across the
+   * whole screen. We pin the width directly via inline `style`,
+   * so unset the min-width here. */
+  min-width: 0;
+}
+
+/* When the trigger sits close to the viewport bottom, the dropdown
+ * flips upward via `bottom: …` positioning instead of `top: …`.
+ * No additional rules are needed for the flip itself — these
+ * cosmetic adjustments just keep the visual gap on the right side. */
+.cs-dropdown--upward {
+  margin-bottom: 0;
+}
+
 .cs-options {
   flex: 1;
   min-height: 0;

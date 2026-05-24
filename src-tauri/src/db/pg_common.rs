@@ -918,7 +918,7 @@ pub async fn pg_fetch_rows_impl(
     table: &str,
     offset: u64,
     limit: u64,
-    sort: Option<SortSpec>,
+    sort: Vec<SortSpec>,
     filter: Option<String>,
 ) -> Result<TableData> {
     if let Some(ref f) = filter {
@@ -935,26 +935,36 @@ pub async fn pg_fetch_rows_impl(
         .map(|f| format!("WHERE {}", f))
         .unwrap_or_default();
 
-    let order_clause = sort
-        .map(|s| {
-            let dir = match s.direction {
-                SortDirection::Asc => "ASC",
-                SortDirection::Desc => "DESC",
-            };
-            format!("ORDER BY {} {}", quote_ident(&s.column), dir)
-        })
-        .unwrap_or_else(|| {
-            let pk_cols: Vec<String> = columns
-                .iter()
-                .filter(|c| c.is_primary_key)
-                .map(|c| quote_ident(&c.name))
-                .collect();
-            if pk_cols.is_empty() {
-                String::new()
-            } else {
-                format!("ORDER BY {}", pk_cols.join(", "))
-            }
-        });
+    let order_clause = if !sort.is_empty() {
+        // Multi-column sort (issue #57): compose every requested
+        // sort in priority order, comma-separated.
+        let parts: Vec<String> = sort
+            .iter()
+            .map(|s| {
+                let dir = match s.direction {
+                    SortDirection::Asc => "ASC",
+                    SortDirection::Desc => "DESC",
+                };
+                format!("{} {}", quote_ident(&s.column), dir)
+            })
+            .collect();
+        format!("ORDER BY {}", parts.join(", "))
+    } else {
+        // No explicit sort — order by the PK columns so pagination
+        // is stable. Empty if the table has no PK at all (offset
+        // pagination on an unordered set is the caller's problem
+        // in that case).
+        let pk_cols: Vec<String> = columns
+            .iter()
+            .filter(|c| c.is_primary_key)
+            .map(|c| quote_ident(&c.name))
+            .collect();
+        if pk_cols.is_empty() {
+            String::new()
+        } else {
+            format!("ORDER BY {}", pk_cols.join(", "))
+        }
+    };
 
     let count_sql = format!(
         "SELECT COUNT(*) as cnt FROM {}.{} {}",

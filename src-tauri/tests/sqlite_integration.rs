@@ -466,7 +466,7 @@ async fn sqlite_fetch_rows_empty_table() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 0);
@@ -507,7 +507,7 @@ async fn sqlite_fetch_rows_with_data() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -540,14 +540,14 @@ async fn sqlite_fetch_rows_pagination() {
         .unwrap();
 
     let page1 = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 5, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 5, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(page1.rows.len(), 5);
     assert_eq!(page1.total_rows, 10);
 
     let page2 = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 5, 5, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 5, 5, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(page2.rows.len(), 5);
@@ -586,10 +586,10 @@ async fn sqlite_fetch_rows_sort_asc_desc() {
             &tbl,
             0,
             10,
-            Some(SortSpec {
+            vec![SortSpec {
                 column: "name".into(),
                 direction: SortDirection::Asc,
-            }),
+            }],
             None,
         )
         .await
@@ -604,16 +604,102 @@ async fn sqlite_fetch_rows_sort_asc_desc() {
             &tbl,
             0,
             10,
-            Some(SortSpec {
+            vec![SortSpec {
                 column: "name".into(),
                 direction: SortDirection::Desc,
-            }),
+            }],
             None,
         )
         .await
         .unwrap();
     assert_eq!(desc.rows[0][1], serde_json::json!("c"));
     assert_eq!(desc.rows[2][1], serde_json::json!("a"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+// Multi-column sort end-to-end (issue #57). Before the fix the
+// driver could only accept a single SortSpec; ag-grid would
+// display "1", "2" priority badges in the header but the backend
+// ORDER BY only honoured the primary column.
+#[tokio::test]
+async fn sqlite_fetch_rows_multi_column_sort() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("multi_sort");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE \"{}\" (id INTEGER PRIMARY KEY, dept TEXT, salary INTEGER)",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+    // Deliberately interleave dept/salary so single-column sort
+    // can't accidentally produce the multi-sort order. Expected
+    // ORDER BY dept ASC, salary DESC:
+    //   eng/200, eng/150, eng/100, sales/90, sales/70
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "INSERT INTO \"{}\" VALUES \
+                 (1,'eng',100),(2,'sales',90),(3,'eng',200), \
+                 (4,'sales',70),(5,'eng',150)",
+                tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let rows = driver
+        .fetch_rows(
+            DB,
+            SCHEMA,
+            &tbl,
+            0,
+            10,
+            vec![
+                SortSpec {
+                    column: "dept".into(),
+                    direction: SortDirection::Asc,
+                },
+                SortSpec {
+                    column: "salary".into(),
+                    direction: SortDirection::Desc,
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.rows.len(), 5);
+    let depts: Vec<_> = rows.rows.iter().map(|r| r[1].clone()).collect();
+    let salaries: Vec<_> = rows.rows.iter().map(|r| r[2].clone()).collect();
+    assert_eq!(
+        depts,
+        vec![
+            serde_json::json!("eng"),
+            serde_json::json!("eng"),
+            serde_json::json!("eng"),
+            serde_json::json!("sales"),
+            serde_json::json!("sales"),
+        ],
+    );
+    assert_eq!(
+        salaries,
+        vec![
+            serde_json::json!(200),
+            serde_json::json!(150),
+            serde_json::json!(100),
+            serde_json::json!(90),
+            serde_json::json!(70),
+        ],
+    );
 
     driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
     let _ = std::fs::remove_file(&path);
@@ -643,7 +729,15 @@ async fn sqlite_fetch_rows_filter() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, Some("\"val\" > 15".into()))
+        .fetch_rows(
+            DB,
+            SCHEMA,
+            &tbl,
+            0,
+            50,
+            Vec::new(),
+            Some("\"val\" > 15".into()),
+        )
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -672,7 +766,7 @@ async fn sqlite_fetch_rows_unsafe_filter_rejected() {
             &tbl,
             0,
             50,
-            None,
+            Vec::new(),
             Some("1=1; DROP TABLE x".into()),
         )
         .await;
@@ -706,7 +800,7 @@ async fn sqlite_fetch_rows_null_values() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -749,7 +843,7 @@ async fn sqlite_fetch_rows_various_data_types() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -910,7 +1004,7 @@ async fn sqlite_apply_changes_insert() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -958,7 +1052,7 @@ async fn sqlite_apply_changes_update() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.rows[0][1], serde_json::json!("new"));
@@ -1004,7 +1098,7 @@ async fn sqlite_apply_changes_delete() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -1062,7 +1156,7 @@ async fn sqlite_apply_changes_batch() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -1392,7 +1486,7 @@ async fn sqlite_truncate_table() {
 
     driver.truncate_table(DB, SCHEMA, &tbl).await.unwrap();
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 0);
@@ -1488,7 +1582,7 @@ async fn sqlite_import_data() {
     assert_eq!(n, 2);
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -1519,7 +1613,7 @@ async fn sqlite_import_data_large_batch() {
     assert_eq!(n, 55);
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 200, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 200, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 55);
@@ -1752,5 +1846,355 @@ async fn sqlite_select_of_pure_expressions_returns_real_values() {
     assert!(!row[1].is_null(), "1.5*2 came back NULL: {:?}", row[1]);
     assert!(!row[2].is_null(), "'hi' came back NULL: {:?}", row[2]);
 
+    let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------------
+// alter_table: editor-driven multi-op sequences (issue #59 follow-up)
+// ---------------------------------------------------------------------------
+// SQLite supports only AddColumn, DropColumn (3.35+), RenameColumn, and
+// RenameTable. The unsupported ops (ChangeColumnType / SetNullable /
+// SetDefault) are already covered above as individual error cases. These
+// multi-op tests focus on the supported ops being composable in one call.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sqlite_alter_table_rename_table_then_alter_columns() {
+    let (driver, path) = create_driver().await;
+    let old = unique_table("sl_rn_then");
+    let new_name = unique_table("sl_rn_then_new");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{old}\" (id INTEGER PRIMARY KEY, status TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &old,
+            &[
+                AlterTableOperation::RenameTable {
+                    new_name: new_name.clone(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "created_at".into(),
+                        data_type: "TEXT".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+                AlterTableOperation::DropColumn {
+                    column_name: "status".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &new_name).await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"created_at"));
+    assert!(!names.contains(&"status"));
+
+    driver
+        .drop_object(DB, SCHEMA, &new_name, "TABLE")
+        .await
+        .unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_rename_column_then_drop_renamed() {
+    // SQLite uses a different mechanism for DROP COLUMN (3.35+) than
+    // RENAME COLUMN, so chaining them in one call validates the
+    // current_table cursor handles the rename then resolves the
+    // drop against the renamed identifier.
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_rn_drop");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY, legacy TEXT, keep TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::RenameColumn {
+                    old_name: "legacy".into(),
+                    new_name: "tombstoned".into(),
+                },
+                AlterTableOperation::DropColumn {
+                    column_name: "tombstoned".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"keep"));
+    assert!(!names.contains(&"legacy"));
+    assert!(!names.contains(&"tombstoned"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_multiple_add_columns_in_one_call() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_multi_add");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "name".into(),
+                        data_type: "TEXT".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "count".into(),
+                        data_type: "INTEGER".into(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        default_value: Some("0".into()),
+                    },
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "ratio".into(),
+                        data_type: "REAL".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"name"));
+    assert!(names.contains(&"count"));
+    assert!(names.contains(&"ratio"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_empty_operations_is_noop() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_noop");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .alter_table(DB, SCHEMA, &tbl, &[])
+        .await
+        .expect("empty operations should be a successful no-op");
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    assert_eq!(cols.len(), 1);
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_add_with_default_backfills_existing_rows() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_backfill");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(DB, &format!("INSERT INTO \"{tbl}\" VALUES (1), (2)"))
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::AddColumn {
+                column: ColumnDefinition {
+                    name: "status".into(),
+                    data_type: "TEXT".into(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    default_value: Some("'pending'".into()),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .execute_query(DB, &format!("SELECT status FROM \"{tbl}\" ORDER BY id"))
+        .await
+        .unwrap();
+    let values: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(values, vec!["pending", "pending"]);
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_drop_then_add_same_name() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_drop_add");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY, payload TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::DropColumn {
+                    column_name: "payload".into(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "payload".into(),
+                        data_type: "BLOB".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    let payload = cols.iter().find(|c| c.name == "payload").unwrap();
+    assert!(payload.data_type.to_uppercase().contains("BLOB"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_rename_nonexistent_column_errors() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_rn_bad");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::RenameColumn {
+                old_name: "nope".into(),
+                new_name: "noooo".into(),
+            }],
+        )
+        .await;
+    assert!(result.is_err());
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_add_duplicate_column_errors() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_dup");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY, status TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::AddColumn {
+                column: ColumnDefinition {
+                    name: "status".into(),
+                    data_type: "TEXT".into(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                },
+            }],
+        )
+        .await;
+    assert!(result.is_err());
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
     let _ = std::fs::remove_file(&path);
 }

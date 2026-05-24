@@ -169,4 +169,67 @@ describe("tabStore", () => {
       expect(after.tabs).toEqual(before.tabs);
     });
   });
+
+  // -----------------------------------------------------------------------
+  // setTabTitle — added for issue #153 so a query tab can adopt the
+  // name of a loaded saved query (and the name chosen in the first
+  // Save… dialog). Once a tab is open its title used to be immutable.
+  // -----------------------------------------------------------------------
+  describe("setTabTitle", () => {
+    it("replaces the title on an existing tab", () => {
+      useTabStore.getState().openTab(makeTab("t1"));
+      useTabStore.getState().setTabTitle("t1", "Monthly Report");
+      const tab = useTabStore.getState().tabs.find((t) => t.id === "t1");
+      expect(tab?.title).toBe("Monthly Report");
+    });
+
+    it("only touches the targeted tab; siblings are untouched", () => {
+      useTabStore.getState().openTab(makeTab("t1"));
+      useTabStore.getState().openTab(makeTab("t2"));
+      useTabStore.getState().openTab(makeTab("t3"));
+      useTabStore.getState().setTabTitle("t2", "Renamed");
+      const state = useTabStore.getState();
+      expect(state.tabs.find((t) => t.id === "t1")?.title).toBe("Tab t1");
+      expect(state.tabs.find((t) => t.id === "t2")?.title).toBe("Renamed");
+      expect(state.tabs.find((t) => t.id === "t3")?.title).toBe("Tab t3");
+    });
+
+    it("preserves the active tab — renaming the active tab keeps it active", () => {
+      useTabStore.getState().openTab(makeTab("t1"));
+      useTabStore.getState().openTab(makeTab("t2"));
+      useTabStore.getState().setActiveTab("t1");
+      useTabStore.getState().setTabTitle("t1", "Renamed");
+      expect(useTabStore.getState().activeTabId).toBe("t1");
+    });
+
+    it("is a no-op when the tab id doesn't exist (doesn't throw, doesn't grow tabs)", () => {
+      useTabStore.getState().openTab(makeTab("t1"));
+      const before = useTabStore.getState().tabs;
+      useTabStore.getState().setTabTitle("nonexistent", "Whatever");
+      const after = useTabStore.getState().tabs;
+      expect(after).toEqual(before);
+    });
+
+    it("is a reference-identity no-op when the title is unchanged — avoids spurious re-renders", () => {
+      // The store's setTabTitle implementation guards on
+      // `existing.title === title` to skip the set() call, which
+      // means the tabs array reference stays stable.
+      useTabStore.getState().openTab(makeTab("t1"));
+      const before = useTabStore.getState().tabs;
+      useTabStore.getState().setTabTitle("t1", "Tab t1");
+      const after = useTabStore.getState().tabs;
+      expect(after).toBe(before);
+    });
+
+    it("preserves non-title fields on the renamed tab", () => {
+      useTabStore.getState().openTab(makeTab("t1", "conn-xyz"));
+      useTabStore.getState().setTabTitle("t1", "Renamed");
+      const tab = useTabStore.getState().tabs.find((t) => t.id === "t1");
+      expect(tab?.connectionId).toBe("conn-xyz");
+      expect(tab?.connectionColor).toBe("#fff");
+      expect(tab?.database).toBe("db");
+      expect(tab?.schema).toBe("public");
+      expect(tab?.table).toBe("table_t1");
+    });
+  });
 });

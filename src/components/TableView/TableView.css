@@ -95,30 +95,44 @@
 /* so the right edge of the header doesn't look unbalanced.             */
 /* ------------------------------------------------------------------ */
 
-.tv-query-btn {
+/* Compound selector .tv-header-right .tv-query-btn so we win against
+ * the global .btn-ghost rule (which also sets `height: 30px`); both
+ * single-class selectors have identical specificity and the cascade
+ * order was leaving us 30px tall in some bundles. */
+.tv-header-right .tv-query-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 0 12px;
-  height: 32px;
+  /* Match the outer height of the .tv-mode-switch sibling. The
+   * switch is a flex container with 1px border + 1px padding +
+   * 30px inner button + 1px padding + 1px border = 34px outer.
+   * That keeps the toolbar row tight without feeling cramped. */
+  height: 34px;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  color: var(--text-muted);
-  background: transparent;
+  /* `--text-muted` against a transparent background made the
+   * button read as disabled. The segmented Data/Schema control
+   * gets away with `--text-muted` because its parent has a
+   * `--bg-tertiary` background that frames the dim text; this
+   * button is standalone so it needs a punchier resting color
+   * to look interactive. */
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: color 0.12s, background 0.12s, border-color 0.12s;
 }
 
-.tv-query-btn:hover {
+.tv-header-right .tv-query-btn:hover {
   color: var(--text-primary);
-  background: var(--bg-tertiary);
+  background: var(--bg-hover);
   border-color: color-mix(in srgb, var(--text-muted) 25%, var(--border));
 }
 
-.tv-query-btn:active {
+.tv-header-right .tv-query-btn:active {
   background: var(--bg-secondary);
 }
 
@@ -131,7 +145,10 @@
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 2px;
+  /* Tightened from 2px to 1px so the outer height is 34px
+   * (1 border + 1 padding + 30 inner + 1 padding + 1 border).
+   * Matches .tv-query-btn for a compact toolbar row. */
+  padding: 1px;
   gap: 2px;
 }
 
@@ -140,7 +157,9 @@
   align-items: center;
   gap: 5px;
   padding: 0 14px;
-  height: 32px;
+  /* 30px inner button + 2px parent padding + 2px parent border
+   * = 34px outer for the switch, matching .tv-query-btn. */
+  height: 30px;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -220,36 +239,90 @@
   z-index: 6; /* above .tv-table thead, which uses z-index: 5 */
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
   background: var(--bg-primary);
   border-bottom: 1px solid var(--border-subtle);
 }
 
+.tv-columns-search {
+  position: relative;
+  flex: 0 1 340px;
+  min-width: 220px;
+  height: 30px;
+}
+
 .tv-columns-filter-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
   color: var(--text-muted);
-  flex-shrink: 0;
+  pointer-events: none;
+  z-index: 1;
 }
 
 .tv-columns-filter-input {
-  flex: 1;
-  height: 28px;
-  padding: 0 8px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  width: 100%;
+  height: 100%;
+  padding: 0 30px 0 28px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: 12px;
   outline: none;
+  transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
 }
 
 .tv-columns-filter-input:focus {
   border-color: var(--accent);
+  background: var(--bg-secondary);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 .tv-columns-filter-clear {
-  flex-shrink: 0;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  padding: 0;
   color: var(--text-muted);
+}
+
+/* "Edit" button in the Columns sub-tab header (issue #59).
+ * Sits next to the column-name filter input and flips the panel
+ * into the in-tab Alter Table editor. Sized to match the filter
+ * row so the strip reads as one consistent toolbar. */
+.tv-columns-edit-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+
+.tv-columns-edit-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: color-mix(in srgb, var(--text-muted) 25%, var(--border));
+}
+
+.tv-columns-edit-btn:active {
+  background: var(--bg-secondary);
 }
 
 /* ------------------------------------------------------------------ */

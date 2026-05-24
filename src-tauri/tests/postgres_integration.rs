@@ -763,7 +763,7 @@ async fn pg_fetch_rows_empty_table() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 0);
@@ -803,7 +803,7 @@ async fn pg_fetch_rows_with_data() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -840,7 +840,7 @@ async fn pg_fetch_rows_pagination() {
         .unwrap();
 
     let page1 = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 5, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 5, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(page1.rows.len(), 5);
@@ -848,7 +848,7 @@ async fn pg_fetch_rows_pagination() {
     assert_eq!(page1.rows[0][0], serde_json::json!(1));
 
     let page2 = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 5, 5, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 5, 5, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(page2.rows.len(), 5);
@@ -890,10 +890,10 @@ async fn pg_fetch_rows_sort_asc_desc() {
             &tbl,
             0,
             10,
-            Some(SortSpec {
+            vec![SortSpec {
                 column: "name".into(),
                 direction: SortDirection::Asc,
-            }),
+            }],
             None,
         )
         .await
@@ -908,16 +908,101 @@ async fn pg_fetch_rows_sort_asc_desc() {
             &tbl,
             0,
             10,
-            Some(SortSpec {
+            vec![SortSpec {
                 column: "name".into(),
                 direction: SortDirection::Desc,
-            }),
+            }],
             None,
         )
         .await
         .unwrap();
     assert_eq!(desc.rows[0][1], serde_json::json!("c"));
     assert_eq!(desc.rows[2][1], serde_json::json!("a"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+// Multi-column sort end-to-end (issue #57). Before the fix the
+// driver only used `sort[0]` so multi-sort UI didn't reach the
+// database — verified here on Postgres.
+#[tokio::test]
+async fn pg_fetch_rows_multi_column_sort() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_multi_sort");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {}.\"{}\" (id INT PRIMARY KEY, dept TEXT, salary INT)",
+                SCHEMA, tbl,
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "INSERT INTO {}.\"{}\" VALUES \
+                 (1,'eng',100),(2,'sales',90),(3,'eng',200),(4,'sales',70),(5,'eng',150)",
+                SCHEMA, tbl,
+            ),
+        )
+        .await
+        .unwrap();
+
+    let rows = driver
+        .fetch_rows(
+            DB,
+            SCHEMA,
+            &tbl,
+            0,
+            10,
+            vec![
+                SortSpec {
+                    column: "dept".into(),
+                    direction: SortDirection::Asc,
+                },
+                SortSpec {
+                    column: "salary".into(),
+                    direction: SortDirection::Desc,
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.rows.len(), 5);
+    let dept_idx = rows.columns.iter().position(|c| c.name == "dept").unwrap();
+    let salary_idx = rows
+        .columns
+        .iter()
+        .position(|c| c.name == "salary")
+        .unwrap();
+    let depts: Vec<_> = rows.rows.iter().map(|r| r[dept_idx].clone()).collect();
+    let salaries: Vec<_> = rows.rows.iter().map(|r| r[salary_idx].clone()).collect();
+    assert_eq!(
+        depts,
+        vec![
+            serde_json::json!("eng"),
+            serde_json::json!("eng"),
+            serde_json::json!("eng"),
+            serde_json::json!("sales"),
+            serde_json::json!("sales"),
+        ],
+    );
+    assert_eq!(
+        salaries,
+        vec![
+            serde_json::json!(200),
+            serde_json::json!(150),
+            serde_json::json!(100),
+            serde_json::json!(90),
+            serde_json::json!(70),
+        ],
+    );
 
     driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
 }
@@ -949,7 +1034,15 @@ async fn pg_fetch_rows_filter() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, Some("\"val\" > 15".into()))
+        .fetch_rows(
+            DB,
+            SCHEMA,
+            &tbl,
+            0,
+            50,
+            Vec::new(),
+            Some("\"val\" > 15".into()),
+        )
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -977,7 +1070,7 @@ async fn pg_fetch_rows_unsafe_filter_rejected() {
             &tbl,
             0,
             50,
-            None,
+            Vec::new(),
             Some("1=1; DROP TABLE x".into()),
         )
         .await;
@@ -1013,7 +1106,7 @@ async fn pg_fetch_rows_null_values() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -1060,7 +1153,7 @@ async fn pg_fetch_rows_various_data_types() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -1249,7 +1342,7 @@ async fn pg_apply_changes_insert() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -1299,7 +1392,7 @@ async fn pg_apply_changes_update() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.rows[0][1], serde_json::json!("new"));
@@ -1347,7 +1440,7 @@ async fn pg_apply_changes_delete() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -1407,7 +1500,7 @@ async fn pg_apply_changes_batch_insert_update_delete() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 3);
@@ -1683,7 +1776,7 @@ async fn pg_truncate_table() {
 
     driver.truncate_table(DB, SCHEMA, &tbl).await.unwrap();
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 0);
@@ -1777,7 +1870,7 @@ async fn pg_import_data() {
     assert_eq!(imported, 3);
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 3);
@@ -1808,7 +1901,7 @@ async fn pg_import_data_large_batch() {
     assert_eq!(imported, 600);
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 1, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 1, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 600);
@@ -1985,7 +2078,7 @@ async fn pg_alter_table_set_default() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.rows[0][1], serde_json::json!(5));
@@ -2129,7 +2222,7 @@ async fn pg_no_db_fetch_rows_on_specific_database() {
 
     let driver = pg_driver_no_db!();
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -2176,7 +2269,7 @@ async fn pg_no_db_apply_changes_on_specific_database() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -2348,7 +2441,7 @@ async fn million_row_paginate() {
     loop {
         let t = std::time::Instant::now();
         let data = driver
-            .fetch_rows(DB, SCHEMA, &table, offset, PAGE, None, None)
+            .fetch_rows(DB, SCHEMA, &table, offset, PAGE, Vec::new(), None)
             .await
             .expect("fetch_rows page");
         let elapsed = t.elapsed().as_millis();
@@ -2587,7 +2680,7 @@ async fn pg_xlsx_round_trip_preserves_types() {
     assert_eq!(inserted, 2);
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .expect("fetch");
     assert_eq!(data.total_rows, 2);
@@ -2782,4 +2875,534 @@ async fn pg_multi_statement_semicolon_in_string_literal_is_safe() {
         .execute_query(DB, &format!("DROP TABLE IF EXISTS {SCHEMA}.{tbl}"))
         .await
         .ok();
+}
+
+// ---------------------------------------------------------------------------
+// alter_table: editor-driven multi-op sequences (issue #59 follow-up)
+// ---------------------------------------------------------------------------
+// These cases mirror what the frontend `AlterTableEditor` actually submits.
+// The editor calls `reorderOperations` to push rename_table / rename_column
+// to the front of the Vec before sending — so multi-op tests here use the
+// same ordering convention to faithfully reproduce real save payloads.
+// ---------------------------------------------------------------------------
+
+/// rename_column followed by change_type targeting the *renamed* column.
+/// The editor emits this exact pair when the user renames `legacy_id` →
+/// `id` and re-types to bigint in one session, then hits Apply.
+#[tokio::test]
+async fn pg_alter_table_rename_then_change_type_same_column() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_seq_rn_ct");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {SCHEMA}.\"{tbl}\" (pk INT PRIMARY KEY, legacy_id INT)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            DB,
+            &format!("INSERT INTO {SCHEMA}.\"{tbl}\" VALUES (1, 42)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::RenameColumn {
+                    old_name: "legacy_id".into(),
+                    new_name: "id".into(),
+                },
+                AlterTableOperation::ChangeColumnType {
+                    column_name: "id".into(),
+                    new_type: "BIGINT".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    let id = cols.iter().find(|c| c.name == "id").unwrap();
+    assert!(id.data_type.contains("bigint"));
+    let result = driver
+        .execute_query(DB, &format!("SELECT id FROM {SCHEMA}.\"{tbl}\""))
+        .await
+        .unwrap();
+    let v = result.rows[0][0].as_i64().unwrap();
+    assert_eq!(v, 42);
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+/// rename_table + alter columns in a single call. Verifies the driver
+/// keeps a `current_table` cursor — subsequent ops must qualify against
+/// the NEW name, not the original `table_name` arg.
+#[tokio::test]
+async fn pg_alter_table_rename_table_then_alter_columns() {
+    let driver = pg_driver!();
+    let old = unique_table("pg_rn_then");
+    let new_name = unique_table("pg_rn_then_new");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {SCHEMA}.\"{old}\" (id INT PRIMARY KEY, status TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &old,
+            &[
+                AlterTableOperation::RenameTable {
+                    new_name: new_name.clone(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "created_at".into(),
+                        data_type: "timestamptz".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+                AlterTableOperation::DropColumn {
+                    column_name: "status".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &new_name).await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"created_at"));
+    assert!(!names.contains(&"status"));
+
+    driver
+        .drop_object(DB, SCHEMA, &new_name, "TABLE")
+        .await
+        .unwrap();
+}
+
+/// drop_column + add_column with the same name in one call. The editor
+/// produces this when the user drops a column then adds a fresh one
+/// with the same name (e.g. "recreate this column with a different
+/// type and lose the data").
+#[tokio::test]
+async fn pg_alter_table_drop_then_add_same_name() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_drop_add");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {SCHEMA}.\"{tbl}\" (id INT PRIMARY KEY, payload TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::DropColumn {
+                    column_name: "payload".into(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "payload".into(),
+                        data_type: "jsonb".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    let payload = cols.iter().find(|c| c.name == "payload").unwrap();
+    assert!(payload.data_type.contains("jsonb"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+/// Kitchen-sink editor save: multiple adds, drops, type changes, and a
+/// rename all submitted in one request.
+#[tokio::test]
+async fn pg_alter_table_kitchen_sink_one_call() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_kitchen");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {SCHEMA}.\"{tbl}\" \
+                 (id INT PRIMARY KEY, a INT, b TEXT, c TEXT)"
+            ),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::RenameColumn {
+                    old_name: "a".into(),
+                    new_name: "alpha".into(),
+                },
+                AlterTableOperation::ChangeColumnType {
+                    column_name: "alpha".into(),
+                    new_type: "BIGINT".into(),
+                },
+                AlterTableOperation::DropColumn {
+                    column_name: "b".into(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "created_at".into(),
+                        data_type: "timestamptz".into(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        default_value: Some("now()".into()),
+                    },
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "tag".into(),
+                        data_type: "varchar(32)".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+                AlterTableOperation::SetNullable {
+                    column_name: "c".into(),
+                    nullable: false,
+                },
+                AlterTableOperation::SetDefault {
+                    column_name: "c".into(),
+                    default_value: Some("'pending'".into()),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"alpha"));
+    assert!(!names.contains(&"a"));
+    assert!(!names.contains(&"b"));
+    assert!(names.contains(&"c"));
+    assert!(names.contains(&"created_at"));
+    assert!(names.contains(&"tag"));
+    let alpha = cols.iter().find(|c| c.name == "alpha").unwrap();
+    assert!(alpha.data_type.contains("bigint"));
+    let c = cols.iter().find(|c| c.name == "c").unwrap();
+    assert!(!c.is_nullable);
+    assert!(c.default_value.as_deref().unwrap_or("").contains("pending"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+/// Empty ops Vec is a no-op success.
+#[tokio::test]
+async fn pg_alter_table_empty_operations_is_noop() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_noop");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {SCHEMA}.\"{tbl}\" (id INT PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .alter_table(DB, SCHEMA, &tbl, &[])
+        .await
+        .expect("empty operations should be a successful no-op");
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    assert_eq!(cols.len(), 1);
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+/// AddColumn with NOT NULL + DEFAULT must back-fill existing rows.
+#[tokio::test]
+async fn pg_alter_table_add_not_null_default_backfills_existing_rows() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_backfill");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {SCHEMA}.\"{tbl}\" (id INT PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            DB,
+            &format!("INSERT INTO {SCHEMA}.\"{tbl}\" VALUES (1), (2)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::AddColumn {
+                column: ColumnDefinition {
+                    name: "status".into(),
+                    data_type: "text".into(),
+                    is_nullable: false,
+                    is_primary_key: false,
+                    default_value: Some("'pending'".into()),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .execute_query(
+            DB,
+            &format!("SELECT status FROM {SCHEMA}.\"{tbl}\" ORDER BY id"),
+        )
+        .await
+        .unwrap();
+    let values: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(values, vec!["pending", "pending"]);
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+/// SetDefault → SetDefault(None) cycle inside one call. Both ops apply;
+/// final state has no default.
+#[tokio::test]
+async fn pg_alter_table_set_then_clear_default_cycle() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_def_cycle");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {SCHEMA}.\"{tbl}\" (id INT PRIMARY KEY, status TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::SetDefault {
+                    column_name: "status".into(),
+                    default_value: Some("'new'".into()),
+                },
+                AlterTableOperation::SetDefault {
+                    column_name: "status".into(),
+                    default_value: None,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    let status = cols.iter().find(|c| c.name == "status").unwrap();
+    assert!(status.default_value.is_none(), "default should be cleared");
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+/// AddColumn with parameterized types (varchar(N), numeric(p,s)).
+#[tokio::test]
+async fn pg_alter_table_add_column_parameterized_types() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_paramtypes");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {SCHEMA}.\"{tbl}\" (id INT PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "name".into(),
+                        data_type: "varchar(50)".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "price".into(),
+                        data_type: "numeric(10,2)".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    let name_col = cols.iter().find(|c| c.name == "name").unwrap();
+    // pg returns `character varying(50)` from information_schema.
+    let dt = name_col.data_type.to_lowercase();
+    assert!(dt.contains("varchar") || dt.contains("character varying"));
+    assert!(dt.contains("50"));
+    let price = cols.iter().find(|c| c.name == "price").unwrap();
+    assert!(price.data_type.to_lowercase().contains("numeric"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+/// RenameColumn on a non-existent column must surface an error.
+#[tokio::test]
+async fn pg_alter_table_rename_nonexistent_column_errors() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_rn_bad");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {SCHEMA}.\"{tbl}\" (id INT PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::RenameColumn {
+                old_name: "nope".into(),
+                new_name: "noooo".into(),
+            }],
+        )
+        .await;
+    assert!(result.is_err(), "rename of missing column must error");
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+/// AddColumn with a name that already exists must error.
+#[tokio::test]
+async fn pg_alter_table_add_duplicate_column_errors() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_dup");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {SCHEMA}.\"{tbl}\" (id INT PRIMARY KEY, status TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::AddColumn {
+                column: ColumnDefinition {
+                    name: "status".into(),
+                    data_type: "text".into(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                },
+            }],
+        )
+        .await;
+    assert!(result.is_err(), "duplicate column add must error");
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+/// Toggling SetNullable both directions on the same column inside one
+/// call. The latter wins server-side.
+#[tokio::test]
+async fn pg_alter_table_toggle_nullable_both_directions_one_call() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_toggle_null");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {SCHEMA}.\"{tbl}\" (id INT PRIMARY KEY, note TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::SetNullable {
+                    column_name: "note".into(),
+                    nullable: false,
+                },
+                AlterTableOperation::SetNullable {
+                    column_name: "note".into(),
+                    nullable: true,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    let note = cols.iter().find(|c| c.name == "note").unwrap();
+    assert!(note.is_nullable, "last SetNullable wins → nullable");
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
 }
