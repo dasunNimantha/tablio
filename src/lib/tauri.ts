@@ -313,7 +313,14 @@ export interface FetchRowsRequest {
   table: string;
   offset: number;
   limit: number;
-  sort: SortSpec | null;
+  /**
+   * Ordered list of sort specs (primary sort first). Empty means
+   * "use the driver's default ordering" — typically the primary-
+   * key columns so pagination stays stable. The data grid builds
+   * this from ag-grid's multi-column sort model (Shift+click). See
+   * issue #57.
+   */
+  sort: SortSpec[];
   filter: string | null;
 }
 

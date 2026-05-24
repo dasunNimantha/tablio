@@ -763,7 +763,7 @@ async fn pg_fetch_rows_empty_table() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 0);
@@ -803,7 +803,7 @@ async fn pg_fetch_rows_with_data() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -840,7 +840,7 @@ async fn pg_fetch_rows_pagination() {
         .unwrap();
 
     let page1 = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 5, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 5, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(page1.rows.len(), 5);
@@ -848,7 +848,7 @@ async fn pg_fetch_rows_pagination() {
     assert_eq!(page1.rows[0][0], serde_json::json!(1));
 
     let page2 = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 5, 5, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 5, 5, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(page2.rows.len(), 5);
@@ -890,10 +890,10 @@ async fn pg_fetch_rows_sort_asc_desc() {
             &tbl,
             0,
             10,
-            Some(SortSpec {
+            vec![SortSpec {
                 column: "name".into(),
                 direction: SortDirection::Asc,
-            }),
+            }],
             None,
         )
         .await
@@ -908,16 +908,101 @@ async fn pg_fetch_rows_sort_asc_desc() {
             &tbl,
             0,
             10,
-            Some(SortSpec {
+            vec![SortSpec {
                 column: "name".into(),
                 direction: SortDirection::Desc,
-            }),
+            }],
             None,
         )
         .await
         .unwrap();
     assert_eq!(desc.rows[0][1], serde_json::json!("c"));
     assert_eq!(desc.rows[2][1], serde_json::json!("a"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+}
+
+// Multi-column sort end-to-end (issue #57). Before the fix the
+// driver only used `sort[0]` so multi-sort UI didn't reach the
+// database — verified here on Postgres.
+#[tokio::test]
+async fn pg_fetch_rows_multi_column_sort() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_multi_sort");
+
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {}.\"{}\" (id INT PRIMARY KEY, dept TEXT, salary INT)",
+                SCHEMA, tbl,
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "INSERT INTO {}.\"{}\" VALUES \
+                 (1,'eng',100),(2,'sales',90),(3,'eng',200),(4,'sales',70),(5,'eng',150)",
+                SCHEMA, tbl,
+            ),
+        )
+        .await
+        .unwrap();
+
+    let rows = driver
+        .fetch_rows(
+            DB,
+            SCHEMA,
+            &tbl,
+            0,
+            10,
+            vec![
+                SortSpec {
+                    column: "dept".into(),
+                    direction: SortDirection::Asc,
+                },
+                SortSpec {
+                    column: "salary".into(),
+                    direction: SortDirection::Desc,
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.rows.len(), 5);
+    let dept_idx = rows.columns.iter().position(|c| c.name == "dept").unwrap();
+    let salary_idx = rows
+        .columns
+        .iter()
+        .position(|c| c.name == "salary")
+        .unwrap();
+    let depts: Vec<_> = rows.rows.iter().map(|r| r[dept_idx].clone()).collect();
+    let salaries: Vec<_> = rows.rows.iter().map(|r| r[salary_idx].clone()).collect();
+    assert_eq!(
+        depts,
+        vec![
+            serde_json::json!("eng"),
+            serde_json::json!("eng"),
+            serde_json::json!("eng"),
+            serde_json::json!("sales"),
+            serde_json::json!("sales"),
+        ],
+    );
+    assert_eq!(
+        salaries,
+        vec![
+            serde_json::json!(200),
+            serde_json::json!(150),
+            serde_json::json!(100),
+            serde_json::json!(90),
+            serde_json::json!(70),
+        ],
+    );
 
     driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
 }
@@ -949,7 +1034,15 @@ async fn pg_fetch_rows_filter() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, Some("\"val\" > 15".into()))
+        .fetch_rows(
+            DB,
+            SCHEMA,
+            &tbl,
+            0,
+            50,
+            Vec::new(),
+            Some("\"val\" > 15".into()),
+        )
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -977,7 +1070,7 @@ async fn pg_fetch_rows_unsafe_filter_rejected() {
             &tbl,
             0,
             50,
-            None,
+            Vec::new(),
             Some("1=1; DROP TABLE x".into()),
         )
         .await;
@@ -1013,7 +1106,7 @@ async fn pg_fetch_rows_null_values() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -1060,7 +1153,7 @@ async fn pg_fetch_rows_various_data_types() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -1249,7 +1342,7 @@ async fn pg_apply_changes_insert() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -1299,7 +1392,7 @@ async fn pg_apply_changes_update() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.rows[0][1], serde_json::json!("new"));
@@ -1347,7 +1440,7 @@ async fn pg_apply_changes_delete() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -1407,7 +1500,7 @@ async fn pg_apply_changes_batch_insert_update_delete() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 3);
@@ -1683,7 +1776,7 @@ async fn pg_truncate_table() {
 
     driver.truncate_table(DB, SCHEMA, &tbl).await.unwrap();
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 0);
@@ -1777,7 +1870,7 @@ async fn pg_import_data() {
     assert_eq!(imported, 3);
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 3);
@@ -1808,7 +1901,7 @@ async fn pg_import_data_large_batch() {
     assert_eq!(imported, 600);
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 1, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 1, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 600);
@@ -1985,7 +2078,7 @@ async fn pg_alter_table_set_default() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.rows[0][1], serde_json::json!(5));
@@ -2129,7 +2222,7 @@ async fn pg_no_db_fetch_rows_on_specific_database() {
 
     let driver = pg_driver_no_db!();
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -2176,7 +2269,7 @@ async fn pg_no_db_apply_changes_on_specific_database() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -2348,7 +2441,7 @@ async fn million_row_paginate() {
     loop {
         let t = std::time::Instant::now();
         let data = driver
-            .fetch_rows(DB, SCHEMA, &table, offset, PAGE, None, None)
+            .fetch_rows(DB, SCHEMA, &table, offset, PAGE, Vec::new(), None)
             .await
             .expect("fetch_rows page");
         let elapsed = t.elapsed().as_millis();
@@ -2587,7 +2680,7 @@ async fn pg_xlsx_round_trip_preserves_types() {
     assert_eq!(inserted, 2);
 
     let data = driver
-        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .expect("fetch");
     assert_eq!(data.total_rows, 2);

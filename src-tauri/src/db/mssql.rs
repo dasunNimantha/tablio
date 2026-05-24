@@ -807,7 +807,7 @@ impl DatabaseDriver for MssqlDriver {
         table: &str,
         offset: u64,
         limit: u64,
-        sort: Option<SortSpec>,
+        sort: Vec<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData> {
         let columns = self.list_columns(database, schema, table).await?;
@@ -820,15 +820,27 @@ impl DatabaseDriver for MssqlDriver {
             .filter(|c| c.is_primary_key)
             .map(|c| c.name.clone())
             .collect();
-        let order = if let Some(s) = sort {
-            format!(
-                "{} {}",
-                bracket(&s.column),
-                match s.direction {
-                    SortDirection::Asc => "ASC",
-                    SortDirection::Desc => "DESC",
-                }
-            )
+        // ORDER BY is mandatory for `OFFSET ... FETCH NEXT` on
+        // SQL Server, so unlike pg/my we always end up with a
+        // non-empty clause. Three-step ladder:
+        //   1. multi-column user sort (issue #57)
+        //   2. PK columns
+        //   3. first column of the table (last-resort
+        //      deterministic ordering)
+        let order = if !sort.is_empty() {
+            sort.iter()
+                .map(|s| {
+                    format!(
+                        "{} {}",
+                        bracket(&s.column),
+                        match s.direction {
+                            SortDirection::Asc => "ASC",
+                            SortDirection::Desc => "DESC",
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         } else if pk_cols.is_empty() {
             bracket(&columns[0].name).to_string()
         } else {

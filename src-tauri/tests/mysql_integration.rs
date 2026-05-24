@@ -474,7 +474,7 @@ async fn mysql_fetch_rows_empty_table() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 0);
@@ -514,7 +514,7 @@ async fn mysql_fetch_rows_with_data() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -546,14 +546,14 @@ async fn mysql_fetch_rows_pagination() {
         .unwrap();
 
     let page1 = driver
-        .fetch_rows(&db, &db, &tbl, 0, 5, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 5, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(page1.rows.len(), 5);
     assert_eq!(page1.total_rows, 10);
 
     let page2 = driver
-        .fetch_rows(&db, &db, &tbl, 5, 5, None, None)
+        .fetch_rows(&db, &db, &tbl, 5, 5, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(page2.rows.len(), 5);
@@ -591,10 +591,10 @@ async fn mysql_fetch_rows_sort_asc_desc() {
             &tbl,
             0,
             10,
-            Some(SortSpec {
+            vec![SortSpec {
                 column: "name".into(),
                 direction: SortDirection::Asc,
-            }),
+            }],
             None,
         )
         .await
@@ -609,16 +609,98 @@ async fn mysql_fetch_rows_sort_asc_desc() {
             &tbl,
             0,
             10,
-            Some(SortSpec {
+            vec![SortSpec {
                 column: "name".into(),
                 direction: SortDirection::Desc,
-            }),
+            }],
             None,
         )
         .await
         .unwrap();
     assert_eq!(desc.rows[0][1], serde_json::json!("c"));
     assert_eq!(desc.rows[2][1], serde_json::json!("a"));
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_fetch_rows_multi_column_sort() {
+    // Multi-column sort (issue #57) end-to-end on MySQL.
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("multi_sort");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{}` (id INT PRIMARY KEY, dept VARCHAR(32), salary INT) ENGINE=InnoDB",
+                tbl,
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "INSERT INTO `{}` VALUES \
+                 (1,'eng',100),(2,'sales',90),(3,'eng',200),(4,'sales',70),(5,'eng',150)",
+                tbl,
+            ),
+        )
+        .await
+        .unwrap();
+
+    let rows = driver
+        .fetch_rows(
+            &db,
+            &db,
+            &tbl,
+            0,
+            10,
+            vec![
+                SortSpec {
+                    column: "dept".into(),
+                    direction: SortDirection::Asc,
+                },
+                SortSpec {
+                    column: "salary".into(),
+                    direction: SortDirection::Desc,
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.rows.len(), 5);
+    let dept_idx = rows.columns.iter().position(|c| c.name == "dept").unwrap();
+    let salary_idx = rows
+        .columns
+        .iter()
+        .position(|c| c.name == "salary")
+        .unwrap();
+    let depts: Vec<_> = rows.rows.iter().map(|r| r[dept_idx].clone()).collect();
+    let salaries: Vec<_> = rows.rows.iter().map(|r| r[salary_idx].clone()).collect();
+    assert_eq!(
+        depts,
+        vec![
+            serde_json::json!("eng"),
+            serde_json::json!("eng"),
+            serde_json::json!("eng"),
+            serde_json::json!("sales"),
+            serde_json::json!("sales"),
+        ],
+    );
+    assert_eq!(
+        salaries,
+        vec![
+            serde_json::json!(200),
+            serde_json::json!(150),
+            serde_json::json!(100),
+            serde_json::json!(90),
+            serde_json::json!(70),
+        ],
+    );
 
     driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }
@@ -647,7 +729,7 @@ async fn mysql_fetch_rows_filter() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, Some("`val` > 15".into()))
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), Some("`val` > 15".into()))
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -676,7 +758,7 @@ async fn mysql_fetch_rows_unsafe_filter_rejected() {
             &tbl,
             0,
             50,
-            None,
+            Vec::new(),
             Some("1=1; DROP TABLE x".into()),
         )
         .await;
@@ -709,7 +791,7 @@ async fn mysql_fetch_rows_null_values() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -753,7 +835,7 @@ async fn mysql_fetch_rows_various_data_types() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 10, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -915,7 +997,7 @@ async fn mysql_apply_changes_insert() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -961,7 +1043,7 @@ async fn mysql_apply_changes_update() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.rows[0][1], serde_json::json!("new"));
@@ -1006,7 +1088,7 @@ async fn mysql_apply_changes_delete() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -1064,7 +1146,7 @@ async fn mysql_apply_changes_batch() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -1202,7 +1284,7 @@ async fn mysql_truncate_table() {
 
     driver.truncate_table(&db, &db, &tbl).await.unwrap();
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 0);
@@ -1263,7 +1345,7 @@ async fn mysql_import_data() {
     assert_eq!(n, 2);
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 10, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -1291,7 +1373,7 @@ async fn mysql_import_data_large_batch() {
     assert_eq!(n, 600);
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 1, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 1, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 600);
@@ -1480,7 +1562,7 @@ async fn mysql_alter_table_set_default() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 10, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.rows[0][1], serde_json::json!(5));
@@ -1728,7 +1810,7 @@ async fn mysql_no_db_fetch_rows_on_specific_database() {
 
     let driver = mysql_driver_no_db!();
     let data = driver
-        .fetch_rows(&db, &db, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, &db, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -1864,7 +1946,7 @@ async fn million_row_paginate() {
     loop {
         let t = std::time::Instant::now();
         let data = driver
-            .fetch_rows(&db, &db, &table, offset, PAGE, None, None)
+            .fetch_rows(&db, &db, &table, offset, PAGE, Vec::new(), None)
             .await
             .expect("fetch_rows page");
         let elapsed = t.elapsed().as_millis();

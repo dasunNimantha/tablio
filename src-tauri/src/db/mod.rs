@@ -63,6 +63,18 @@ pub trait DatabaseDriver: Send + Sync {
         schema: &str,
         table: &str,
     ) -> Result<TableStats>;
+    /// Fetch a window of rows from `table`, ordered by the given
+    /// list of `sort` specs (empty list = driver's default
+    /// ordering, typically the primary-key columns).
+    ///
+    /// `sort` is a `Vec` rather than `Option<SortSpec>` so the
+    /// data grid's Shift+click multi-column sort actually reaches
+    /// the database — see issue #57. Drivers compose the SQL
+    /// `ORDER BY` clause by walking the vec in order and
+    /// joining with `, `; if the engine can't honour every entry
+    /// (e.g. Cassandra's clustering-key constraint), it falls
+    /// back to whatever it can and the server surfaces the
+    /// limitation as an execution error.
     async fn fetch_rows(
         &self,
         database: &str,
@@ -70,7 +82,7 @@ pub trait DatabaseDriver: Send + Sync {
         table: &str,
         offset: u64,
         limit: u64,
-        sort: Option<SortSpec>,
+        sort: Vec<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData>;
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult>;

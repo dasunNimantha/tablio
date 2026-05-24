@@ -217,6 +217,24 @@
   margin-left: 2px;
 }
 
+/* Sort-priority badge — only rendered on secondary+ columns when
+ * a multi-column sort is active (issue #57). The primary column
+ * stays badge-free; the badge's presence on column B implicitly
+ * tells the user that some other (un-badged) column is the
+ * primary sort. Sized to match the PK / FK badges so the cluster
+ * to the left of the column name reads as one consistent strip. */
+.ag-grid-wrapper .ag-custom-sort-priority {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--accent-muted);
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+  margin-left: 2px;
+}
+
 /* Boolean checkbox styling */
 .ag-grid-wrapper .ag-checkbox-input-wrapper {
   width: 16px;
