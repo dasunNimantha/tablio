@@ -2281,8 +2281,11 @@ async fn mysql_alter_table_kitchen_sink_one_call() {
     driver
         .execute_query(
             &db,
+            // `c` is VARCHAR(40) (not TEXT) because MySQL refuses
+            // DEFAULT on TEXT/BLOB/JSON/GEOMETRY columns with error
+            // 1101. The SetDefault op below would otherwise fail.
             &format!(
-                "CREATE TABLE `{tbl}` (id INT PRIMARY KEY, a INT, b TEXT, c TEXT) ENGINE=InnoDB"
+                "CREATE TABLE `{tbl}` (id INT PRIMARY KEY, a INT, b TEXT, c VARCHAR(40)) ENGINE=InnoDB"
             ),
         )
         .await
