@@ -1368,3 +1368,269 @@ async fn tidb_get_query_stats_ok_or_stmt_summary_message() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// alter_table: editor-driven multi-op sequences (issue #59 follow-up)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn tidb_alter_table_rename_then_change_type_same_column() {
+    let (driver, db) = tidb_driver!();
+    let tbl = unique_table("ti_seq_rn_ct");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{tbl}` (pk INT PRIMARY KEY, legacy_id INT)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO `{tbl}` VALUES (1, 42)"))
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[
+                AlterTableOperation::RenameColumn {
+                    old_name: "legacy_id".into(),
+                    new_name: "id".into(),
+                },
+                AlterTableOperation::ChangeColumnType {
+                    column_name: "id".into(),
+                    new_type: "BIGINT".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, &db, &tbl).await.unwrap();
+    let id = cols.iter().find(|c| c.name == "id").unwrap();
+    assert!(id.data_type.to_lowercase().contains("bigint"));
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn tidb_alter_table_rename_table_then_alter_columns() {
+    let (driver, db) = tidb_driver!();
+    let old = unique_table("ti_rn_then");
+    let new_name = unique_table("ti_rn_then_new");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{old}` (id INT PRIMARY KEY, status TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &old,
+            &[
+                AlterTableOperation::RenameTable {
+                    new_name: new_name.clone(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "created_at".into(),
+                        data_type: "DATETIME".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+                AlterTableOperation::DropColumn {
+                    column_name: "status".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, &db, &new_name).await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"created_at"));
+    assert!(!names.contains(&"status"));
+
+    driver
+        .drop_object(&db, &db, &new_name, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn tidb_alter_table_drop_then_add_same_name() {
+    let (driver, db) = tidb_driver!();
+    let tbl = unique_table("ti_drop_add");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY, payload TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[
+                AlterTableOperation::DropColumn {
+                    column_name: "payload".into(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "payload".into(),
+                        data_type: "JSON".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, &db, &tbl).await.unwrap();
+    let payload = cols.iter().find(|c| c.name == "payload").unwrap();
+    assert!(payload.data_type.to_lowercase().contains("json"));
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn tidb_alter_table_empty_operations_is_noop() {
+    let (driver, db) = tidb_driver!();
+    let tbl = unique_table("ti_noop");
+
+    driver
+        .execute_query(&db, &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY)"))
+        .await
+        .unwrap();
+    driver
+        .alter_table(&db, &db, &tbl, &[])
+        .await
+        .expect("empty operations should be a successful no-op");
+    let cols = driver.list_columns(&db, &db, &tbl).await.unwrap();
+    assert_eq!(cols.len(), 1);
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn tidb_alter_table_add_not_null_default_backfills_existing_rows() {
+    let (driver, db) = tidb_driver!();
+    let tbl = unique_table("ti_backfill");
+
+    driver
+        .execute_query(&db, &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY)"))
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO `{tbl}` VALUES (1), (2)"))
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[AlterTableOperation::AddColumn {
+                column: ColumnDefinition {
+                    name: "status".into(),
+                    data_type: "VARCHAR(20)".into(),
+                    is_nullable: false,
+                    is_primary_key: false,
+                    default_value: Some("'pending'".into()),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .execute_query(&db, &format!("SELECT status FROM `{tbl}` ORDER BY id"))
+        .await
+        .unwrap();
+    let values: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(values, vec!["pending", "pending"]);
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn tidb_alter_table_rename_nonexistent_column_errors() {
+    let (driver, db) = tidb_driver!();
+    let tbl = unique_table("ti_rn_bad");
+
+    driver
+        .execute_query(&db, &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY)"))
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[AlterTableOperation::RenameColumn {
+                old_name: "nope".into(),
+                new_name: "noooo".into(),
+            }],
+        )
+        .await;
+    assert!(result.is_err());
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn tidb_alter_table_add_duplicate_column_errors() {
+    let (driver, db) = tidb_driver!();
+    let tbl = unique_table("ti_dup");
+
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY, status TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[AlterTableOperation::AddColumn {
+                column: ColumnDefinition {
+                    name: "status".into(),
+                    data_type: "TEXT".into(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                },
+            }],
+        )
+        .await;
+    assert!(result.is_err());
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}

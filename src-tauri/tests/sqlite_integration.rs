@@ -1848,3 +1848,353 @@ async fn sqlite_select_of_pure_expressions_returns_real_values() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------------
+// alter_table: editor-driven multi-op sequences (issue #59 follow-up)
+// ---------------------------------------------------------------------------
+// SQLite supports only AddColumn, DropColumn (3.35+), RenameColumn, and
+// RenameTable. The unsupported ops (ChangeColumnType / SetNullable /
+// SetDefault) are already covered above as individual error cases. These
+// multi-op tests focus on the supported ops being composable in one call.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sqlite_alter_table_rename_table_then_alter_columns() {
+    let (driver, path) = create_driver().await;
+    let old = unique_table("sl_rn_then");
+    let new_name = unique_table("sl_rn_then_new");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{old}\" (id INTEGER PRIMARY KEY, status TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &old,
+            &[
+                AlterTableOperation::RenameTable {
+                    new_name: new_name.clone(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "created_at".into(),
+                        data_type: "TEXT".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+                AlterTableOperation::DropColumn {
+                    column_name: "status".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &new_name).await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"created_at"));
+    assert!(!names.contains(&"status"));
+
+    driver
+        .drop_object(DB, SCHEMA, &new_name, "TABLE")
+        .await
+        .unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_rename_column_then_drop_renamed() {
+    // SQLite uses a different mechanism for DROP COLUMN (3.35+) than
+    // RENAME COLUMN, so chaining them in one call validates the
+    // current_table cursor handles the rename then resolves the
+    // drop against the renamed identifier.
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_rn_drop");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY, legacy TEXT, keep TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::RenameColumn {
+                    old_name: "legacy".into(),
+                    new_name: "tombstoned".into(),
+                },
+                AlterTableOperation::DropColumn {
+                    column_name: "tombstoned".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"keep"));
+    assert!(!names.contains(&"legacy"));
+    assert!(!names.contains(&"tombstoned"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_multiple_add_columns_in_one_call() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_multi_add");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "name".into(),
+                        data_type: "TEXT".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "count".into(),
+                        data_type: "INTEGER".into(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        default_value: Some("0".into()),
+                    },
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "ratio".into(),
+                        data_type: "REAL".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"name"));
+    assert!(names.contains(&"count"));
+    assert!(names.contains(&"ratio"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_empty_operations_is_noop() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_noop");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .alter_table(DB, SCHEMA, &tbl, &[])
+        .await
+        .expect("empty operations should be a successful no-op");
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    assert_eq!(cols.len(), 1);
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_add_with_default_backfills_existing_rows() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_backfill");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(DB, &format!("INSERT INTO \"{tbl}\" VALUES (1), (2)"))
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::AddColumn {
+                column: ColumnDefinition {
+                    name: "status".into(),
+                    data_type: "TEXT".into(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    default_value: Some("'pending'".into()),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .execute_query(DB, &format!("SELECT status FROM \"{tbl}\" ORDER BY id"))
+        .await
+        .unwrap();
+    let values: Vec<&str> = result
+        .rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(values, vec!["pending", "pending"]);
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_drop_then_add_same_name() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_drop_add");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY, payload TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[
+                AlterTableOperation::DropColumn {
+                    column_name: "payload".into(),
+                },
+                AlterTableOperation::AddColumn {
+                    column: ColumnDefinition {
+                        name: "payload".into(),
+                        data_type: "BLOB".into(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                    },
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(DB, SCHEMA, &tbl).await.unwrap();
+    let payload = cols.iter().find(|c| c.name == "payload").unwrap();
+    assert!(payload.data_type.to_uppercase().contains("BLOB"));
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_rename_nonexistent_column_errors() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_rn_bad");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::RenameColumn {
+                old_name: "nope".into(),
+                new_name: "noooo".into(),
+            }],
+        )
+        .await;
+    assert!(result.is_err());
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_alter_table_add_duplicate_column_errors() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sl_dup");
+
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY, status TEXT)"),
+        )
+        .await
+        .unwrap();
+
+    let result = driver
+        .alter_table(
+            DB,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::AddColumn {
+                column: ColumnDefinition {
+                    name: "status".into(),
+                    data_type: "TEXT".into(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                },
+            }],
+        )
+        .await;
+    assert!(result.is_err());
+
+    driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}
