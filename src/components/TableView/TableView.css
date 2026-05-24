@@ -252,6 +252,38 @@
   color: var(--text-muted);
 }
 
+/* "Edit" button in the Columns sub-tab header (issue #59).
+ * Sits next to the column-name filter input and flips the panel
+ * into the in-tab Alter Table editor. Sized to match the filter
+ * row so the strip reads as one consistent toolbar. */
+.tv-columns-edit-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+
+.tv-columns-edit-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: color-mix(in srgb, var(--text-muted) 25%, var(--border));
+}
+
+.tv-columns-edit-btn:active {
+  background: var(--bg-secondary);
+}
+
 /* ------------------------------------------------------------------ */
 /* Panel tables (shared across Columns/Constraints/Indexes/...)        */
 /* ------------------------------------------------------------------ */

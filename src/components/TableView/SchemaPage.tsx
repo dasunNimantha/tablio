@@ -27,6 +27,7 @@ import {
   ReferencesPanel,
   TriggersPanel,
 } from "./panels";
+import { AlterTableEditor } from "../AlterTable/AlterTableEditor";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 
 /**
@@ -64,6 +65,12 @@ interface Props {
    *  legacy `partitions`/`stats` tabs). */
   focusAnchor?: SchemaAnchor;
   onAnchorConsumed?: () => void;
+  /**
+   * Fired when the in-tab editor (issue #59) saves successfully so
+   * `TableView` can refresh its cheap metadata fetch and the columns
+   * list immediately reflects the alteration.
+   */
+  onAltered?: () => void;
 }
 
 export function SchemaPage({
@@ -81,6 +88,7 @@ export function SchemaPage({
   tableMeta,
   focusAnchor,
   onAnchorConsumed,
+  onAltered,
 }: Props) {
   const partitionStrategy = tableMeta?.partition_strategy ?? null;
   const isPartitioned = !!partitionStrategy;
@@ -93,6 +101,12 @@ export function SchemaPage({
   const [mounted, setMounted] = useState<Set<SchemaAnchor>>(
     () => new Set([active])
   );
+  // Edit/View toggle on the Columns sub-tab (issue #59).
+  // `false` → render the read-only `ColumnsPanel`.
+  // `true`  → render `AlterTableEditor` inline.
+  // Persisted edits live in the draft store, so flipping this back
+  // to `false` is non-destructive.
+  const [columnsEditMode, setColumnsEditMode] = useState(false);
 
   // Honour deep-link anchors that arrive after mount (e.g. user clicks
   // the partition strategy chip while this tab is already open).
@@ -251,7 +265,34 @@ export function SchemaPage({
             className="tv-schema-panel tv-schema-panel-scroll"
             style={{ display: active === "columns" ? "block" : "none" }}
           >
-            <ColumnsPanel columns={columns} foreignKeys={foreignKeys} />
+            {columnsEditMode ? (
+              // In-tab Alter Table editor (issue #59). On a
+              // successful save we flip back to View mode AND
+              // ask `TableView` to refresh its cheap metadata so
+              // the read-only Columns panel reflects the new
+              // schema immediately. The editor wipes its draft
+              // store entry as part of save success — no extra
+              // bookkeeping needed here.
+              <AlterTableEditor
+                connectionId={connectionId}
+                database={database}
+                schema={schema}
+                tableName={table}
+                initialColumns={columns}
+                onSaved={() => {
+                  setColumnsEditMode(false);
+                  onAltered?.();
+                }}
+                onDiscard={() => setColumnsEditMode(false)}
+                variant="inline"
+              />
+            ) : (
+              <ColumnsPanel
+                columns={columns}
+                foreignKeys={foreignKeys}
+                onEnterEdit={() => setColumnsEditMode(true)}
+              />
+            )}
           </div>
         )}
 

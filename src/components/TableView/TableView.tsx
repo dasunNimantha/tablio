@@ -109,6 +109,43 @@ export function TableView({
     });
   }, [initialSubTab]);
 
+  // Extracted so we can also fire it from the in-tab Alter Table
+  // editor's onSaved callback (issue #59). Returns the same data
+  // shape and uses the same error / loading semantics as the
+  // initial-fetch effect below.
+  const loadMeta = useCallback(async () => {
+    setMetaLoading(true);
+    setMetaError(null);
+    try {
+      const [columns, indexes, fks, refs, triggers, allTables] = await Promise.all([
+        api.listColumns(connectionId, database, schema, table),
+        api.listIndexes(connectionId, database, schema, table),
+        api.listForeignKeys(connectionId, database, schema, table),
+        api
+          .listReferencedBy(connectionId, database, schema, table)
+          .catch(() => [] as ReferencingTableInfo[]),
+        api
+          .listTriggers(connectionId, database, schema, table)
+          .catch(() => [] as TriggerInfo[]),
+        api
+          .listTables(connectionId, database, schema)
+          .catch(() => [] as TableInfoType[]),
+      ]);
+      setMeta({
+        columns,
+        indexes,
+        fks,
+        refs,
+        triggers,
+        meta: allTables.find((t) => t.name === table) ?? null,
+      });
+    } catch (e) {
+      setMetaError(String(e));
+    } finally {
+      setMetaLoading(false);
+    }
+  }, [connectionId, database, schema, table]);
+
   useEffect(() => {
     let cancelled = false;
     setMetaLoading(true);
@@ -271,6 +308,7 @@ export function TableView({
                 tableMeta={meta?.meta ?? null}
                 focusAnchor={focusAnchor}
                 onAnchorConsumed={() => setFocusAnchor(undefined)}
+                onAltered={loadMeta}
               />
             )}
           </div>
