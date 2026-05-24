@@ -71,6 +71,13 @@
 }
 
 :root {
+  /* Tells Chromium to draw OS-native form chrome (scrollbars, the
+   * native <select> popup panel, text-input carets) in dark mode so
+   * the popup blends with the rest of the dark UI even before any
+   * user-picked theme is applied. `applyTheme()` overrides this per
+   * theme group when a non-dark theme is selected. */
+  color-scheme: dark;
+
   --bg-primary: #1e1e22;
   --bg-secondary: #212126;
   --bg-tertiary: #25252b;
