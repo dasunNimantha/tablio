@@ -71,13 +71,6 @@
 }
 
 :root {
-  /* Tells Chromium to draw OS-native form chrome (scrollbars, the
-   * native <select> popup panel, text-input carets) in dark mode so
-   * the popup blends with the rest of the dark UI even before any
-   * user-picked theme is applied. `applyTheme()` overrides this per
-   * theme group when a non-dark theme is selected. */
-  color-scheme: dark;
-
   --bg-primary: #1e1e22;
   --bg-secondary: #212126;
   --bg-tertiary: #25252b;
@@ -553,24 +546,10 @@ select {
   padding-right: 32px;
 }
 
-/* Native <select> dropdown options. Chromium honours `background`
- * and `color` here (the popup panel itself is OS-painted but the
- * row backgrounds + text colour are styleable). Using theme tokens
- * so light themes get a light popup instead of always-dark. */
 select option {
-  background: var(--bg-elevated);
-  color: var(--text-primary);
+  background: #2a2a31;
+  color: #e0e0e8;
   padding: 6px 8px;
-}
-
-/* The option chosen on hover and on Enter respectively. Chromium
- * exposes :hover/:checked on <option> with enough fidelity to
- * make the selection visible in either theme. */
-select option:hover,
-select option:focus,
-select option:checked {
-  background: var(--accent-soft);
-  color: var(--text-primary);
 }
 
 @keyframes spin {

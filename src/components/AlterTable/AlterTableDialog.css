@@ -209,13 +209,47 @@
   font-family: var(--font-mono);
 }
 
-/* The type column wraps its select in a flex-sized cell, so the
- * select itself needs an explicit width to fill the cell — matches
- * the new-column row where the select is the flex child directly. */
+/* The type column uses CustomSelect (issue #59 follow-up) so the
+ * dropdown popover picks up the active theme via CSS variables
+ * instead of the hardcoded option colors the native <select> falls
+ * back to. The wrapper needs to fill the flex cell and the trigger
+ * has to match the height/typography of the sibling inputs. */
 .alter-table-type-select {
+  display: flex;
   width: 100%;
 }
 
+.alter-table-type-select .cs-trigger {
+  width: 100%;
+  height: 32px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  /* `.cs-trigger` uses 15px by default which is fine in toolbar
+   * contexts but oversized here; the row's other inputs are 12px. */
+}
+
+.alter-table-type-select .cs-option {
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+/* Read-only fallback used when the row is queued for drop. */
+.alter-table-type-disabled {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.alter-table-column-row select option {
+  background: #25252b;
+  color: #e0e0e8;
+  padding: 6px 8px;
+}
 
 .alter-table-checkbox {
   appearance: none;

@@ -74,17 +74,24 @@ test.describe("Alter table dialog", () => {
     await expect(page.locator(".alter-table-column-row.dropped").first()).toBeVisible();
   });
 
-  test("type cell is always a select — no double-click required", async ({ page }) => {
-    // Regression: the type column used to hide behind a double-click
-    // → reveal-a-<select> dance. `<select autoFocus>` doesn't open
-    // the native dropdown either, so the user got stuck. Now the
-    // select is rendered up-front.
+  test("type cell uses a themed CustomSelect — single click opens the dropdown", async ({ page }) => {
+    // Regression: the type column used to hide behind a
+    // double-click → reveal-a-<select> dance. `<select autoFocus>`
+    // doesn't open the native dropdown either, so the user got
+    // stuck. We now render a CustomSelect which (a) is visible
+    // up-front and (b) uses theme CSS variables instead of the
+    // native dropdown's hardcoded colors.
     await page.locator(".alter-table-column-row").first().waitFor({ timeout: 5000 });
-    const firstTypeSelect = page
-      .locator(".alter-table-column-row:not(.new-column) select.alter-table-type-select")
+    const trigger = page
+      .locator(
+        ".alter-table-column-row:not(.new-column) .alter-table-type-select .cs-trigger",
+      )
       .first();
-    await expect(firstTypeSelect).toBeVisible();
-    await expect(firstTypeSelect).toBeEnabled();
+    await expect(trigger).toBeVisible();
+    await expect(trigger).toBeEnabled();
+    // A single click opens the themed popover.
+    await trigger.click();
+    await expect(page.locator(".cs-dropdown").first()).toBeVisible();
   });
 });
 

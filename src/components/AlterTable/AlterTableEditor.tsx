@@ -12,6 +12,19 @@ import {
   useAlterTableDraftStore,
   draftKey as makeDraftKey,
 } from "../../stores/alterTableDraftStore";
+import { CustomSelect } from "../CustomSelect/CustomSelect";
+
+/**
+ * Build a {value, label} option list for the type CustomSelect. If
+ * the column's current type isn't in the curated PG_TYPES catalog
+ * (varchar(50), numeric(10,2), custom domains, …) we prepend it so
+ * the trigger always shows a valid selected value.
+ */
+function buildTypeOptions(currentType: string) {
+  const has = !currentType || PG_TYPES.includes(currentType);
+  const list = has ? PG_TYPES : [currentType, ...PG_TYPES];
+  return list.map((t) => ({ value: t, label: t }));
+}
 
 /**
  * Variant-controlled rendering for the editor.
@@ -547,19 +560,15 @@ export function AlterTableEditor({
                   />
                 </div>
               </div>
-              <select
-                style={{ flex: 2 }}
-                value={col.data_type}
-                onChange={(e) =>
-                  updatePendingColumn(idx, "data_type", e.target.value)
-                }
-              >
-                {PG_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
+              <div style={{ flex: 2 }} className="alter-table-cell">
+                <CustomSelect
+                  className="alter-table-type-select"
+                  value={col.data_type}
+                  options={buildTypeOptions(col.data_type)}
+                  onChange={(v) => updatePendingColumn(idx, "data_type", v)}
+                  searchable
+                />
+              </div>
               <div
                 style={{
                   width: 60,
@@ -615,17 +624,11 @@ export function AlterTableEditor({
               editingCell?.type === "existing" &&
               editingCell.colName === col.name &&
               editingCell.field === "name";
-            // The type column is always rendered as a select (no
-            // double-click-to-edit dance). The PG_TYPES list is
-            // curated but doesn't cover every possible value the
-            // server might return (e.g. `varchar(50)`,
-            // `numeric(10,2)`, custom domain types). If the current
-            // effective type isn't in the catalog we prepend it so
-            // the select has a valid `value` to display.
-            const typeOptions =
-              PG_TYPES.includes(eff.type) || !eff.type
-                ? PG_TYPES
-                : [eff.type, ...PG_TYPES];
+            // The type column is always rendered as a CustomSelect
+            // (no double-click-to-edit dance). CustomSelect renders a
+            // themed popover instead of the native dropdown so dark/
+            // light themes don't end up with hardcoded option colors.
+            const typeOptions = buildTypeOptions(eff.type);
             const isEditingDefault =
               editingCell?.type === "existing" &&
               editingCell.colName === col.name &&
@@ -686,22 +689,25 @@ export function AlterTableEditor({
                   )}
                 </div>
                 <div style={{ flex: 2 }} className="alter-table-cell">
-                  {/* Type cell: always a select. A single click opens
-                   *  the native dropdown — no double-click required.
-                   *  Disabled while the row is queued for drop so the
-                   *  user can't queue a contradictory type change. */}
-                  <select
-                    className="alter-table-type-select"
-                    value={eff.type}
-                    onChange={(e) => handleChangeType(col.name, e.target.value)}
-                    disabled={dropped}
-                  >
-                    {typeOptions.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
+                  {/* Type cell: always shown as a CustomSelect. A
+                   *  single click opens a themed popover (matches
+                   *  the rest of the app's dropdowns), no
+                   *  double-click required. While the row is queued
+                   *  for drop we render a static span instead so the
+                   *  user can't queue contradictory ops. */}
+                  {dropped ? (
+                    <span className="alter-table-type-disabled">
+                      {eff.type}
+                    </span>
+                  ) : (
+                    <CustomSelect
+                      className="alter-table-type-select"
+                      value={eff.type}
+                      options={typeOptions}
+                      onChange={(v) => handleChangeType(col.name, v)}
+                      searchable
+                    />
+                  )}
                 </div>
                 <div
                   style={{
