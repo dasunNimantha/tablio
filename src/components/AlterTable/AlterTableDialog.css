@@ -216,11 +216,6 @@
   width: 100%;
 }
 
-.alter-table-column-row select option {
-  background: #25252b;
-  color: #e0e0e8;
-  padding: 6px 8px;
-}
 
 .alter-table-checkbox {
   appearance: none;
