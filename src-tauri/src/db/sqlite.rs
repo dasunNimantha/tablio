@@ -862,6 +862,15 @@ impl DatabaseDriver for SqliteDriver {
 
         let mut current_table = table_name.to_string();
 
+        // Pin all statements to a single pooled connection so schema
+        // changes from the prior statement are visible to the next
+        // one. Without this, sqlx may dispatch the DROP/ADD/RENAME
+        // sequence across different connections (each with its own
+        // schema cache), which surfaced as "no such column" /
+        // "duplicate column" errors on multi-op editor saves
+        // (issue #59 follow-up).
+        let mut conn = self.pool.acquire().await?;
+
         for op in operations {
             let table_ref = quote_ident(&current_table);
 
@@ -915,7 +924,7 @@ impl DatabaseDriver for SqliteDriver {
                 }
             };
             sqlx::query(sqlx::AssertSqlSafe(&*sql))
-                .execute(&self.pool)
+                .execute(&mut *conn)
                 .await?;
         }
 
