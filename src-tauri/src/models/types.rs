@@ -222,7 +222,19 @@ pub struct FetchRowsRequest {
     pub table: String,
     pub offset: u64,
     pub limit: u64,
-    pub sort: Option<SortSpec>,
+    /// Ordered list of sort specifications applied to the result.
+    ///
+    /// The frontend's data grid lets users Shift+click multiple
+    /// column headers to build a multi-level sort; the list is in
+    /// priority order (index 0 is the primary sort, index 1 the
+    /// secondary, etc.). An empty vec means "no sort" — drivers
+    /// then fall back to ordering by the table's primary-key
+    /// columns so pagination stays stable.
+    ///
+    /// `#[serde(default)]` keeps the wire shape backwards
+    /// compatible: a missing field deserialises to `Vec::new()`.
+    #[serde(default)]
+    pub sort: Vec<SortSpec>,
     pub filter: Option<String>,
 }
 

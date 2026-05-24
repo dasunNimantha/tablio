@@ -348,7 +348,7 @@ async fn crdb_fetch_rows_empty_table() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 0);
@@ -387,7 +387,7 @@ async fn crdb_fetch_rows_with_data() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -425,14 +425,14 @@ async fn crdb_fetch_rows_pagination() {
         .unwrap();
 
     let page1 = driver
-        .fetch_rows(&db, SCHEMA, &tbl, 0, 5, None, None)
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 5, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(page1.rows.len(), 5);
     assert_eq!(page1.total_rows, 10);
 
     let page2 = driver
-        .fetch_rows(&db, SCHEMA, &tbl, 5, 5, None, None)
+        .fetch_rows(&db, SCHEMA, &tbl, 5, 5, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(page2.rows.len(), 5);
@@ -475,10 +475,10 @@ async fn crdb_fetch_rows_sort() {
             &tbl,
             0,
             10,
-            Some(SortSpec {
+            vec![SortSpec {
                 column: "name".into(),
                 direction: SortDirection::Asc,
-            }),
+            }],
             None,
         )
         .await
@@ -518,7 +518,15 @@ async fn crdb_fetch_rows_filter() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, None, Some("\"val\" > 15".into()))
+        .fetch_rows(
+            &db,
+            SCHEMA,
+            &tbl,
+            0,
+            50,
+            Vec::new(),
+            Some("\"val\" > 15".into()),
+        )
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);
@@ -555,7 +563,7 @@ async fn crdb_fetch_rows_null_values() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.rows[0][1], serde_json::Value::Null);
@@ -601,7 +609,7 @@ async fn crdb_fetch_rows_various_data_types() {
         .unwrap();
 
     let data = driver
-        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, None, None)
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -765,7 +773,7 @@ async fn crdb_apply_changes_insert() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -816,7 +824,7 @@ async fn crdb_apply_changes_update() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.rows[0][1], serde_json::json!("new"));
@@ -866,7 +874,7 @@ async fn crdb_apply_changes_delete() {
     driver.apply_changes(&changes).await.unwrap();
 
     let data = driver
-        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 1);
@@ -1077,7 +1085,7 @@ async fn crdb_truncate_table() {
 
     driver.truncate_table(&db, SCHEMA, &tbl).await.unwrap();
     let data = driver
-        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 0);
@@ -1320,7 +1328,7 @@ async fn crdb_no_db_fetch_rows_on_specific_database() {
 
     let driver = crdb_driver_no_db!();
     let data = driver
-        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, None, None)
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, Vec::new(), None)
         .await
         .unwrap();
     assert_eq!(data.total_rows, 2);

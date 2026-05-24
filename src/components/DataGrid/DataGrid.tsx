@@ -52,12 +52,26 @@ import "./ag-grid-theme.css";
 
 function DataTypeHeader(props: IHeaderParams & { dataType?: string; isPk?: boolean; fk?: ForeignKeyInfo }) {
   const [sortState, setSortState] = useState<"asc" | "desc" | null>(null);
+  // Priority position of this column inside ag-grid's multi-sort
+  // model: 0 = primary, 1 = secondary, etc. `null` when this
+  // column isn't sorted. We render a small numeric badge next to
+  // the direction arrow when sortIndex >= 1 so users can tell
+  // which column drives the primary sort — before issue #57 the
+  // server only honoured the first sort silently. (When only one
+  // column is sorted, `sortIndex` is 0 and we hide the badge to
+  // keep the header clean for the common single-sort case.)
+  const [sortIndex, setSortIndex] = useState<number | null>(null);
 
   useEffect(() => {
     const listener = () => {
       if (props.column.isSortAscending()) setSortState("asc");
       else if (props.column.isSortDescending()) setSortState("desc");
       else setSortState(null);
+      // ag-grid types `getSortIndex` as `number | null | undefined`;
+      // normalise to `number | null` so the render side has one
+      // shape to check.
+      const idx = props.column.getSortIndex?.();
+      setSortIndex(idx == null ? null : idx);
     };
     props.column.addEventListener("sortChanged", listener);
     listener();
@@ -83,6 +97,14 @@ function DataTypeHeader(props: IHeaderParams & { dataType?: string; isPk?: boole
                 ? <><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></>
                 : <><line x1="12" y1="5" x2="12" y2="19" /><polyline points="5 12 12 19 19 12" /></>}
             </svg>
+          )}
+          {sortState && sortIndex !== null && sortIndex > 0 && (
+            <span
+              className="ag-custom-sort-priority"
+              title={`Sort priority ${sortIndex + 1}`}
+            >
+              {sortIndex + 1}
+            </span>
           )}
         </span>
         {props.dataType && (
@@ -164,7 +186,10 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
-  const [sort, setSort] = useState<SortSpec | null>(null);
+  // Multi-column sort (issue #57). The array is in priority order:
+  // index 0 is the primary sort, index 1 the secondary, etc.
+  // Empty = no user-picked sort (driver falls back to PK ordering).
+  const [sort, setSort] = useState<SortSpec[]>([]);
   const [saving, setSaving] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
@@ -875,16 +900,29 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
 
   const onSortChanged = useCallback(() => {
     if (!gridApiRef.current) return;
+    // ag-grid's multi-column sort model (Shift+click to add) is
+    // exposed via `getColumnState()`; we sort by `sortIndex` to
+    // preserve priority order. Before issue #57's fix this handler
+    // truncated `sortModel` to its first entry and emitted a
+    // single-column `SortSpec` — the grid lit up multiple sort
+    // arrows, but the backend ORDER BY only used the primary.
     const sortModel = gridApiRef.current.getColumnState()
       .filter((c) => c.sort)
       .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
-    const next: SortSpec | null = sortModel.length === 0
-      ? null
-      : { column: sortModel[0].colId, direction: sortModel[0].sort as "asc" | "desc" };
+    const next: SortSpec[] = sortModel.map((c) => ({
+      column: c.colId,
+      direction: c.sort as "asc" | "desc",
+    }));
     setSort((prev) => {
+      // Cheap structural equality check — avoids spuriously
+      // bumping `filterLoading` (and re-fetching) when ag-grid
+      // emits a sortChanged event with the same effective model
+      // (e.g. on a no-op click or after a tab regains focus).
       const same =
-        (prev === null && next === null) ||
-        (prev !== null && next !== null && prev.column === next.column && prev.direction === next.direction);
+        prev.length === next.length &&
+        prev.every((p, i) =>
+          p.column === next[i].column && p.direction === next[i].direction,
+        );
       if (!same) setFilterLoading(true);
       return next;
     });
@@ -903,8 +941,14 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
       const dbType = connections.find((c) => c.id === connectionId)?.db_type;
       let sql = `SELECT * FROM ${quoteQualified(dbType, schema, table)}`;
       if (activeFilter) sql += ` WHERE ${activeFilter}`;
-      if (sort) {
-        sql += ` ORDER BY ${quoteIdent(dbType, sort.column)} ${sort.direction}`;
+      if (sort.length > 0) {
+        // Multi-column sort (issue #57): mirror what the driver
+        // emits server-side so the EXPLAIN plan reflects the same
+        // ORDER BY the row fetch is about to issue.
+        const orderBy = sort
+          .map((s) => `${quoteIdent(dbType, s.column)} ${s.direction}`)
+          .join(", ");
+        sql += ` ORDER BY ${orderBy}`;
       } else if (dbType === "mssql") {
         // MSSQL's `OFFSET ... ROWS FETCH NEXT ... ROWS ONLY` syntax
         // requires an `ORDER BY`. Use a NULL-sort sentinel so the

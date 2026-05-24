@@ -21,7 +21,7 @@ pub async fn export_table_data(
             &request.table,
             0,
             1_000_000,
-            None,
+            Vec::new(),
             request.filter,
         )
         .await
@@ -68,7 +68,7 @@ pub async fn export_table_to_file(
             &request.table,
             0,
             1_000_000,
-            None,
+            Vec::new(),
             request.filter,
         )
         .await

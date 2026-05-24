@@ -404,7 +404,7 @@ impl DatabaseDriver for SqliteDriver {
         table: &str,
         offset: u64,
         limit: u64,
-        sort: Option<SortSpec>,
+        sort: Vec<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData> {
         if let Some(ref f) = filter {
@@ -423,26 +423,32 @@ impl DatabaseDriver for SqliteDriver {
             .map(|f| format!("WHERE {}", f))
             .unwrap_or_default();
 
-        let order_clause = sort
-            .map(|s| {
-                let dir = match s.direction {
-                    SortDirection::Asc => "ASC",
-                    SortDirection::Desc => "DESC",
-                };
-                format!("ORDER BY {} {}", quote_ident(&s.column), dir)
-            })
-            .unwrap_or_else(|| {
-                let pk_cols: Vec<String> = columns
-                    .iter()
-                    .filter(|c| c.is_primary_key)
-                    .map(|c| quote_ident(&c.name))
-                    .collect();
-                if pk_cols.is_empty() {
-                    String::new()
-                } else {
-                    format!("ORDER BY {}", pk_cols.join(", "))
-                }
-            });
+        let order_clause = if !sort.is_empty() {
+            // Multi-column sort (issue #57).
+            let parts: Vec<String> = sort
+                .iter()
+                .map(|s| {
+                    let dir = match s.direction {
+                        SortDirection::Asc => "ASC",
+                        SortDirection::Desc => "DESC",
+                    };
+                    format!("{} {}", quote_ident(&s.column), dir)
+                })
+                .collect();
+            format!("ORDER BY {}", parts.join(", "))
+        } else {
+            // PK fallback for stable pagination.
+            let pk_cols: Vec<String> = columns
+                .iter()
+                .filter(|c| c.is_primary_key)
+                .map(|c| quote_ident(&c.name))
+                .collect();
+            if pk_cols.is_empty() {
+                String::new()
+            } else {
+                format!("ORDER BY {}", pk_cols.join(", "))
+            }
+        };
 
         let count_sql = format!(
             "SELECT COUNT(*) as cnt FROM {} {}",
