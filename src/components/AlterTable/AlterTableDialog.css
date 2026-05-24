@@ -209,6 +209,13 @@
   font-family: var(--font-mono);
 }
 
+/* The type column wraps its select in a flex-sized cell, so the
+ * select itself needs an explicit width to fill the cell — matches
+ * the new-column row where the select is the flex child directly. */
+.alter-table-type-select {
+  width: 100%;
+}
+
 .alter-table-column-row select option {
   background: #25252b;
   color: #e0e0e8;

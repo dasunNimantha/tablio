@@ -73,6 +73,19 @@ test.describe("Alter table dialog", () => {
     await dropBtn.click();
     await expect(page.locator(".alter-table-column-row.dropped").first()).toBeVisible();
   });
+
+  test("type cell is always a select — no double-click required", async ({ page }) => {
+    // Regression: the type column used to hide behind a double-click
+    // → reveal-a-<select> dance. `<select autoFocus>` doesn't open
+    // the native dropdown either, so the user got stuck. Now the
+    // select is rendered up-front.
+    await page.locator(".alter-table-column-row").first().waitFor({ timeout: 5000 });
+    const firstTypeSelect = page
+      .locator(".alter-table-column-row:not(.new-column) select.alter-table-type-select")
+      .first();
+    await expect(firstTypeSelect).toBeVisible();
+    await expect(firstTypeSelect).toBeEnabled();
+  });
 });
 
 /**

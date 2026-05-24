@@ -105,10 +105,12 @@ export function AlterTableEditor({
   );
 
   // Transient — never persisted. Which inline cell is in edit mode.
+  // The type column doesn't appear here because it's always rendered
+  // as a select (no double-click toggle).
   const [editingCell, setEditingCell] = useState<{
     type: "existing";
     colName: string;
-    field: "name" | "type" | "default";
+    field: "name" | "default";
   } | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -448,7 +450,8 @@ export function AlterTableEditor({
             {database}.{schema}.{tableName}
           </div>
           <div className="alter-table-summary-note">
-            Double-click an existing column name, type, or default to edit it inline.
+            Click a column type to change it, or double-click a name
+            or default value to edit it inline.
           </div>
         </div>
         <div className="alter-table-summary-badges">
@@ -612,10 +615,17 @@ export function AlterTableEditor({
               editingCell?.type === "existing" &&
               editingCell.colName === col.name &&
               editingCell.field === "name";
-            const isEditingType =
-              editingCell?.type === "existing" &&
-              editingCell.colName === col.name &&
-              editingCell.field === "type";
+            // The type column is always rendered as a select (no
+            // double-click-to-edit dance). The PG_TYPES list is
+            // curated but doesn't cover every possible value the
+            // server might return (e.g. `varchar(50)`,
+            // `numeric(10,2)`, custom domain types). If the current
+            // effective type isn't in the catalog we prepend it so
+            // the select has a valid `value` to display.
+            const typeOptions =
+              PG_TYPES.includes(eff.type) || !eff.type
+                ? PG_TYPES
+                : [eff.type, ...PG_TYPES];
             const isEditingDefault =
               editingCell?.type === "existing" &&
               editingCell.colName === col.name &&
@@ -676,39 +686,22 @@ export function AlterTableEditor({
                   )}
                 </div>
                 <div style={{ flex: 2 }} className="alter-table-cell">
-                  {isEditingType ? (
-                    <select
-                      autoFocus
-                      defaultValue={eff.type}
-                      onBlur={(e) => {
-                        handleChangeType(col.name, e.target.value);
-                        setEditingCell(null);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Escape") setEditingCell(null);
-                      }}
-                    >
-                      {PG_TYPES.map((t) => (
-                        <option key={t} value={t}>
-                          {t}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <span
-                      className="editable-cell"
-                      title="Double-click to change type"
-                      onDoubleClick={() =>
-                        setEditingCell({
-                          type: "existing",
-                          colName: col.name,
-                          field: "type",
-                        })
-                      }
-                    >
-                      {eff.type}
-                    </span>
-                  )}
+                  {/* Type cell: always a select. A single click opens
+                   *  the native dropdown — no double-click required.
+                   *  Disabled while the row is queued for drop so the
+                   *  user can't queue a contradictory type change. */}
+                  <select
+                    className="alter-table-type-select"
+                    value={eff.type}
+                    onChange={(e) => handleChangeType(col.name, e.target.value)}
+                    disabled={dropped}
+                  >
+                    {typeOptions.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div
                   style={{
