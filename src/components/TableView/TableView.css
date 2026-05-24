@@ -104,12 +104,11 @@
   align-items: center;
   gap: 6px;
   padding: 0 12px;
-  /* Match the outer height of the .tv-mode-switch sibling so the
-   * Query / Data / Schema row reads as one toolbar. Mode-switch is
-   * a flex container with 1px border + 2px padding + 32px inner
-   * button + 2px padding + 1px border = 38px outer; we match it
-   * here. */
-  height: 38px;
+  /* Match the outer height of the .tv-mode-switch sibling. The
+   * switch is a flex container with 1px border + 1px padding +
+   * 30px inner button + 1px padding + 1px border = 34px outer.
+   * That keeps the toolbar row tight without feeling cramped. */
+  height: 34px;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -140,7 +139,10 @@
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 2px;
+  /* Tightened from 2px to 1px so the outer height is 34px
+   * (1 border + 1 padding + 30 inner + 1 padding + 1 border).
+   * Matches .tv-query-btn for a compact toolbar row. */
+  padding: 1px;
   gap: 2px;
 }
 
@@ -149,7 +151,9 @@
   align-items: center;
   gap: 5px;
   padding: 0 14px;
-  height: 32px;
+  /* 30px inner button + 2px parent padding + 2px parent border
+   * = 34px outer for the switch, matching .tv-query-btn. */
+  height: 30px;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
