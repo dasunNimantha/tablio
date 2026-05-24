@@ -20,6 +20,7 @@ import { ExportMenu } from "../ExportMenu";
 import { ColumnOrganizer, ColumnSettings, loadColumnSettings, saveColumnSettings, applyColumnSettings } from "./ColumnOrganizer";
 import { useToastStore } from "../../stores/toastStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
+import { useUserSettingsStore } from "../../stores/userSettingsStore";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { boolLiteral, paginationClause, quoteIdent, quoteQualified } from "../../lib/sqlDialect";
 import {
@@ -118,28 +119,42 @@ function DataTypeHeader(props: IHeaderParams & { dataType?: string; isPk?: boole
   );
 }
 
-const gridTheme = themeQuartz.withParams({
-  backgroundColor: "var(--bg-secondary)",
-  foregroundColor: "var(--text-primary)",
-  headerBackgroundColor: "var(--bg-header)",
-  accentColor: "var(--accent)",
-  borderColor: "var(--border)",
-  columnBorder: true,
-  oddRowBackgroundColor: "var(--bg-primary)",
-  rowHoverColor: "var(--bg-hover)",
-  selectedRowBackgroundColor: "var(--bg-selected)",
-  headerTextColor: "var(--text-secondary)",
-  cellTextColor: "var(--text-primary)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 14,
-  headerFontSize: 12,
-  rowHeight: 36,
-  headerHeight: 38,
-  cellHorizontalPadding: 10,
-  wrapperBorderRadius: 0,
-  borderRadius: 0,
-  headerColumnResizeHandleColor: "transparent",
-});
+/**
+ * AG Grid theme that respects the user's editor-font preference
+ * (issue #62). `themeQuartz.withParams` emits CSS variables (e.g.
+ * `--ag-font-size`) that AG Grid's own runtime stylesheet reads
+ * with higher specificity than any static rule we could write, so
+ * we have to go through this API to make the font size flow into
+ * cells + headers.
+ */
+function buildGridTheme(editorFontSize: number) {
+  return themeQuartz.withParams({
+    backgroundColor: "var(--bg-secondary)",
+    foregroundColor: "var(--text-primary)",
+    headerBackgroundColor: "var(--bg-header)",
+    accentColor: "var(--accent)",
+    borderColor: "var(--border)",
+    columnBorder: true,
+    oddRowBackgroundColor: "var(--bg-primary)",
+    rowHoverColor: "var(--bg-hover)",
+    selectedRowBackgroundColor: "var(--bg-selected)",
+    headerTextColor: "var(--text-secondary)",
+    cellTextColor: "var(--text-primary)",
+    fontFamily: "var(--font-mono)",
+    fontSize: editorFontSize,
+    // Header keeps its smaller fixed size — header text isn't the
+    // primary "read your data" surface, so we don't tie it to the
+    // user's pref. Cells are what matter for the editor-font
+    // mental model.
+    headerFontSize: 12,
+    rowHeight: 36,
+    headerHeight: 38,
+    cellHorizontalPadding: 10,
+    wrapperBorderRadius: 0,
+    borderRadius: 0,
+    headerColumnResizeHandleColor: "transparent",
+  });
+}
 
 interface Props {
   connectionId: string;
@@ -181,6 +196,17 @@ const REFRESH_OPTIONS = [
 export function DataGrid({ connectionId, database, schema, table, hideTitle = false, isActive = true }: Props) {
   const addToast = useToastStore((s) => s.addToast);
   const openTab = useTabStore((s) => s.openTab);
+  // Editor font preference flows into the grid's cell font-size via
+  // the AG Grid theme API. Rebuilding the theme each time the user
+  // adjusts the preference is cheap (it's a pure factory) and AG
+  // Grid handles the theme swap without remount.
+  const editorFontSize = useUserSettingsStore(
+    (s) => s.settings.editorFontSize,
+  );
+  const gridTheme = useMemo(
+    () => buildGridTheme(editorFontSize),
+    [editorFontSize],
+  );
   const connections = useConnectionStore((s) => s.connections);
   const [data, setData] = useState<TableData | null>(null);
   const [loading, setLoading] = useState(true);

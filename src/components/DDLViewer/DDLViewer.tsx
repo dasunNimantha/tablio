@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Editor, { type BeforeMount, type Monaco } from "@monaco-editor/react";
 import { api } from "../../lib/tauri";
 import { syncMonacoTheme, isLightTheme } from "../../lib/monacoTheme";
+import { useUserSettingsStore } from "../../stores/userSettingsStore";
 import { Loader2, Copy, Check } from "lucide-react";
 import "./DDLViewer.css";
 
@@ -24,6 +25,10 @@ export function DDLViewer({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Editor font size from user preferences (#62).
+  const editorFontSize = useUserSettingsStore(
+    (s) => s.settings.editorFontSize,
+  );
   const [monacoTheme, setMonacoTheme] = useState<string>(() =>
     isLightTheme() ? "tablio-light-0" : "tablio-dark-0"
   );
@@ -131,7 +136,7 @@ export function DDLViewer({
           options={{
             readOnly: true,
             minimap: { enabled: false },
-            fontSize: 15,
+            fontSize: editorFontSize,
             fontFamily: "var(--font-mono)",
             lineNumbers: "on",
             scrollBeyondLastLine: false,

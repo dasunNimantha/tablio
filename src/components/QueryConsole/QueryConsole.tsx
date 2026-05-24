@@ -11,6 +11,7 @@ import { format as formatSQL } from "sql-formatter";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useToastStore } from "../../stores/toastStore";
 import { useTabStore } from "../../stores/tabStore";
+import { useUserSettingsStore } from "../../stores/userSettingsStore";
 import { readZoomFactor } from "../../lib/zoom";
 import "./QueryConsole.css";
 
@@ -74,6 +75,12 @@ function formatValidationMessage(message: string) {
 export function QueryConsole({ tabId, connectionId, database }: Props) {
   const addToast = useToastStore((s) => s.addToast);
   const setTabTitle = useTabStore((s) => s.setTabTitle);
+  // Editor font size from user preferences (issue #62). Monaco
+  // re-renders the option diff on every prop change so a live
+  // adjustment in the Preferences dialog reflects immediately.
+  const editorFontSize = useUserSettingsStore(
+    (s) => s.settings.editorFontSize,
+  );
   // Identity of the saved query currently in the editor, if any.
   // Drives the dirty check, the in-place Ctrl/Cmd+S path, and the
   // "Save changes" button label. `null` until the user loads a
@@ -836,7 +843,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
             theme={monacoTheme}
             options={{
               minimap: { enabled: false },
-              fontSize: 16,
+              fontSize: editorFontSize,
               fontWeight: "350",
               fontFamily: "var(--font-mono)",
               lineNumbers: "on",
