@@ -718,7 +718,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           # Add the PGDG apt repo so we can pull a `pg_dump` that matches
-          # the postgres:17 service. Ubuntu 24.04 only ships
+          # the postgres:18 service. Ubuntu 24.04 only ships
           # `postgresql-client` v16, and `pg_dump` refuses to dump a
           # newer-version server ("aborting because of server version
           # mismatch") which breaks `pg_dump_through_tunnel`.
@@ -729,7 +729,7 @@ jobs:
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf postgresql-client-17
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libappindicator3-dev patchelf postgresql-client-18
           pg_dump --version
 
       - uses: dtolnay/rust-toolchain@stable
