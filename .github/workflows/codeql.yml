@@ -50,7 +50,7 @@ jobs:
       matrix:
         language: [actions, javascript-typescript, rust]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Tauri's Rust crate needs the same system libs CI's other Rust
       # jobs install — the autobuild step shells out to `cargo build`,
