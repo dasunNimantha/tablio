@@ -54,7 +54,7 @@ urlencoding = "2.1.3"
 russh = "0.61"
 log = "0.4"
 rust_xlsxwriter = { version = "0.96", features = ["chrono"] }
-calamine = { version = "0.35", features = ["dates"] }
+calamine = { version = "0.36", features = ["dates"] }
 
 # Windows-only direct dep so we can name `pageant::PageantStream` in the
 # return type of `connect_agent()` on Windows. russh 0.60 already pulls
