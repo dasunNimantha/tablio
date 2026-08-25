@@ -51,7 +51,7 @@ scylla = "1.5"
 tiberius = { version = "0.12.3", default-features = false, features = ["tokio", "rustls", "tds73"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 urlencoding = "2.1.3"
-russh = "0.61"
+russh = "0.62"
 log = "0.4"
 rust_xlsxwriter = { version = "0.98", features = ["chrono"] }
 calamine = { version = "0.36", features = ["dates"] }
