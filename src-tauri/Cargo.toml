@@ -41,7 +41,7 @@ async-trait = "0.1"
 anyhow = "1"
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
-dirs = "6"
+dirs = "7"
 tauri-plugin-dialog = "2.6.0"
 # Pin sysinfo to the latest version that still supports our MSRV
 # (rustc 1.93). 0.39.x bumped the rust-version metadata to 1.95.
