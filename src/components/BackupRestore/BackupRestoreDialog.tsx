@@ -306,9 +306,9 @@ export function BackupRestoreDialog({
             <label>Source database</label>
             <div className="dr-readonly-field">
               <span className="dr-dot" style={{ background: sourceConn?.color || "#6d9eff" }} />
-              <span>{sourceConn?.name || "Connection"}</span>
+              <span className="dr-source-name" title={sourceConn?.name}>{sourceConn?.name || "Connection"}</span>
               <span className="dr-sep">/</span>
-              <span className="dr-mono">{database}</span>
+              <span className="dr-mono" title={database}>{database}</span>
               {sourceConn && (
                 <span className="dr-host">{sourceConn.host}:{sourceConn.port}</span>
               )}

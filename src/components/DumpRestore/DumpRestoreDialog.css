@@ -20,7 +20,15 @@
   border-radius: var(--radius-md);
   font-size: 13px;
   color: var(--text-primary);
+  white-space: nowrap;
+  min-width: 0;
   -webkit-font-smoothing: antialiased;
+}
+
+.dr-source-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .dr-dot {
@@ -31,16 +39,21 @@
 }
 
 .dr-sep {
+  flex-shrink: 0;
   color: var(--text-muted);
 }
 
 .dr-mono {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-family: var(--font-mono);
   color: var(--text-secondary);
   font-size: 12px;
 }
 
 .dr-host {
+  flex-shrink: 0;
   margin-left: auto;
   font-family: var(--font-mono);
   font-size: 11px;
@@ -96,7 +109,7 @@
 
 .dr-target-item {
   display: grid;
-  grid-template-columns: auto 1fr auto auto;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, max-content) auto;
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
@@ -138,6 +151,8 @@
   font-size: 12px;
   color: var(--text-secondary);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .dr-target-host {
