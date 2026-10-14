@@ -28,6 +28,9 @@ sqlx = { version = "=0.9.0", features = [
     "tls-rustls",
     "postgres",
     "mysql",
+    # Required for MySQL 8 `caching_sha2_password` / `sha256_password`
+    # auth over non-TLS connections; opt-in since sqlx 0.9.
+    "mysql-rsa",
     "sqlite",
     "json",
     "chrono",
