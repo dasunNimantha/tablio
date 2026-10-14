@@ -167,6 +167,9 @@ interface Props {
    *  behind the Schema tab — otherwise the network keeps churning
    *  on a panel the user isn't even looking at. Defaults to `true`. */
   isActive?: boolean;
+  /** Changes when the table's columns or foreign keys were altered
+   *  outside the grid; rows and FK links are re-read in response. */
+  structureVersion?: number;
 }
 
 interface PendingChanges {
@@ -193,7 +196,15 @@ const REFRESH_OPTIONS = [
   { label: "5m", value: 300 },
 ];
 
-export function DataGrid({ connectionId, database, schema, table, hideTitle = false, isActive = true }: Props) {
+export function DataGrid({
+  connectionId,
+  database,
+  schema,
+  table,
+  hideTitle = false,
+  isActive = true,
+  structureVersion = 0,
+}: Props) {
   const addToast = useToastStore((s) => s.addToast);
   const openTab = useTabStore((s) => s.openTab);
   // Editor font preference flows into the grid's cell font-size via
@@ -267,6 +278,8 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
     changes.updates.size > 0 ||
     changes.inserts.length > 0 ||
     changes.deletedKeys.size > 0;
+  const hasChangesLatestRef = useRef(hasChanges);
+  hasChangesLatestRef.current = hasChanges;
 
   const fetchGenRef = useRef(0);
 
@@ -342,7 +355,16 @@ export function DataGrid({ connectionId, database, schema, table, hideTitle = fa
       })
       .catch(() => { if (!cancelled) setFkMap(new Map()); });
     return () => { cancelled = true; };
-  }, [connectionId, database, schema, table]);
+  }, [connectionId, database, schema, table, structureVersion]);
+
+  // Unsaved edits are keyed to the current column set, so leave them
+  // alone; the post-save fetch picks up the new structure.
+  const seenStructureVersionRef = useRef(structureVersion);
+  useEffect(() => {
+    if (seenStructureVersionRef.current === structureVersion) return;
+    seenStructureVersionRef.current = structureVersion;
+    if (!hasChangesLatestRef.current) fetchData({ silent: true });
+  }, [structureVersion, fetchData]);
 
   useEffect(() => {
     if (error && data) {

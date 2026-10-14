@@ -44,6 +44,17 @@ describe("usePolling", () => {
     expect(cb).toHaveBeenCalledTimes(4);
   });
 
+  it("skips the mount tick with immediate=false but still polls", async () => {
+    const cb = vi.fn().mockResolvedValue(undefined);
+    renderHook(() => usePolling(cb, 1000, true, { immediate: false }));
+
+    expect(cb).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
   it("does not start the interval when enabled=false", async () => {
     const cb = vi.fn().mockResolvedValue(undefined);
     renderHook(() => usePolling(cb, 1000, false));

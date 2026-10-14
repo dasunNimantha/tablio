@@ -41,6 +41,8 @@ interface ConnectionState {
   error: string | null;
   pendingPassphrasePrompt: PendingPassphrasePrompt | null;
   pendingHostKeyMismatch: PendingHostKeyMismatchPrompt | null;
+  /** Bumped per connection when its cached schema metadata should be re-read. */
+  schemaVersions: Record<string, number>;
 
   loadConnections: () => Promise<void>;
   addConnection: (config: ConnectionConfig) => Promise<void>;
@@ -49,6 +51,22 @@ interface ConnectionState {
   connectTo: (config: ConnectionConfig) => Promise<void>;
   disconnectFrom: (id: string) => Promise<void>;
   isConnected: (id: string) => boolean;
+  invalidateSchema: (id: string) => void;
+}
+
+/** Fields that only affect how a connection is displayed; changing them
+ *  doesn't require re-opening the live pool. */
+const DISPLAY_ONLY_FIELDS = new Set<keyof ConnectionConfig>(["name", "color", "group"]);
+
+const normalizeField = (v: unknown) => (v === undefined || v === "" ? null : v);
+
+export function requiresReconnect(prev: ConnectionConfig, next: ConnectionConfig): boolean {
+  const keys = new Set([...Object.keys(prev), ...Object.keys(next)] as (keyof ConnectionConfig)[]);
+  for (const key of keys) {
+    if (DISPLAY_ONLY_FIELDS.has(key)) continue;
+    if (normalizeField(prev[key]) !== normalizeField(next[key])) return true;
+  }
+  return false;
 }
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
@@ -58,6 +76,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   error: null,
   pendingPassphrasePrompt: null,
   pendingHostKeyMismatch: null,
+  schemaVersions: {},
 
   loadConnections: async () => {
     set({ loading: true, error: null });
@@ -79,6 +98,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   updateConnection: async (config) => {
+    const previous = get().connections.find((c) => c.id === config.id);
     try {
       await api.saveConnection(config);
       set((s) => ({
@@ -86,6 +106,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }));
     } catch (e) {
       set({ error: String(e) });
+      return;
+    }
+
+    if (!previous || !get().activeConnections.has(config.id)) return;
+
+    if (requiresReconnect(previous, config)) {
+      try {
+        await get().connectTo(config);
+      } catch (e) {
+        // The backend drops the old pool before opening the new one, so a
+        // failed reconnect leaves the connection closed.
+        set((s) => {
+          const next = new Set(s.activeConnections);
+          next.delete(config.id);
+          return { activeConnections: next };
+        });
+        throw new Error(`Saved, but reconnecting failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      get().invalidateSchema(config.id);
+    } else if (previous.color !== config.color) {
+      get().invalidateSchema(config.id);
     }
   },
 
@@ -132,6 +173,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   isConnected: (id) => get().activeConnections.has(id),
+
+  invalidateSchema: (id) =>
+    set((s) => ({
+      schemaVersions: { ...s.schemaVersions, [id]: (s.schemaVersions[id] ?? 0) + 1 },
+    })),
 }));
 
 /**

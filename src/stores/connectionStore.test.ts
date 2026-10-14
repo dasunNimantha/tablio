@@ -5,6 +5,7 @@ import {
   type ConnectionConfig,
 } from "../lib/tauri";
 import {
+  requiresReconnect,
   resolveSshPassphrase,
   useConnectionStore,
   withHostKeyMismatchRetry,
@@ -43,8 +44,78 @@ function resetStore() {
     error: null,
     pendingPassphrasePrompt: null,
     pendingHostKeyMismatch: null,
+    schemaVersions: {},
   });
 }
+
+describe("requiresReconnect", () => {
+  it("ignores display-only fields", () => {
+    expect(
+      requiresReconnect(baseConfig(), baseConfig({ name: "Renamed", color: "#fff", group: "prod" })),
+    ).toBe(false);
+  });
+
+  it("treats empty, undefined and null as equal", () => {
+    expect(requiresReconnect(baseConfig({ ssh_key_path: "" }), baseConfig({ ssh_key_path: undefined }))).toBe(false);
+  });
+
+  it("flags connection-relevant changes", () => {
+    expect(requiresReconnect(baseConfig(), baseConfig({ host: "other.example" }))).toBe(true);
+    expect(requiresReconnect(baseConfig(), baseConfig({ database: "otherdb" }))).toBe(true);
+    expect(requiresReconnect(baseConfig(), baseConfig({ ssh_enabled: true }))).toBe(true);
+  });
+});
+
+describe("connectionStore.updateConnection — live connections", () => {
+  beforeEach(() => {
+    resetStore();
+    vi.spyOn(api, "saveConnection").mockResolvedValue(undefined);
+    vi.spyOn(api, "connect").mockResolvedValue("ok");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function seed(active: boolean) {
+    useConnectionStore.setState({
+      connections: [baseConfig()],
+      activeConnections: new Set(active ? ["conn-1"] : []),
+    });
+  }
+
+  it("reconnects an active connection and invalidates its schema", async () => {
+    seed(true);
+    const edited = baseConfig({ host: "new.example" });
+    await useConnectionStore.getState().updateConnection(edited);
+    expect(api.connect).toHaveBeenCalledWith(edited);
+    expect(useConnectionStore.getState().schemaVersions["conn-1"]).toBe(1);
+    expect(useConnectionStore.getState().activeConnections.has("conn-1")).toBe(true);
+  });
+
+  it("does not reconnect for display-only edits", async () => {
+    seed(true);
+    await useConnectionStore.getState().updateConnection(baseConfig({ group: "prod" }));
+    expect(api.connect).not.toHaveBeenCalled();
+    expect(useConnectionStore.getState().schemaVersions["conn-1"]).toBeUndefined();
+  });
+
+  it("does not connect an inactive connection", async () => {
+    seed(false);
+    await useConnectionStore.getState().updateConnection(baseConfig({ host: "new.example" }));
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+
+  it("marks the connection closed and throws when reconnecting fails", async () => {
+    seed(true);
+    vi.mocked(api.connect).mockRejectedValue(new Error("auth failed"));
+    await expect(
+      useConnectionStore.getState().updateConnection(baseConfig({ password: "wrong" })),
+    ).rejects.toThrow(/Saved, but reconnecting failed: auth failed/);
+    expect(useConnectionStore.getState().activeConnections.has("conn-1")).toBe(false);
+    expect(useConnectionStore.getState().connections[0].password).toBe("wrong");
+  });
+});
 
 /**
  * Spin the event loop until `selector` returns a non-null value or the

@@ -27,12 +27,17 @@ import { useEffect, useRef } from "react";
  * `callback` may be sync or async; its return value is ignored.
  * The hook intentionally does not pass it any arguments — the
  * caller's closure already captures everything it needs.
+ *
+ * Pass `{ immediate: false }` to skip the tick on mount / enable when
+ * the caller already loaded the data itself.
  */
 export function usePolling(
   callback: () => void | Promise<void>,
   intervalMs: number,
   enabled: boolean = true,
+  options: { immediate?: boolean } = {},
 ): void {
+  const immediate = options.immediate ?? true;
   // Hold the latest callback in a ref so the interval doesn't have to
   // tear down + rebuild every time the parent re-renders (which would
   // be every keystroke for components with a search box).
@@ -61,7 +66,7 @@ export function usePolling(
         });
     };
 
-    tick();
+    if (immediate) tick();
     const id = setInterval(tick, intervalMs);
     const onVisibility = () => {
       if (!document.hidden) tick();
@@ -77,5 +82,5 @@ export function usePolling(
         document.removeEventListener("visibilitychange", onVisibility);
       }
     };
-  }, [enabled, intervalMs]);
+  }, [enabled, intervalMs, immediate]);
 }
