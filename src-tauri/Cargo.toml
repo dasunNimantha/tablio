@@ -23,11 +23,14 @@ serde_json = "1"
 # `>=0.30.0, <0.36.0`, letting Cargo resolve libsqlite3-sys 0.35.x
 # which bundles SQLite 3.50.x. Pin the exact alpha version to
 # avoid surprise breakage from future 0.9 alphas.
-sqlx = { version = "=0.9.0-alpha.1", features = [
+sqlx = { version = "=0.9.0", features = [
     "runtime-tokio",
     "tls-rustls",
     "postgres",
     "mysql",
+    # Required for MySQL 8 `caching_sha2_password` / `sha256_password`
+    # auth over non-TLS connections; opt-in since sqlx 0.9.
+    "mysql-rsa",
     "sqlite",
     "json",
     "chrono",
