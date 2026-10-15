@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   Loader2,
   AlertCircle,
@@ -16,6 +16,9 @@ import {
   TableInfo as TableInfoType,
 } from "../../lib/tauri";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
+import { useConnectionStore } from "../../stores/connectionStore";
+import { usePolling } from "../../hooks/usePolling";
+import { SCHEMA_POLL_INTERVAL_MS } from "../../lib/schemaSync";
 import { DataGrid } from "../DataGrid/DataGrid";
 import { SchemaPage } from "./SchemaPage";
 import {
@@ -49,6 +52,9 @@ interface CheapMetadata {
   triggers: TriggerInfo[];
   meta: TableInfoType | null;
 }
+
+/** Parts of the metadata that affect the data grid's column set. */
+const structuralMetaKey = (m: CheapMetadata) => JSON.stringify([m.columns, m.fks]);
 
 export function TableView({
   tabId,
@@ -92,6 +98,11 @@ export function TableView({
   );
 
   const [meta, setMeta] = useState<CheapMetadata | null>(null);
+  // Bumped when columns / keys change after the initial load, so the data
+  // grid re-reads rows with the new column set.
+  const [structureVersion, setStructureVersion] = useState(0);
+  const metaRef = useRef(meta);
+  metaRef.current = meta;
   const [metaLoading, setMetaLoading] = useState(true);
   const [metaError, setMetaError] = useState<string | null>(null);
 
@@ -113,9 +124,12 @@ export function TableView({
   // editor's onSaved callback (issue #59). Returns the same data
   // shape and uses the same error / loading semantics as the
   // initial-fetch effect below.
-  const loadMeta = useCallback(async () => {
-    setMetaLoading(true);
-    setMetaError(null);
+  const loadMeta = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = !!opts?.silent;
+    if (!silent) {
+      setMetaLoading(true);
+      setMetaError(null);
+    }
     try {
       const [columns, indexes, fks, refs, triggers, allTables] = await Promise.all([
         api.listColumns(connectionId, database, schema, table),
@@ -131,20 +145,44 @@ export function TableView({
           .listTables(connectionId, database, schema)
           .catch(() => [] as TableInfoType[]),
       ]);
-      setMeta({
+      const next: CheapMetadata = {
         columns,
         indexes,
         fks,
         refs,
         triggers,
         meta: allTables.find((t) => t.name === table) ?? null,
-      });
+      };
+      const prev = metaRef.current;
+      if (!prev || JSON.stringify(prev) !== JSON.stringify(next)) {
+        if (prev && structuralMetaKey(prev) !== structuralMetaKey(next)) {
+          setStructureVersion((v) => v + 1);
+        }
+        setMeta(next);
+      }
+      if (silent) setMetaError(null);
     } catch (e) {
-      setMetaError(String(e));
+      // A background check failing (e.g. the table was just dropped)
+      // shouldn't replace a good view with an error banner.
+      if (!silent) setMetaError(String(e));
     } finally {
-      setMetaLoading(false);
+      if (!silent) setMetaLoading(false);
     }
   }, [connectionId, database, schema, table]);
+
+  // Pick up schema changes made outside this tab: on a connection-wide
+  // invalidation, and periodically while this tab is in front.
+  const schemaVersion = useConnectionStore((s) => s.schemaVersions[connectionId] ?? 0);
+  const seenSchemaVersionRef = useRef(schemaVersion);
+  useEffect(() => {
+    if (seenSchemaVersionRef.current === schemaVersion) return;
+    seenSchemaVersionRef.current = schemaVersion;
+    loadMeta({ silent: true });
+  }, [schemaVersion, loadMeta]);
+
+  const isActiveTab = useTabStore((s) => s.activeTabId === tabId);
+  const silentLoadMeta = useCallback(() => loadMeta({ silent: true }), [loadMeta]);
+  usePolling(silentLoadMeta, SCHEMA_POLL_INTERVAL_MS, isActiveTab, { immediate: false });
 
   useEffect(() => {
     let cancelled = false;
@@ -278,6 +316,7 @@ export function TableView({
               table={table}
               hideTitle
               isActive={mode === "data"}
+              structureVersion={structureVersion}
             />
           </div>
         )}
@@ -308,7 +347,7 @@ export function TableView({
                 tableMeta={meta?.meta ?? null}
                 focusAnchor={focusAnchor}
                 onAnchorConsumed={() => setFocusAnchor(undefined)}
-                onAltered={loadMeta}
+                onAltered={() => loadMeta()}
               />
             )}
           </div>

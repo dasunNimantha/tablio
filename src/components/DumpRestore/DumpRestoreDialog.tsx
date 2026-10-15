@@ -190,9 +190,9 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
                 <label>Source database</label>
                 <div className="dr-readonly-field">
                   <span className="dr-dot" style={{ background: sourceConn?.color || "#6d9eff" }} />
-                  <span>{sourceConn?.name}</span>
+                  <span className="dr-source-name" title={sourceConn?.name}>{sourceConn?.name}</span>
                   <span className="dr-sep">/</span>
-                  <span className="dr-mono">{sourceDatabase}</span>
+                  <span className="dr-mono" title={sourceDatabase}>{sourceDatabase}</span>
                   {sourceConn && (
                     <span className="dr-host">{sourceConn.host}:{sourceConn.port}</span>
                   )}
@@ -243,8 +243,8 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
                               disabled={step === "confirm"}
                             >
                               <span className="dr-dot" style={{ background: t.color }} />
-                              <span className="dr-target-name">{t.connectionName}</span>
-                              <span className="dr-target-db">{t.database}</span>
+                              <span className="dr-target-name" title={t.connectionName}>{t.connectionName}</span>
+                              <span className="dr-target-db" title={t.database}>{t.database}</span>
                               <span className="dr-target-host">{t.host}:{t.port}</span>
                             </button>
                           );

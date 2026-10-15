@@ -5,6 +5,8 @@ import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { useShallow } from "zustand/react/shallow";
 import { api, DatabaseInfo, SchemaInfo, TableInfo, FunctionInfo } from "../../lib/tauri";
 import { readZoomFactor } from "../../lib/zoom";
+import { SCHEMA_POLL_INTERVAL_MS, structureSignature } from "../../lib/schemaSync";
+import { usePolling } from "../../hooks/usePolling";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { ConnectionDialog } from "../ConnectionDialog";
 import {
@@ -35,6 +37,8 @@ import {
 import "./Sidebar.css";
 
 const MAX_FOLDER_NAME_LENGTH = 50;
+/** Minimum gap between automatic schema checks triggered by window focus. */
+const FOCUS_REFRESH_MIN_INTERVAL_MS = 5_000;
 /** When the largest partition is >= this multiple of the median, we badge
  *  the parent as skewed. Picked conservatively so that small fixtures with
  *  natural variance (e.g. one ~3x partition) don't false-positive. */
@@ -367,6 +371,177 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     }
   };
 
+  const fetchChildren = useCallback(async (node: TreeNode): Promise<TreeNode[]> => {
+    let children: TreeNode[] = [];
+
+    if (node.type === "connection") {
+      const dbs: DatabaseInfo[] = await api.listDatabases(node.connectionId);
+      const templateDbs = new Set(["template0", "template1"]);
+      const userDbs = dbs.filter((db) => !templateDbs.has(db.name));
+      children = userDbs.map((db) => ({
+        id: `${node.connectionId}:${db.name}`,
+        label: db.name,
+        type: "database" as const,
+        connectionId: node.connectionId,
+        connectionColor: node.connectionColor,
+        database: db.name,
+      }));
+    } else if (node.type === "database") {
+      const allSchemas: SchemaInfo[] = await api.listSchemas(
+        node.connectionId,
+        node.database!
+      );
+      const systemSchemas = new Set([
+        "pg_catalog", "information_schema", "pg_toast",
+        "pg_temp_1", "pg_toast_temp_1",
+      ]);
+      const userSchemas = allSchemas.filter(
+        (s) => !systemSchemas.has(s.name) && !s.name.startsWith("pg_temp_") && !s.name.startsWith("pg_toast_temp_")
+      );
+      const schemasToShow = userSchemas.length > 0 ? userSchemas : allSchemas;
+
+      if (schemasToShow.length === 1) {
+        const s = schemasToShow[0];
+        children = [
+          {
+            id: `${node.connectionId}:${node.database}:${s.name}:tables`,
+            label: "Tables",
+            type: "table-group" as const,
+            connectionId: node.connectionId,
+            connectionColor: node.connectionColor,
+            database: node.database,
+            schema: s.name,
+          },
+          {
+            id: `${node.connectionId}:${node.database}:${s.name}:views`,
+            label: "Views",
+            type: "view-group" as const,
+            connectionId: node.connectionId,
+            connectionColor: node.connectionColor,
+            database: node.database,
+            schema: s.name,
+          },
+          {
+            id: `${node.connectionId}:${node.database}:${s.name}:functions`,
+            label: "Functions",
+            type: "function-group" as const,
+            connectionId: node.connectionId,
+            connectionColor: node.connectionColor,
+            database: node.database,
+            schema: s.name,
+          },
+        ];
+      } else {
+        children = schemasToShow.map((s) => ({
+          id: `${node.connectionId}:${node.database}:${s.name}`,
+          label: s.name,
+          type: "schema" as const,
+          connectionId: node.connectionId,
+          connectionColor: node.connectionColor,
+          database: node.database,
+          schema: s.name,
+        }));
+      }
+    } else if (node.type === "schema") {
+      children = [
+        {
+          id: `${node.id}:tables`,
+          label: "Tables",
+          type: "table-group" as const,
+          connectionId: node.connectionId,
+          connectionColor: node.connectionColor,
+          database: node.database,
+          schema: node.schema,
+        },
+        {
+          id: `${node.id}:views`,
+          label: "Views",
+          type: "view-group" as const,
+          connectionId: node.connectionId,
+          connectionColor: node.connectionColor,
+          database: node.database,
+          schema: node.schema,
+        },
+        {
+          id: `${node.id}:functions`,
+          label: "Functions",
+          type: "function-group" as const,
+          connectionId: node.connectionId,
+          connectionColor: node.connectionColor,
+          database: node.database,
+          schema: node.schema,
+        },
+      ];
+    } else if (node.type === "function-group") {
+      const funcs: FunctionInfo[] = await api.listFunctions(
+        node.connectionId,
+        node.database!,
+        node.schema!
+      );
+      children = funcs.map((f) => ({
+        id: `${node.connectionId}:${node.database}:${node.schema}:fn:${f.name}`,
+        label: `${f.name}() → ${f.return_type}`,
+        type: "function" as const,
+        connectionId: node.connectionId,
+        connectionColor: node.connectionColor,
+        database: node.database,
+        schema: node.schema,
+        tableName: f.name,
+        tableType: f.kind,
+      }));
+    } else if (node.type === "table-group" || node.type === "view-group") {
+      const tables: TableInfo[] = await api.listTables(
+        node.connectionId,
+        node.database!,
+        node.schema!
+      );
+      const isTableGroup = node.type === "table-group";
+      const filtered = tables.filter((t) =>
+        isTableGroup ? t.table_type === "BASE TABLE" : t.table_type === "VIEW"
+      );
+
+      if (isTableGroup) {
+        // Partition children are hidden from the flat Tables list and
+        // surface only inside their parent's "Partitions" sub-collection.
+        const { topLevel, childrenByParent } = groupTablesByParent(filtered, node.schema!);
+        const baseId = `${node.connectionId}:${node.database}:${node.schema}`;
+        children = topLevel.map((t) =>
+          buildTableNode(
+            t,
+            baseId,
+            node.connectionId,
+            node.connectionColor,
+            node.database,
+            node.schema,
+            childrenByParent,
+          )
+        );
+      } else {
+        children = filtered.map((t) => ({
+          id: `${node.connectionId}:${node.database}:${node.schema}:${t.name}`,
+          label: t.name,
+          type: "view" as const,
+          connectionId: node.connectionId,
+          connectionColor: node.connectionColor,
+          database: node.database,
+          schema: node.schema,
+          tableName: t.name,
+          tableType: t.table_type,
+        }));
+      }
+    } else if (
+      (node.type === "partition-group" || node.type === "table") &&
+      node.preloadedChildren
+    ) {
+      // Partition tree was pre-built recursively at table-group expand
+      // time (see buildTableNode). Hand the children straight back —
+      // no extra backend call.
+      children = node.preloadedChildren;
+    }
+
+    return children;
+  }, []);
+
   const expandNode = useCallback(
     async (node: TreeNode) => {
       const nodeId = node.id;
@@ -379,188 +554,13 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       setLoadingNodes((prev) => new Set(prev).add(nodeId));
 
       try {
-        let children: TreeNode[] = [];
+        const children = await fetchChildren(node);
 
-        if (node.type === "connection") {
-          const dbs: DatabaseInfo[] = await api.listDatabases(node.connectionId);
-          const templateDbs = new Set(["template0", "template1"]);
-          const userDbs = dbs.filter((db) => !templateDbs.has(db.name));
-
-          if (userDbs.length === 1) {
-            const db = userDbs[0];
-            const dbNodeId = `${node.connectionId}:${db.name}`;
-            const dbNode: TreeNode = {
-              id: dbNodeId,
-              label: db.name,
-              type: "database" as const,
-              connectionId: node.connectionId,
-              connectionColor: node.connectionColor,
-              database: db.name,
-            };
-            setExpanded((prev) => new Set(prev).add(dbNodeId));
-            children = [dbNode];
-            setTimeout(() => expandNode(dbNode), 50);
-          } else {
-            children = userDbs.map((db) => ({
-              id: `${node.connectionId}:${db.name}`,
-              label: db.name,
-              type: "database" as const,
-              connectionId: node.connectionId,
-              connectionColor: node.connectionColor,
-              database: db.name,
-            }));
-          }
-        } else if (node.type === "database") {
-          const allSchemas: SchemaInfo[] = await api.listSchemas(
-            node.connectionId,
-            node.database!
-          );
-          const systemSchemas = new Set([
-            "pg_catalog", "information_schema", "pg_toast",
-            "pg_temp_1", "pg_toast_temp_1",
-          ]);
-          const userSchemas = allSchemas.filter(
-            (s) => !systemSchemas.has(s.name) && !s.name.startsWith("pg_temp_") && !s.name.startsWith("pg_toast_temp_")
-          );
-          const schemasToShow = userSchemas.length > 0 ? userSchemas : allSchemas;
-
-          if (schemasToShow.length === 1) {
-            const s = schemasToShow[0];
-            children = [
-              {
-                id: `${node.connectionId}:${node.database}:${s.name}:tables`,
-                label: "Tables",
-                type: "table-group" as const,
-                connectionId: node.connectionId,
-                connectionColor: node.connectionColor,
-                database: node.database,
-                schema: s.name,
-              },
-              {
-                id: `${node.connectionId}:${node.database}:${s.name}:views`,
-                label: "Views",
-                type: "view-group" as const,
-                connectionId: node.connectionId,
-                connectionColor: node.connectionColor,
-                database: node.database,
-                schema: s.name,
-              },
-              {
-                id: `${node.connectionId}:${node.database}:${s.name}:functions`,
-                label: "Functions",
-                type: "function-group" as const,
-                connectionId: node.connectionId,
-                connectionColor: node.connectionColor,
-                database: node.database,
-                schema: s.name,
-              },
-            ];
-          } else {
-            children = schemasToShow.map((s) => ({
-              id: `${node.connectionId}:${node.database}:${s.name}`,
-              label: s.name,
-              type: "schema" as const,
-              connectionId: node.connectionId,
-              connectionColor: node.connectionColor,
-              database: node.database,
-              schema: s.name,
-            }));
-          }
-        } else if (node.type === "schema") {
-          children = [
-            {
-              id: `${node.id}:tables`,
-              label: "Tables",
-              type: "table-group" as const,
-              connectionId: node.connectionId,
-              connectionColor: node.connectionColor,
-              database: node.database,
-              schema: node.schema,
-            },
-            {
-              id: `${node.id}:views`,
-              label: "Views",
-              type: "view-group" as const,
-              connectionId: node.connectionId,
-              connectionColor: node.connectionColor,
-              database: node.database,
-              schema: node.schema,
-            },
-            {
-              id: `${node.id}:functions`,
-              label: "Functions",
-              type: "function-group" as const,
-              connectionId: node.connectionId,
-              connectionColor: node.connectionColor,
-              database: node.database,
-              schema: node.schema,
-            },
-          ];
-        } else if (node.type === "function-group") {
-          const funcs: FunctionInfo[] = await api.listFunctions(
-            node.connectionId,
-            node.database!,
-            node.schema!
-          );
-          children = funcs.map((f) => ({
-            id: `${node.connectionId}:${node.database}:${node.schema}:fn:${f.name}`,
-            label: `${f.name}() → ${f.return_type}`,
-            type: "function" as const,
-            connectionId: node.connectionId,
-            connectionColor: node.connectionColor,
-            database: node.database,
-            schema: node.schema,
-            tableName: f.name,
-            tableType: f.kind,
-          }));
-        } else if (node.type === "table-group" || node.type === "view-group") {
-          const tables: TableInfo[] = await api.listTables(
-            node.connectionId,
-            node.database!,
-            node.schema!
-          );
-          const isTableGroup = node.type === "table-group";
-          const filtered = tables.filter((t) =>
-            isTableGroup ? t.table_type === "BASE TABLE" : t.table_type === "VIEW"
-          );
-
-          if (isTableGroup) {
-            // Partition children are hidden from the flat Tables list and
-            // surface only inside their parent's "Partitions" sub-collection.
-            const { topLevel, childrenByParent } = groupTablesByParent(filtered, node.schema!);
-            const baseId = `${node.connectionId}:${node.database}:${node.schema}`;
-            children = topLevel.map((t) =>
-              buildTableNode(
-                t,
-                baseId,
-                node.connectionId,
-                node.connectionColor,
-                node.database,
-                node.schema,
-                childrenByParent,
-              )
-            );
-          } else {
-            children = filtered.map((t) => ({
-              id: `${node.connectionId}:${node.database}:${node.schema}:${t.name}`,
-              label: t.name,
-              type: "view" as const,
-              connectionId: node.connectionId,
-              connectionColor: node.connectionColor,
-              database: node.database,
-              schema: node.schema,
-              tableName: t.name,
-              tableType: t.table_type,
-            }));
-          }
-        } else if (
-          (node.type === "partition-group" || node.type === "table") &&
-          node.preloadedChildren
-        ) {
-          // Partition tree was pre-built recursively at table-group expand
-          // time (see buildTableNode). Hand the children straight back —
-          // no extra backend call.
-          children = node.preloadedChildren;
+        // A connection with a single user database auto-expands into it.
+        if (node.type === "connection" && children.length === 1) {
+          const dbNode = children[0];
+          setExpanded((prev) => new Set(prev).add(dbNode.id));
+          setTimeout(() => expandNode(dbNode), 50);
         }
 
         setChildrenMap((prev) => ({ ...prev, [nodeId]: children }));
@@ -574,7 +574,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         });
       }
     },
-    [expanded, childrenMap]
+    [expanded, childrenMap, fetchChildren]
   );
 
   const toggleExpand = useCallback(
@@ -806,18 +806,166 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     openTab(tab);
   };
 
-  const handleRefreshNode = (node: TreeNode) => {
-    setChildrenMap((prev) => {
-      const next = { ...prev };
-      delete next[node.id];
-      return next;
-    });
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      next.delete(node.id);
-      return next;
-    });
-    setTimeout(() => toggleExpand(node), 50);
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const childrenMapRef = useRef(childrenMap);
+  childrenMapRef.current = childrenMap;
+
+  /** Re-fetch `root` and every expanded descendant in place, so schema
+   *  changes made outside the app show up without collapsing the tree.
+   *  Cached children of collapsed descendants are dropped and reload lazily.
+   *  Resolves to true when objects were added, removed or renamed. */
+  const refreshSubtree = useCallback(
+    async (root: TreeNode, opts?: { silent?: boolean }): Promise<boolean> => {
+      const prefix = `${root.id}:`;
+      const inSubtree = (id: string) => id === root.id || id.startsWith(prefix);
+      const expandedNow = expandedRef.current;
+      const refreshed = new Set<string>();
+      let failed = false;
+      let structureChanged = false;
+
+      if (!opts?.silent) setLoadingNodes((prev) => new Set(prev).add(root.id));
+      try {
+        const queue: TreeNode[] = [root];
+        while (queue.length > 0) {
+          const node = queue.shift()!;
+          let children: TreeNode[];
+          try {
+            children = await fetchChildren(node);
+          } catch (err) {
+            console.error("Failed to refresh tree children:", err);
+            failed = true;
+            continue;
+          }
+          refreshed.add(node.id);
+          const previous = childrenMapRef.current[node.id];
+          if (previous && structureSignature(previous) !== structureSignature(children)) {
+            structureChanged = true;
+          }
+          if (!previous || JSON.stringify(previous) !== JSON.stringify(children)) {
+            setChildrenMap((prev) => ({ ...prev, [node.id]: children }));
+          }
+          for (const child of children) {
+            if (expandedNow.has(child.id) && !child.preloadedChildren) queue.push(child);
+          }
+        }
+      } finally {
+        const stale = failed
+          ? []
+          : Object.keys(childrenMapRef.current).filter((id) => inSubtree(id) && !refreshed.has(id));
+        if (stale.length > 0) {
+          setChildrenMap((prev) => {
+            const next = { ...prev };
+            for (const id of stale) delete next[id];
+            return next;
+          });
+          setExpanded((prev) => {
+            const next = new Set(prev);
+            for (const id of stale) next.delete(id);
+            return next;
+          });
+        }
+        if (!opts?.silent) {
+          setLoadingNodes((prev) => {
+            const next = new Set(prev);
+            next.delete(root.id);
+            return next;
+          });
+        }
+      }
+      return structureChanged;
+    },
+    [fetchChildren]
+  );
+
+  const connectionsRef = useRef(connections);
+  connectionsRef.current = connections;
+  const activeConnectionsRef = useRef(activeConnections);
+  activeConnectionsRef.current = activeConnections;
+
+  const schemaVersions = useConnectionStore((s) => s.schemaVersions);
+  const invalidateSchema = useConnectionStore((s) => s.invalidateSchema);
+  // Connections whose next schema-version bump came from this tree, which
+  // has already refreshed itself and only needs to notify open tabs.
+  const selfInvalidatedRef = useRef(new Set<string>());
+  const refreshingRef = useRef(new Set<string>());
+
+  const refreshConnectionTree = useCallback(
+    async (connectionId: string, silent: boolean) => {
+      const conn = connectionsRef.current.find((c) => c.id === connectionId);
+      if (!conn || !activeConnectionsRef.current.has(connectionId)) return;
+      if (!expandedRef.current.has(conn.id) && !childrenMapRef.current[conn.id]) return;
+      if (refreshingRef.current.has(connectionId)) return;
+      refreshingRef.current.add(connectionId);
+      try {
+        const changed = await refreshSubtree(
+          {
+            id: conn.id,
+            label: conn.name || conn.database,
+            type: "connection",
+            connectionId: conn.id,
+            connectionColor: conn.color,
+          },
+          { silent }
+        );
+        if (changed) {
+          selfInvalidatedRef.current.add(connectionId);
+          invalidateSchema(connectionId);
+        }
+      } finally {
+        refreshingRef.current.delete(connectionId);
+      }
+    },
+    [refreshSubtree, invalidateSchema]
+  );
+
+  const seenSchemaVersionsRef = useRef(schemaVersions);
+  useEffect(() => {
+    const seen = seenSchemaVersionsRef.current;
+    seenSchemaVersionsRef.current = schemaVersions;
+    for (const [id, version] of Object.entries(schemaVersions)) {
+      if (seen[id] === version) continue;
+      if (selfInvalidatedRef.current.delete(id)) continue;
+      refreshConnectionTree(id, false);
+    }
+  }, [schemaVersions, refreshConnectionTree]);
+
+  const checkActiveConnections = useCallback(async () => {
+    for (const id of activeConnectionsRef.current) {
+      await refreshConnectionTree(id, true);
+    }
+  }, [refreshConnectionTree]);
+
+  // Migrations are usually run from a terminal or another tool: check right
+  // away when the user switches back to the app, and periodically while
+  // it's visible.
+  useEffect(() => {
+    let lastCheck = 0;
+    const onFocus = () => {
+      const now = Date.now();
+      if (now - lastCheck < FOCUS_REFRESH_MIN_INTERVAL_MS) return;
+      lastCheck = now;
+      checkActiveConnections();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [checkActiveConnections]);
+
+  usePolling(checkActiveConnections, SCHEMA_POLL_INTERVAL_MS, activeConnections.size > 0, {
+    immediate: false,
+  });
+
+  const handleRefreshNode = async (node: TreeNode) => {
+    if (!expanded.has(node.id) && !childrenMap[node.id]) {
+      expandNode(node);
+      return;
+    }
+    setExpanded((prev) => new Set(prev).add(node.id));
+    const changed = await refreshSubtree(node);
+    if (changed) {
+      selfInvalidatedRef.current.add(node.connectionId);
+      invalidateSchema(node.connectionId);
+    }
   };
 
   const handleContextMenu = (e: React.MouseEvent, node: TreeNode) => {
@@ -827,7 +975,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     setContextMenu({ x: e.clientX / z, y: e.clientY / z, node });
   };
 
-  const renderNode = (node: TreeNode, depth: number) => {
+  const renderNode = (node: TreeNode, depth: number, labelSuffix?: React.ReactNode) => {
     // A node is expandable when it ships preloadedChildren (partitioned
     // parent / partition-group) or when it's a non-leaf branch type.
     const isPartitionedParent = node.type === "table" && !!node.preloadedChildren;
@@ -919,6 +1067,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
             {iconInfo.icon}
           </span>
           <span className="tree-label">{node.label}</span>
+          {labelSuffix}
           {showStrategyChip && (
             <button
               className={`tree-chip tree-chip-partition-${node.partitionStrategy} tree-chip-clickable`}
@@ -1397,14 +1546,17 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           <div style={{ flex: 1, minWidth: 0 }}>
             {isActive ? (
               <div className="tree-conn-row">
-                {renderNode(node, 0)}
-                {conn.ssh_enabled && (
-                  <span
-                    className="tree-conn-ssh-badge"
-                    title={`Tunneled through ${conn.ssh_user || "ssh"}@${conn.ssh_host || "bastion"}:${conn.ssh_port || 22}`}
-                  >
-                    <ShieldCheck size={11} />
-                  </span>
+                {renderNode(
+                  node,
+                  0,
+                  conn.ssh_enabled && (
+                    <span
+                      className="tree-conn-ssh-badge"
+                      title={`Tunneled through ${conn.ssh_user || "ssh"}@${conn.ssh_host || "bastion"}:${conn.ssh_port || 22}`}
+                    >
+                      <ShieldCheck size={11} />
+                    </span>
+                  ),
                 )}
                 <div className="tree-conn-actions">
                   <button

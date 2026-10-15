@@ -5,6 +5,9 @@ src-tauri/target/
 .DS_Store
 .cursor/
 
+# graphify knowledge graph output
+graphify-out/
+
 # Playwright
 test-results/
 playwright-report/
