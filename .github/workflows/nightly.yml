@@ -34,7 +34,7 @@ jobs:
 
   audit:
     name: Audit (Rust + npm)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -90,7 +90,7 @@ jobs:
 
   stress-fdleak:
     name: Resource monitor stress
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -160,7 +160,7 @@ jobs:
 
   legacy-db-matrix:
     name: Legacy DB ${{ matrix.engine }} ${{ matrix.version }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -240,7 +240,7 @@ jobs:
 
   ssh-soak:
     name: SSH tunnel soak
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     services:
       postgres:
@@ -339,7 +339,7 @@ jobs:
 
   flake-finder:
     name: Flake finder
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -376,7 +376,7 @@ jobs:
 
   big-data:
     name: Big-data scenarios
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     services:
       postgres:
@@ -442,7 +442,7 @@ jobs:
 
   proptest:
     name: Property-based tests
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -470,7 +470,7 @@ jobs:
 
   cargo-fuzz:
     name: cargo-fuzz (${{ matrix.target }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Cold cache: the sanitizer-instrumented build pulls in the full
     # `tablio` path dep (~14m on the GitHub-hosted runner) before the
     # 5-minute mutation window starts, plus toolchain install and
