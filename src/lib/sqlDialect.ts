@@ -136,3 +136,26 @@ export function boolLiteral(dbType: DbType | undefined, b: boolean): string {
       return b ? "TRUE" : "FALSE";
   }
 }
+
+/**
+ * Whether the dialect treats backslash as an escape character inside
+ * single-quoted string literals by default. MySQL-family engines do
+ * (unless `NO_BACKSLASH_ESCAPES` is set), so `'C:\temp'` would contain
+ * a TAB and a trailing `\` would swallow the closing quote.
+ */
+export function backslashEscapesInStrings(dbType: DbType | undefined): boolean {
+  return dbType === "mysql" || dbType === "mariadb" || dbType === "tidb";
+}
+
+/**
+ * Render a single-quoted SQL string literal for the dialect. Single
+ * quotes are doubled everywhere; backslashes are additionally doubled
+ * on dialects where they are escape characters, so the database sees
+ * exactly the characters the user typed.
+ */
+export function stringLiteral(dbType: DbType | undefined, value: string): string {
+  let escaped = value;
+  if (backslashEscapesInStrings(dbType)) escaped = escaped.replace(/\\/g, "\\\\");
+  escaped = escaped.replace(/'/g, "''");
+  return `'${escaped}'`;
+}

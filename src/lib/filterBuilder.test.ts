@@ -513,3 +513,54 @@ describe("buildWhereClause", () => {
     });
   });
 });
+
+describe("buildWhereClause string escaping per dialect", () => {
+  const columns: ColumnInfo[] = [col("path", "text"), col("n", "integer")];
+
+  it("doubles backslashes on mysql-family dialects", () => {
+    for (const t of ["mysql", "mariadb", "tidb"] as const) {
+      expect(
+        buildWhereClause([cond({ column: "path", value: "C:\\temp" })], columns, t)
+      ).toBe("`path` = 'C:\\\\temp'");
+    }
+  });
+
+  it("keeps a trailing backslash from swallowing the closing quote on mysql", () => {
+    expect(
+      buildWhereClause([cond({ column: "path", value: "dir\\" })], columns, "mysql")
+    ).toBe("`path` = 'dir\\\\'");
+  });
+
+  it("escapes backslashes and quotes together on mysql", () => {
+    expect(
+      buildWhereClause([cond({ column: "path", value: "a\\'b" })], columns, "mysql")
+    ).toBe("`path` = 'a\\\\''b'");
+  });
+
+  it("leaves backslashes alone on postgres, sqlite and mssql", () => {
+    expect(
+      buildWhereClause([cond({ column: "path", value: "C:\\temp" })], columns, "postgres")
+    ).toBe(`"path" = 'C:\\temp'`);
+    expect(
+      buildWhereClause([cond({ column: "path", value: "C:\\temp" })], columns, "sqlite")
+    ).toBe(`"path" = 'C:\\temp'`);
+    expect(
+      buildWhereClause([cond({ column: "path", value: "C:\\temp" })], columns, "mssql")
+    ).toBe(`[path] = 'C:\\temp'`);
+  });
+
+  it("escapes backslashes in LIKE and ILIKE patterns on mysql", () => {
+    expect(
+      buildWhereClause([cond({ column: "path", operator: "LIKE", value: "C:\\%" })], columns, "mysql")
+    ).toBe("`path` LIKE 'C:\\\\%'");
+    expect(
+      buildWhereClause([cond({ column: "path", operator: "ILIKE", value: "x\\y" })], columns, "mysql")
+    ).toBe("LOWER(`path`) LIKE LOWER('x\\\\y')");
+  });
+
+  it("quotes and escapes non-numeric input for numeric columns", () => {
+    expect(
+      buildWhereClause([cond({ column: "n", value: "1\\" })], columns, "mysql")
+    ).toBe("`n` = '1\\\\'");
+  });
+});
