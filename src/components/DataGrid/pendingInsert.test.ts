@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { pendingInsertToNewRow, type PendingInsert } from "./DataGrid";
+import { pendingInsertToNewRow, type PendingInsert } from "./pendingInsert";
 
 describe("pendingInsertToNewRow", () => {
   const cols = ["id", "name", "note", "created_at"];
