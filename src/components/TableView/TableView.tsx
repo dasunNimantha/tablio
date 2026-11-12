@@ -310,12 +310,13 @@ export function TableView({
             style={{ display: mode === "data" ? "flex" : "none" }}
           >
             <DataGrid
+              tabId={tabId}
               connectionId={connectionId}
               database={database}
               schema={schema}
               table={table}
               hideTitle
-              isActive={mode === "data"}
+              isActive={mode === "data" && isActiveTab}
               structureVersion={structureVersion}
             />
           </div>

@@ -15,6 +15,8 @@ import {
 import { readZoomFactor } from "../../lib/zoom";
 import { FilterBar } from "./FilterBar";
 import { RowDetailView } from "./RowDetailView";
+import { ConfirmDialog } from "../ConfirmDialog";
+import { editorInputToValue } from "../../lib/cellValues";
 import { ExplainView } from "../QueryConsole/ExplainView";
 import { ExportMenu } from "../ExportMenu";
 import { ColumnOrganizer, ColumnSettings, loadColumnSettings, saveColumnSettings, applyColumnSettings } from "./ColumnOrganizer";
@@ -157,25 +159,65 @@ function buildGridTheme(editorFontSize: number) {
 }
 
 interface Props {
+  /** Owning tab, used to report unsaved changes before the tab closes. */
+  tabId?: string;
   connectionId: string;
   database: string;
   schema: string;
   table: string;
   hideTitle?: boolean;
-  /** When false, the periodic auto-refresh interval is suspended.
-   *  Used by `TableView` to pause polling when the grid is hidden
-   *  behind the Schema tab — otherwise the network keeps churning
-   *  on a panel the user isn't even looking at. Defaults to `true`. */
+  /** True only while this grid is actually visible: its tab is the
+   *  active tab and the Data panel is showing. When false the periodic
+   *  auto-refresh is suspended and the grid's keyboard shortcuts are
+   *  ignored (all tabs stay mounted, so hidden grids must not react to
+   *  Ctrl+A / Delete meant for the visible one). Defaults to `true`. */
   isActive?: boolean;
   /** Changes when the table's columns or foreign keys were altered
    *  outside the grid; rows and FK links are re-read in response. */
   structureVersion?: number;
 }
 
+/**
+ * A row the user added but hasn't saved yet. Its values live with the
+ * record itself (not at a position in the fetched page), so paging,
+ * sorting or refreshing can never make Save insert a different row.
+ * `touched[i]` marks columns the user (or the test-data generator)
+ * set explicitly; untouched columns are omitted from the INSERT so the
+ * column DEFAULT applies, while an explicit NULL is sent as NULL.
+ */
+export interface PendingInsert {
+  tempId: number;
+  values: unknown[];
+  touched: boolean[];
+}
+
 interface PendingChanges {
   updates: Map<string, CellChange>;
-  inserts: NewRow[];
+  inserts: PendingInsert[];
   deletedKeys: Set<string>;
+}
+
+/** Build the INSERT payload for a pending row: only touched columns. */
+export function pendingInsertToNewRow(ins: PendingInsert, columnNames: string[]): NewRow {
+  const values: [string, unknown][] = [];
+  columnNames.forEach((name, ci) => {
+    if (ins.touched[ci]) values.push([name, ins.values[ci] ?? null]);
+  });
+  return { values };
+}
+
+let nextInsertTempId = 1;
+
+function sameSort(a: SortSpec[], b: SortSpec[]): boolean {
+  return a.length === b.length &&
+    a.every((p, i) => p.column === b[i].column && p.direction === b[i].direction);
+}
+
+function applySortToGrid(api: GridApi | null, spec: SortSpec[]) {
+  api?.applyColumnState({
+    state: spec.map((s, i) => ({ colId: s.column, sort: s.direction, sortIndex: i })),
+    defaultState: { sort: null },
+  });
 }
 
 interface RowObj {
@@ -197,6 +239,7 @@ const REFRESH_OPTIONS = [
 ];
 
 export function DataGrid({
+  tabId,
   connectionId,
   database,
   schema,
@@ -227,6 +270,7 @@ export function DataGrid({
   // index 0 is the primary sort, index 1 the secondary, etc.
   // Empty = no user-picked sort (driver falls back to PK ordering).
   const [sort, setSort] = useState<SortSpec[]>([]);
+  const sortRef = useRef<SortSpec[]>([]);
   const [saving, setSaving] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
@@ -238,9 +282,21 @@ export function DataGrid({
     deletedKeys: new Set(),
   });
 
-  const [editingRows, setEditingRows] = useState<unknown[][]>([]);
+  // Working copy of the fetched page's rows (edits applied). Pending
+  // inserts are kept in `changes.inserts`; `editingRows` below is the
+  // combined view used for rendering: existing rows first, then inserts.
+  const [existingRows, setExistingRows] = useState<unknown[][]>([]);
+  const editingRows = useMemo(
+    () => (changes.inserts.length === 0
+      ? existingRows
+      : [...existingRows, ...changes.inserts.map((ins) => ins.values)]),
+    [existingRows, changes.inserts],
+  );
+  const [pendingNav, setPendingNav] = useState<null | (() => void)>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const isConnected = useConnectionStore((s) => s.activeConnections.has(connectionId));
   const [detailRowIdx, setDetailRowIdx] = useState<number | null>(null);
-  const [rowContextMenu, setRowContextMenu] = useState<{ x: number; y: number; rowIdx: number } | null>(null);
+  const [rowContextMenu, setRowContextMenu] = useState<{ x: number; y: number; rowIdx: number; colName?: string } | null>(null);
   const [selectedPkKeys, setSelectedPkKeys] = useState<Set<string>>(new Set());
   const [refreshInterval, setRefreshInterval] = useState(10);
   const [showRefreshMenu, setShowRefreshMenu] = useState(false);
@@ -317,7 +373,7 @@ export function DataGrid({
 
       const sorted = { ...result, columns: sortedColumns, rows: sortedRows };
       setData(sorted);
-      setEditingRows(sorted.rows.map((r) => [...r]));
+      setExistingRows(sorted.rows.map((r) => [...r]));
       setDetailRowIdx((prev) => {
         if (prev == null) return null;
         if (prev >= sorted.rows.length) return null;
@@ -397,7 +453,12 @@ export function DataGrid({
   // tables, where a 5s refresh interval used to let two or three
   // fetchData calls stack up and freeze the grid for the duration
   // of all of them.
-  const refreshEnabled = refreshInterval > 0 && !hasChanges && isActive;
+  //  - the connection is closed (nothing to poll; also stops tabs of a
+  //    disconnected connection from erroring every interval)
+  //
+  // `isActive` is false for grids in background tabs, so only the
+  // visible grid polls even though every tab stays mounted.
+  const refreshEnabled = refreshInterval > 0 && !hasChanges && isActive && isConnected;
   const silentFetch = useCallback(() => {
     fetchData({ silent: true });
   }, [fetchData]);
@@ -414,12 +475,20 @@ export function DataGrid({
   const deleteSelectedRef = useRef<() => void>(() => {});
 
   useEffect(() => {
+    // Every open tab keeps its grid mounted, so this document-level
+    // listener exists once per tab. Only the visible grid may react,
+    // and destructive / selection shortcuts additionally require the
+    // keystroke to originate inside this grid.
+    if (!isActive) return;
     const handler = (e: KeyboardEvent) => {
+      const target = e.target as Node | null;
+      const inGrid = !!target && !!containerRef.current?.contains(target);
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setShowSearch(true);
         requestAnimationFrame(() => searchInputRef.current?.focus());
       }
+      if (!inGrid) return;
       if (e.key === "Escape" && showSearch) {
         setShowSearch(false);
         setSearchQuery("");
@@ -445,7 +514,7 @@ export function DataGrid({
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [showSearch, selectedPkKeys]);
+  }, [showSearch, selectedPkKeys, isActive]);
 
   const [searchMatchIdx, setSearchMatchIdx] = useState(-1);
 
@@ -532,6 +601,21 @@ export function DataGrid({
     newValue: unknown
   ) => {
     if (!data) return;
+    if (rowIndex >= data.rows.length) {
+      const insertIdx = rowIndex - data.rows.length;
+      setChanges((prev) => {
+        const target = prev.inserts[insertIdx];
+        if (!target) return prev;
+        const values = [...target.values];
+        const touched = [...target.touched];
+        values[colIndex] = newValue;
+        touched[colIndex] = true;
+        const inserts = [...prev.inserts];
+        inserts[insertIdx] = { ...target, values, touched };
+        return { ...prev, inserts };
+      });
+      return;
+    }
     const col = data.columns[colIndex];
     const oldValue = data.rows[rowIndex][colIndex];
     const pkValues = getPkValues(rowIndex);
@@ -556,8 +640,10 @@ export function DataGrid({
       return next;
     });
 
-    setEditingRows((prev) => {
-      const next = prev.map((r) => [...r]);
+    setExistingRows((prev) => {
+      if (!prev[rowIndex]) return prev;
+      const next = [...prev];
+      next[rowIndex] = [...prev[rowIndex]];
       next[rowIndex][colIndex] = newValue;
       return next;
     });
@@ -577,7 +663,8 @@ export function DataGrid({
       const obj: RowObj = { __rowIdx: i, __pkKey: "", __isInserted: isInserted, __isDeleted: false };
       data.columns.forEach((col, colIdx) => { obj[col.name] = row[colIdx]; });
       if (isInserted) {
-        obj.__pkKey = `__ins_${i - originalRowCount}`;
+        const ins = changes.inserts[i - originalRowCount];
+        obj.__pkKey = `__ins_${ins ? ins.tempId : i - originalRowCount}`;
         inserted.push(obj);
       } else {
         const pkValues = pkColumns.map((name) => obj[name]);
@@ -587,7 +674,7 @@ export function DataGrid({
       }
     }
     return { agRowData: existing, pinnedTopRows: inserted };
-  }, [editingRows, data, originalRowCount, pkColumns, changes.deletedKeys]);
+  }, [editingRows, data, originalRowCount, pkColumns, changes.deletedKeys, changes.inserts]);
 
   // Build AG Grid column definitions
   const columnDefs = useMemo((): ColDef[] => {
@@ -669,16 +756,16 @@ export function DataGrid({
         },
         valueSetter: (params) => {
           const rowIdx = params.data.__rowIdx;
-          const raw = params.newValue;
-          let parsed: unknown;
-          if ((raw === "" || raw === null || raw === undefined) && col.is_nullable) {
-            parsed = null;
-          } else if (raw === "" || raw === null || raw === undefined) {
-            parsed = raw;
-          } else {
-            parsed = parseCellValue(String(raw), col.data_type);
+          // Opening and closing the editor without typing must not
+          // record an edit (e.g. a NULL cell would otherwise become '').
+          if (params.newValue === params.oldValue) return false;
+          if ((params.oldValue === null || params.oldValue === undefined) && params.newValue === "") return false;
+          const parsed = editorInputToValue(params.newValue, col);
+          if (!parsed.ok) {
+            addToast(`${col.name}: ${parsed.error}`, "error");
+            return false;
           }
-          handleCellChange(rowIdx, colIdx, parsed);
+          handleCellChange(rowIdx, colIdx, parsed.value);
           return true;
         },
         minWidth: 80,
@@ -686,16 +773,18 @@ export function DataGrid({
     });
 
     return [rowNumCol, ...dataCols];
-  }, [data, visibleIndices, page, changes, pkColumns, handleCellChange, fkMap]);
+  }, [data, visibleIndices, page, changes, pkColumns, handleCellChange, fkMap, addToast]);
 
   const handleAddRow = () => {
     if (!data) return;
-    const emptyRow: unknown[] = data.columns.map(() => null);
-    setEditingRows((prev) => [...prev, emptyRow]);
-    const values: [string, unknown][] = data.columns.map((c) => [c.name, null]);
+    const insert: PendingInsert = {
+      tempId: nextInsertTempId++,
+      values: data.columns.map(() => null),
+      touched: data.columns.map(() => false),
+    };
     setChanges((prev) => ({
       ...prev,
-      inserts: [...prev.inserts, { values }],
+      inserts: [...prev.inserts, insert],
     }));
     setTimeout(() => gridApiRef.current?.ensureIndexVisible(0, "top"), 0);
   };
@@ -795,18 +884,9 @@ export function DataGrid({
         schema,
         table,
         updates: Array.from(changes.updates.values()),
-        inserts: changes.inserts.map((_ins, insertIdx) => {
-          const lastRowIdx = editingRows.length - changes.inserts.length;
-          const row = editingRows[lastRowIdx + insertIdx];
-          if (!row) {
-            return { values: data.columns.map((c): [string, unknown] => [c.name, null]) };
-          }
-          return {
-            values: data.columns
-              .map((c, ci): [string, unknown] => [c.name, row[ci]])
-              .filter(([, v]) => v !== null),
-          };
-        }),
+        inserts: changes.inserts.map((ins) =>
+          pendingInsertToNewRow(ins, data.columns.map((c) => c.name)),
+        ),
         deletes: Array.from(changes.deletedKeys).flatMap((key) => {
           let pkValues: unknown[];
           try {
@@ -837,9 +917,22 @@ export function DataGrid({
   const handleDiscard = () => {
     setChanges({ updates: new Map(), inserts: [], deletedKeys: new Set() });
     if (data) {
-      setEditingRows(data.rows.map((r) => [...r]));
+      setExistingRows(data.rows.map((r) => [...r]));
     }
   };
+
+  /**
+   * Run an action that replaces the current page (paging, sorting,
+   * filtering, refresh). Pending edits are tied to the rows on screen,
+   * so with unsaved changes we ask first and discard them on confirm.
+   */
+  const guardNav = useCallback((action: () => void) => {
+    if (hasChangesLatestRef.current) {
+      setPendingNav(() => action);
+    } else {
+      action();
+    }
+  }, []);
 
   const startManualTimer = useCallback(() => {
     fetchStartRef.current = performance.now();
@@ -847,20 +940,24 @@ export function DataGrid({
   }, []);
 
   const handleRefresh = useCallback(() => {
-    startManualTimer();
-    setFilterLoading(true);
-    fetchData();
-  }, [startManualTimer, fetchData]);
+    guardNav(() => {
+      startManualTimer();
+      setFilterLoading(true);
+      fetchData();
+    });
+  }, [guardNav, startManualTimer, fetchData]);
 
   const handleFilterApply = (filter: string | null) => {
-    startManualTimer();
-    setFilterLoading(true);
-    if (filter === activeFilter) {
-      fetchData();
-    } else {
-      setActiveFilter(filter);
-      setPage(0);
-    }
+    guardNav(() => {
+      startManualTimer();
+      setFilterLoading(true);
+      if (filter === activeFilter) {
+        fetchData();
+      } else {
+        setActiveFilter(filter);
+        setPage(0);
+      }
+    });
   };
 
   const handleExport = async (format: "csv" | "json" | "sql" | "xlsx") => {
@@ -922,7 +1019,7 @@ export function DataGrid({
     if (!e) return;
     e.preventDefault();
     const z = readZoomFactor();
-    setRowContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx });
+    setRowContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx, colName: event.column?.getColId() });
   }, []);
 
   const onCellClicked = useCallback((params: CellClickedEvent) => {
@@ -961,20 +1058,27 @@ export function DataGrid({
       column: c.colId,
       direction: c.sort as "asc" | "desc",
     }));
-    setSort((prev) => {
-      // Cheap structural equality check — avoids spuriously
-      // bumping `filterLoading` (and re-fetching) when ag-grid
-      // emits a sortChanged event with the same effective model
-      // (e.g. on a no-op click or after a tab regains focus).
-      const same =
-        prev.length === next.length &&
-        prev.every((p, i) =>
-          p.column === next[i].column && p.direction === next[i].direction,
-        );
-      if (!same) setFilterLoading(true);
-      return next;
-    });
-    setPage(0);
+    const prev = sortRef.current;
+    // Cheap structural equality check — avoids spuriously re-fetching
+    // (and resetting the page) when ag-grid emits a sortChanged event
+    // with the same effective model (e.g. on a no-op click, after a
+    // tab regains focus, or when we revert the header state below).
+    if (sameSort(prev, next)) return;
+    const apply = (restoreHeaders = false) => {
+      sortRef.current = next;
+      if (restoreHeaders) applySortToGrid(gridApiRef.current, next);
+      setFilterLoading(true);
+      setSort(next);
+      setPage(0);
+    };
+    if (hasChangesLatestRef.current) {
+      // Keep the headers showing the sort the rows are actually in
+      // until the user decides what to do with the pending edits.
+      applySortToGrid(gridApiRef.current, prev);
+      setPendingNav(() => () => apply(true));
+      return;
+    }
+    apply();
   }, []);
 
   const handleExplain = useCallback(async () => {
@@ -1088,11 +1192,16 @@ export function DataGrid({
     };
 
     const newRow: unknown[] = data.columns.map(generateValue);
-    setEditingRows((prev) => [...prev, newRow]);
-    const values: [string, unknown][] = data.columns.map((c, i) => [c.name, newRow[i]]);
+    // Generated NULLs mean "let the database decide" (auto/PK/nullable
+    // columns), so they stay untouched and the DEFAULT applies.
+    const insert: PendingInsert = {
+      tempId: nextInsertTempId++,
+      values: newRow,
+      touched: newRow.map((v) => v !== null),
+    };
     setChanges((prev) => ({
       ...prev,
-      inserts: [...prev.inserts, { values }],
+      inserts: [...prev.inserts, insert],
     }));
     addToast("Generated test row with random data");
     setTimeout(() => gridApiRef.current?.ensureIndexVisible(0, "top"), 0);
@@ -1183,7 +1292,7 @@ export function DataGrid({
   if (!data) return null;
 
   return (
-    <div className="data-grid-container">
+    <div className="data-grid-container" ref={containerRef}>
       <div className={`grid-toolbar ${hideTitle ? "grid-toolbar-no-title" : ""}`}>
         {!hideTitle && (
           <div className="grid-toolbar-left">
@@ -1411,14 +1520,14 @@ export function DataGrid({
           <button
             className="btn-icon"
             disabled={page === 0}
-            onClick={() => setPage(0)}
+            onClick={() => guardNav(() => setPage(0))}
           >
             <ChevronsLeft size={16} />
           </button>
           <button
             className="btn-icon"
             disabled={page === 0}
-            onClick={() => setPage((p) => p - 1)}
+            onClick={() => guardNav(() => setPage((p) => p - 1))}
           >
             <ChevronLeft size={16} />
           </button>
@@ -1428,14 +1537,14 @@ export function DataGrid({
           <button
             className="btn-icon"
             disabled={page >= totalPages - 1}
-            onClick={() => setPage((p) => p + 1)}
+            onClick={() => guardNav(() => setPage((p) => p + 1))}
           >
             <ChevronRight size={16} />
           </button>
           <button
             className="btn-icon"
             disabled={page >= totalPages - 1}
-            onClick={() => setPage(totalPages - 1)}
+            onClick={() => guardNav(() => setPage(totalPages - 1))}
           >
             <ChevronsRight size={16} />
           </button>
@@ -1513,6 +1622,28 @@ export function DataGrid({
           >
             Copy as INSERT
           </button>
+          {(() => {
+            // Explicit NULL: clearing a text cell stores an empty
+            // string, so NULL needs its own action.
+            const colIdx = data.columns.findIndex((c) => c.name === rowContextMenu.colName);
+            const col = colIdx >= 0 ? data.columns[colIdx] : null;
+            if (!col || !col.is_nullable) return null;
+            const cur = editingRows[rowContextMenu.rowIdx][colIdx];
+            const isInsertedRow = rowContextMenu.rowIdx >= originalRowCount;
+            if (!isInsertedRow && cur === null) return null;
+            if (!isInsertedRow && changes.deletedKeys.has(getPkKey(rowContextMenu.rowIdx))) return null;
+            return (
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  handleCellChange(rowContextMenu.rowIdx, colIdx, null);
+                  setRowContextMenu(null);
+                }}
+              >
+                Set {col.name} to NULL
+              </button>
+            );
+          })()}
           {selectedPkKeys.size > 1 && selectedPkKeys.has(getPkKey(rowContextMenu.rowIdx)) ? (
             <button
               className="context-menu-item context-menu-danger"
@@ -1530,11 +1661,22 @@ export function DataGrid({
               onClick={() => {
                 const rIdx = rowContextMenu.rowIdx;
                 const isInserted = rIdx >= originalRowCount;
-                if (!isInserted) handleDeleteRow(rIdx);
+                if (isInserted) {
+                  const insertIdx = rIdx - originalRowCount;
+                  setChanges((prev) => ({
+                    ...prev,
+                    inserts: prev.inserts.filter((_, i) => i !== insertIdx),
+                  }));
+                  setDetailRowIdx(null);
+                } else {
+                  handleDeleteRow(rIdx);
+                }
                 setRowContextMenu(null);
               }}
             >
-              {changes.deletedKeys.has(getPkKey(rowContextMenu.rowIdx)) ? "Undo delete" : "Delete row"}
+              {rowContextMenu.rowIdx >= originalRowCount
+                ? "Remove new row"
+                : changes.deletedKeys.has(getPkKey(rowContextMenu.rowIdx)) ? "Undo delete" : "Delete row"}
             </button>
           )}
           {data.columns.map((col, colIdx) => {
@@ -1559,6 +1701,22 @@ export function DataGrid({
         </div>
       )}
 
+      {pendingNav && (
+        <ConfirmDialog
+          title="Discard unsaved changes?"
+          message="This page has unsaved edits. Changing page, sort or filter, or refreshing, will discard them."
+          confirmLabel="Discard changes"
+          danger
+          onConfirm={() => {
+            const action = pendingNav;
+            setPendingNav(null);
+            handleDiscard();
+            action();
+          }}
+          onCancel={() => setPendingNav(null)}
+        />
+      )}
+
       {detailRowIdx !== null && data && editingRows[detailRowIdx] && (
         <RowDetailView
           columns={data.columns}
@@ -1572,20 +1730,4 @@ export function DataGrid({
       )}
     </div>
   );
-}
-
-function parseCellValue(raw: string, dataType: string): unknown {
-  const t = dataType.toLowerCase();
-  if (t.includes("int") || t === "serial" || t === "bigserial" || t === "smallserial") {
-    const n = parseInt(raw.trim(), 10);
-    return isNaN(n) ? raw : n;
-  }
-  if (t.includes("float") || t.includes("double") || t.includes("decimal") || t.includes("numeric") || t === "real") {
-    const n = parseFloat(raw.trim());
-    return isNaN(n) ? raw : n;
-  }
-  if (t === "boolean" || t === "bool") {
-    return raw.trim().toLowerCase() === "true" || raw.trim() === "1";
-  }
-  return raw;
 }
