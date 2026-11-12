@@ -9,7 +9,7 @@ import { useToastStore } from "../../stores/toastStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { useUserSettingsStore } from "../../stores/userSettingsStore";
-import { boolLiteral, quoteIdent, quoteQualified } from "../../lib/sqlDialect";
+import { boolLiteral, quoteIdent, quoteQualified, stringLiteral } from "../../lib/sqlDialect";
 import { readZoomFactor } from "../../lib/zoom";
 import "../DataGrid/ag-grid-theme.css";
 import "./QueryConsole.css";
@@ -770,7 +770,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
         if (v === null) return "NULL";
         if (typeof v === "number") return String(v);
         if (typeof v === "boolean") return boolLiteral(dbType, v);
-        return `'${String(v).replace(/'/g, "''")}'`;
+        return stringLiteral(dbType, typeof v === "object" ? JSON.stringify(v) : String(v));
       })
       .join(", ");
     const tbl = quoteQualified(dbType, sourceTable.schema, sourceTable.table);

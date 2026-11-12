@@ -22,7 +22,7 @@ import { useToastStore } from "../../stores/toastStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { useUserSettingsStore } from "../../stores/userSettingsStore";
 import { useConnectionStore } from "../../stores/connectionStore";
-import { boolLiteral, paginationClause, quoteIdent, quoteQualified } from "../../lib/sqlDialect";
+import { boolLiteral, paginationClause, quoteIdent, quoteQualified, stringLiteral } from "../../lib/sqlDialect";
 import {
   Save,
   Undo2,
@@ -902,7 +902,7 @@ export function DataGrid({
         if (v === null) return "NULL";
         if (typeof v === "number") return String(v);
         if (typeof v === "boolean") return boolLiteral(dbType, v);
-        return `'${String(v).replace(/'/g, "''")}'`;
+        return stringLiteral(dbType, typeof v === "object" ? JSON.stringify(v) : String(v));
       })
       .join(", ");
     return `INSERT INTO ${quoteQualified(dbType, schema, table)} (${cols}) VALUES (${vals});`;
