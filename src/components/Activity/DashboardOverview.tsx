@@ -4,6 +4,7 @@ import { computeRate, formatVal, makeLabels, type RatePoint } from "../../lib/da
 import { chartDevicePixelRatio, chartFontFamily } from "../../lib/chartRendering";
 import { Loader2, Activity, ArrowUpDown, Database, HardDrive } from "lucide-react";
 import { usePolling } from "../../hooks/usePolling";
+import { useIsTabActive } from "../Tabs/tabActive";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -335,7 +336,9 @@ export function DashboardOverview({ connectionId, paused }: Props) {
   // the why; this used to be a hand-rolled setInterval that kept
   // firing while the window was minimized and let in-flight stats
   // calls accumulate.
-  usePolling(fetchStats, 2000, !paused);
+  // Background tabs stay mounted; don't poll them.
+  const tabActive = useIsTabActive();
+  usePolling(fetchStats, 2000, !paused && tabActive);
 
   const latest = snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
   const prevRate = rates.length > 0 ? rates[rates.length - 1] : null;

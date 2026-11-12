@@ -8,6 +8,7 @@ import { RoleManager } from "../RoleManager/RoleManager";
 import { ERDView } from "../ERD/ERDView";
 import { QueryStats } from "../QueryStats/QueryStats";
 import { TableView, TableSubTab } from "../TableView/TableView";
+import { TabActiveContext } from "./tabActive";
 
 // Map legacy tab types onto the integrated TableView so stale tabs from
 // before the Data/Schema mode refactor still land somewhere sensible.
@@ -49,6 +50,7 @@ export function TabContent() {
             height: "100%",
           }}
         >
+          <TabActiveContext.Provider value={tab.id === activeTabId}>
           {TABLE_VIEW_TYPES.has(tab.type) && (
             <TableView
               tabId={tab.id}
@@ -106,6 +108,7 @@ export function TabContent() {
           {tab.type === "querystats" && (
             <QueryStats connectionId={tab.connectionId} />
           )}
+          </TabActiveContext.Provider>
         </div>
       ))}
     </div>

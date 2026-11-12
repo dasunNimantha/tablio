@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, type ReactNode } from "react";
 import { api, QueryStatEntry, QueryStatsKind, QueryStatsResponse } from "../../lib/tauri";
 import { usePolling } from "../../hooks/usePolling";
+import { useIsTabActive } from "../Tabs/tabActive";
 import { formatQueryDuration as formatDuration, cacheHitClass, speedClass } from "../../lib/dashboardUtils";
 import {
   Loader2,
@@ -101,7 +102,9 @@ export function QueryStats({ connectionId }: Props) {
   // Visibility-aware, re-entrancy-safe polling. Skip ticks while
   // the window is hidden and never overlap two in-flight fetches.
   // Disabled when paused or pg_stat_statements isn't installed.
-  usePolling(fetchStats, 10000, !paused && !!data?.available);
+  // Background tabs stay mounted; don't poll them.
+  const tabActive = useIsTabActive();
+  usePolling(fetchStats, 10000, !paused && !!data?.available && tabActive);
 
   const uniqueUsers = useMemo(() => {
     if (!data?.entries) return [];
