@@ -68,6 +68,75 @@ pub fn to_sql_inserts(
     columns: &[String],
     rows: &[Vec<Value>],
 ) -> String {
+    to_sql_inserts_typed(schema, table_name, columns, &[], rows)
+}
+
+/// True for column types whose values can be written as bare SQL numeric
+/// literals.
+pub fn is_numeric_type(data_type: &str) -> bool {
+    let t = data_type.to_ascii_lowercase();
+    // `interval`/`point` contain "int" but aren't numbers.
+    if t.contains("interval") || t.contains("point") {
+        return false;
+    }
+    [
+        "int", "serial", "numeric", "decimal", "real", "double", "float", "number", "dec(",
+    ]
+    .iter()
+    .any(|k| t.contains(k))
+        || t == "dec"
+}
+
+/// A plain decimal literal (`-12`, `3.50`, `1e10`), safe to emit unquoted.
+fn is_numeric_literal(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
+        i += 1;
+    }
+    let int_start = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    let mut digits = i - int_start;
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        let frac_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        digits += i - frac_start;
+    }
+    if digits == 0 {
+        return false;
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
+            i += 1;
+        }
+        let exp_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == exp_start {
+            return false;
+        }
+    }
+    i == b.len()
+}
+
+/// Like [`to_sql_inserts`], with per-column `numeric` flags. Drivers send
+/// integers beyond 2^53 and exact decimals as JSON strings to avoid
+/// precision loss; for numeric columns those are emitted unquoted so the
+/// literal keeps its exact value and type. Anything else stays quoted.
+pub fn to_sql_inserts_typed(
+    schema: Option<&str>,
+    table_name: &str,
+    columns: &[String],
+    numeric: &[bool],
+    rows: &[Vec<Value>],
+) -> String {
     let mut out = String::new();
     let cols_str = columns
         .iter()
@@ -87,10 +156,16 @@ pub fn to_sql_inserts(
     for row in rows {
         let vals: Vec<String> = row
             .iter()
-            .map(|v| match v {
+            .enumerate()
+            .map(|(i, v)| match v {
                 Value::Null => "NULL".to_string(),
                 Value::Bool(b) => b.to_string(),
                 Value::Number(n) => n.to_string(),
+                Value::String(s)
+                    if numeric.get(i).copied().unwrap_or(false) && is_numeric_literal(s) =>
+                {
+                    s.clone()
+                }
                 Value::String(s) => format!("'{}'", s.replace('\'', "''")),
                 _ => format!("'{}'", v.to_string().replace('\'', "''")),
             })
@@ -126,12 +201,17 @@ pub fn sanitize_sheet_name(raw: &str) -> String {
 /// Render rows as an `.xlsx` workbook, returning the serialized bytes.
 ///
 /// Type fidelity (the headline ask in #69 / #70):
-/// - `Value::Number` writes as a numeric cell (not stringified)
+/// - `Value::Number` writes as a numeric cell (not stringified), except
+///   integers beyond ±2^53, which Excel's doubles can't hold exactly and
+///   are written as text
 /// - `Value::Bool` writes as a boolean cell
 /// - `Value::Null` writes nothing (blank cell)
 /// - `Value::String` that parses as ISO-8601 date / datetime writes as
-///   an Excel datetime with `yyyy-mm-dd hh:mm:ss` formatting; otherwise
-///   plain string
+///   an Excel datetime with `yyyy-mm-dd hh:mm:ss` formatting. Values with
+///   a UTC offset (`timestamptz`) are converted to UTC and formatted with
+///   a literal `UTC` suffix. Any other string, including numeric strings
+///   that drivers use for big integers and exact decimals, stays text so
+///   no digits are lost
 /// - `Value::Array` / `Value::Object` fall back to their JSON
 ///   representation since Excel has no native equivalent
 ///
@@ -141,6 +221,7 @@ pub fn to_xlsx(columns: &[String], rows: &[Vec<Value>], sheet_name: &str) -> Res
     let mut workbook = Workbook::new();
     let safe_name = sanitize_sheet_name(sheet_name);
     let datetime_fmt = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss");
+    let datetime_utc_fmt = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss \"UTC\"");
     let header_fmt = Format::new().set_bold();
 
     let worksheet = workbook.add_worksheet();
@@ -153,7 +234,14 @@ pub fn to_xlsx(columns: &[String], rows: &[Vec<Value>], sheet_name: &str) -> Res
     for (row_idx, row) in rows.iter().enumerate() {
         let excel_row = (row_idx + 1) as u32;
         for (col_idx, val) in row.iter().enumerate() {
-            write_typed_cell(worksheet, excel_row, col_idx as u16, val, &datetime_fmt)?;
+            write_typed_cell(
+                worksheet,
+                excel_row,
+                col_idx as u16,
+                val,
+                &datetime_fmt,
+                &datetime_utc_fmt,
+            )?;
         }
     }
 
@@ -162,12 +250,16 @@ pub fn to_xlsx(columns: &[String], rows: &[Vec<Value>], sheet_name: &str) -> Res
     Ok(bytes)
 }
 
+/// Largest integer magnitude Excel (an IEEE double) represents exactly.
+const MAX_EXACT_F64_INT: u64 = 1 << 53;
+
 fn write_typed_cell(
     worksheet: &mut rust_xlsxwriter::Worksheet,
     row: u32,
     col: u16,
     val: &Value,
     datetime_fmt: &Format,
+    datetime_utc_fmt: &Format,
 ) -> Result<()> {
     match val {
         Value::Null => {
@@ -177,26 +269,39 @@ fn write_typed_cell(
             worksheet.write_boolean(row, col, *b)?;
         }
         Value::Number(n) => {
-            // Prefer i64 / u64 over f64 to keep integers as integers in
-            // the workbook (Excel still stores them as f64 internally,
-            // but the cell type stays "number" either way).
+            // Excel stores every number as f64. Integers beyond 2^53 would
+            // be silently rounded, so they are written as text instead.
             if let Some(i) = n.as_i64() {
-                worksheet.write_number(row, col, i as f64)?;
+                if i.unsigned_abs() <= MAX_EXACT_F64_INT {
+                    worksheet.write_number(row, col, i as f64)?;
+                } else {
+                    worksheet.write_string(row, col, i.to_string())?;
+                }
             } else if let Some(u) = n.as_u64() {
-                worksheet.write_number(row, col, u as f64)?;
+                if u <= MAX_EXACT_F64_INT {
+                    worksheet.write_number(row, col, u as f64)?;
+                } else {
+                    worksheet.write_string(row, col, u.to_string())?;
+                }
             } else if let Some(f) = n.as_f64() {
                 worksheet.write_number(row, col, f)?;
             } else {
                 worksheet.write_string(row, col, n.to_string())?;
             }
         }
-        Value::String(s) => {
-            if let Some(dt) = parse_iso_datetime(s) {
+        Value::String(s) => match parse_iso_datetime(s) {
+            // Numeric strings (big integers, exact decimals) fall through
+            // to a text cell, which keeps every digit.
+            Some(IsoDateTime::Naive(dt)) => {
                 worksheet.write_datetime_with_format(row, col, dt, datetime_fmt)?;
-            } else {
+            }
+            Some(IsoDateTime::Utc(dt)) => {
+                worksheet.write_datetime_with_format(row, col, dt, datetime_utc_fmt)?;
+            }
+            None => {
                 worksheet.write_string(row, col, s.as_str())?;
             }
-        }
+        },
         // No native Excel cell type for arrays / objects; fall back to
         // the JSON representation so the data isn't silently dropped.
         Value::Array(_) | Value::Object(_) => {
@@ -206,28 +311,44 @@ fn write_typed_cell(
     Ok(())
 }
 
+#[derive(Debug, PartialEq)]
+enum IsoDateTime {
+    /// No offset in the source value; written as-is.
+    Naive(chrono::NaiveDateTime),
+    /// The source carried a UTC offset (e.g. `timestamptz`). Excel has no
+    /// offset-aware type, so the instant is converted to UTC and the cell
+    /// format shows a literal "UTC" suffix so the shift is visible.
+    Utc(chrono::NaiveDateTime),
+}
+
 /// Best-effort ISO-8601 parse covering the shapes our drivers emit for
 /// `timestamp` / `date` / `time` values.
-fn parse_iso_datetime(s: &str) -> Option<chrono::NaiveDateTime> {
+fn parse_iso_datetime(s: &str) -> Option<IsoDateTime> {
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 
-    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
-        return Some(dt);
-    }
-    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-        return Some(dt);
-    }
-    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
-        return Some(dt);
-    }
-    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-        return Some(dt);
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(IsoDateTime::Naive(dt));
+        }
     }
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-        return Some(dt.naive_utc());
+        return Some(IsoDateTime::Utc(dt.naive_utc()));
+    }
+    // `2024-01-02 03:04:05+02` / `+02:00` as printed by PostgreSQL.
+    for fmt in ["%Y-%m-%d %H:%M:%S%.f%#z", "%Y-%m-%d %H:%M:%S%#z"] {
+        if let Ok(dt) = chrono::DateTime::parse_from_str(s, fmt) {
+            return Some(IsoDateTime::Utc(dt.naive_utc()));
+        }
     }
     if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        return Some(d.and_time(NaiveTime::from_hms_opt(0, 0, 0)?));
+        return Some(IsoDateTime::Naive(
+            d.and_time(NaiveTime::from_hms_opt(0, 0, 0)?),
+        ));
     }
     None
 }
@@ -713,5 +834,114 @@ mod tests {
         assert!(parse_iso_datetime("2024-05-01").is_some());
         assert!(parse_iso_datetime("not a date").is_none());
         assert!(parse_iso_datetime("hello").is_none());
+    }
+
+    #[test]
+    fn parse_iso_datetime_marks_offset_values_as_utc() {
+        use chrono::NaiveDate;
+        let expected = NaiveDate::from_ymd_opt(2024, 5, 1)
+            .unwrap()
+            .and_hms_opt(10, 30, 0)
+            .unwrap();
+        assert_eq!(
+            parse_iso_datetime("2024-05-01T12:30:00+02:00"),
+            Some(IsoDateTime::Utc(expected))
+        );
+        assert_eq!(
+            parse_iso_datetime("2024-05-01 12:30:00+02"),
+            Some(IsoDateTime::Utc(expected))
+        );
+        assert_eq!(
+            parse_iso_datetime("2024-05-01 10:30:00"),
+            Some(IsoDateTime::Naive(expected))
+        );
+        assert_eq!(parse_iso_datetime("12345678901234567890"), None);
+    }
+
+    #[test]
+    fn xlsx_keeps_big_integers_and_numeric_strings_exact() {
+        use calamine::{Data, Reader};
+        let cols = vec!["big".to_string(), "small".to_string(), "dec".to_string()];
+        let rows = vec![vec![
+            Value::Number(9_007_199_254_740_993i64.into()),
+            Value::Number(9_007_199_254_740_992i64.into()),
+            Value::String("12345678901234567890.123456789".into()),
+        ]];
+        let bytes = to_xlsx(&cols, &rows, "t").unwrap();
+        let mut wb = calamine::open_workbook_auto_from_rs(std::io::Cursor::new(bytes)).unwrap();
+        let range = wb.worksheet_range("t").unwrap();
+        let row: Vec<&Data> = range.rows().nth(1).unwrap().iter().collect();
+        assert!(
+            matches!(row[0], Data::String(s) if s == "9007199254740993"),
+            "{:?}",
+            row[0]
+        );
+        assert!(
+            matches!(row[1], Data::Float(_) | Data::Int(_)),
+            "2^53 itself is exact and stays numeric: {:?}",
+            row[1]
+        );
+        assert!(
+            matches!(row[2], Data::String(s) if s == "12345678901234567890.123456789"),
+            "{:?}",
+            row[2]
+        );
+    }
+
+    #[test]
+    fn numeric_literal_detection() {
+        for ok in ["0", "-12", "+3", "3.50", ".5", "5.", "1e10", "-2.5E-3"] {
+            assert!(is_numeric_literal(ok), "{ok}");
+        }
+        for bad in [
+            "", "-", ".", "1e", "1,000", "0x10", "NaN", "Infinity", "1 ", "1;DROP",
+        ] {
+            assert!(!is_numeric_literal(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn numeric_type_detection() {
+        for t in [
+            "integer",
+            "BIGINT",
+            "numeric(20,2)",
+            "decimal",
+            "double precision",
+            "real",
+            "int8",
+            "NUMBER(10)",
+            "bigserial",
+        ] {
+            assert!(is_numeric_type(t), "{t}");
+        }
+        for t in [
+            "text",
+            "interval",
+            "point",
+            "varchar(10)",
+            "timestamptz",
+            "money",
+        ] {
+            assert!(!is_numeric_type(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn sql_inserts_unquote_numeric_strings_only_for_numeric_columns() {
+        let cols = vec!["id".to_string(), "code".to_string(), "amount".to_string()];
+        let rows = vec![vec![
+            Value::String("9007199254740993".into()),
+            Value::String("00123".into()),
+            Value::String("not-a-number".into()),
+        ]];
+        let out = to_sql_inserts_typed(None, "t", &cols, &[true, false, true], &rows);
+        assert!(
+            out.contains("VALUES (9007199254740993, '00123', 'not-a-number');"),
+            "{out}"
+        );
+        // Untyped variant keeps quoting every string.
+        let out = to_sql_inserts(None, "t", &cols, &rows);
+        assert!(out.contains("VALUES ('9007199254740993', '00123', 'not-a-number');"));
     }
 }
