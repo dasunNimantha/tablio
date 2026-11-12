@@ -137,6 +137,12 @@ pub trait DatabaseDriver: Send + Sync {
     async fn drop_role(&self, name: &str) -> Result<()>;
     async fn alter_role(&self, req: &AlterRoleRequest) -> Result<()>;
     async fn test_connection(&self) -> Result<bool>;
+
+    /// Close the driver's connections and wait until they are released.
+    /// Used before an operation that must not race with open handles
+    /// (replacing a SQLite database file). Drivers without such a need
+    /// rely on `Drop`.
+    async fn close(&self) {}
 }
 
 /// Format a host for the authority part of a connection URL.

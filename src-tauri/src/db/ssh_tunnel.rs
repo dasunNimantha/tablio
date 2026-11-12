@@ -30,7 +30,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use russh::client::{self, AuthResult, Handle};
-use russh::keys::known_hosts::{check_known_hosts_path, learn_known_hosts_path};
+use russh::keys::known_hosts::{known_host_keys_path, learn_known_hosts_path};
 use russh::keys::{decode_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey};
 
 use crate::models::{ConnectionConfig, SshAuthMethod};
@@ -79,6 +79,16 @@ pub struct SshHostKeyMismatch {
     pub known_hosts_path: String,
 }
 
+/// Upper bound for TCP connect + SSH key exchange. Without it a black-holed
+/// bastion (packets silently dropped) makes `connect` wait for the OS TCP
+/// timeout, which can be minutes, or forever once the TCP session is up but
+/// the server never answers the handshake.
+const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Upper bound for user authentication, including every ssh-agent identity
+/// offered in turn.
+const SSH_AUTH_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Magic prefix the frontend uses to detect a mismatch error coming back
 /// from any Tauri command that may open an SSH session.
 pub const HOST_KEY_MISMATCH_PREFIX: &str = "ssh_host_key_mismatch:";
@@ -119,11 +129,64 @@ impl KnownHostsHandler {
         }
     }
 
-    fn fingerprint(key: &PublicKey) -> String {
-        // SHA-256 base64 fingerprint, formatted like OpenSSH ("SHA256:...").
-        // `PublicKeyBase64` exposes the wire-format bytes; we hash them ourselves
-        // to avoid pulling in another digest crate.
-        format!("SHA256:{}", key.fingerprint(HashAlg::Sha256))
+    fn record_mismatch(&self, server_public_key: &PublicKey, reason: &str) {
+        let fp = fingerprint_sha256(server_public_key);
+        log::error!(
+            "SSH host key for {}:{} does not match the recorded one ({}). New fingerprint: {}",
+            self.host,
+            self.port,
+            reason,
+            fp
+        );
+        if let Ok(mut slot) = self.mismatch.lock() {
+            *slot = Some(SshHostKeyMismatch {
+                host: self.host.clone(),
+                port: self.port,
+                fingerprint: fp,
+                known_hosts_path: self.path.to_string_lossy().into_owned(),
+            });
+        }
+    }
+}
+
+/// SHA-256 fingerprint of `key` in the exact form `ssh-keygen -lf` prints
+/// (`SHA256:<unpadded base64>`). `ssh_key::Fingerprint`'s `Display` impl
+/// already includes the `SHA256:` prefix, so it must not be added again.
+pub fn fingerprint_sha256(key: &PublicKey) -> String {
+    key.fingerprint(HashAlg::Sha256).to_string()
+}
+
+/// Outcome of comparing the presented server key against the keys already
+/// recorded for the same `host:port`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostKeyDecision {
+    /// A recorded key matches the presented one exactly.
+    Accept,
+    /// Nothing is recorded for this host/port yet: trust on first use.
+    Learn,
+    /// Keys are recorded for this host/port but none of them matches.
+    Mismatch,
+}
+
+/// Pure host-key policy.
+///
+/// A host that already has *any* recorded key is never re-learned: if the
+/// presented key matches none of them (including when it uses a different
+/// algorithm than every recorded key) the connection is refused. Only a host
+/// with no recorded keys at all is learned. This closes the gap where
+/// russh's `check_known_hosts_path` returns `Ok(false)` instead of
+/// `KeyChanged` for an algorithm switch, which a MITM could exploit by
+/// offering e.g. an RSA key to a client that pinned the host's ed25519 key.
+fn decide_host_key(recorded: &[PublicKey], presented: &PublicKey) -> HostKeyDecision {
+    if recorded.is_empty() {
+        HostKeyDecision::Learn
+    } else if recorded
+        .iter()
+        .any(|k| k.key_data() == presented.key_data())
+    {
+        HostKeyDecision::Accept
+    } else {
+        HostKeyDecision::Mismatch
     }
 }
 
@@ -134,9 +197,22 @@ impl client::Handler for KnownHostsHandler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        match check_known_hosts_path(&self.host, self.port, server_public_key, &self.path) {
-            Ok(true) => Ok(true),
-            Ok(false) => {
+        let recorded = match known_host_keys_path(&self.host, self.port, &self.path) {
+            Ok(entries) => entries.into_iter().map(|(_, k)| k).collect::<Vec<_>>(),
+            Err(e) => {
+                // An unreadable file or an unparseable entry for this host
+                // must fail closed: we cannot prove the key is the trusted
+                // one, and learning would append a second, unverified key.
+                self.record_mismatch(
+                    server_public_key,
+                    &format!("could not read recorded keys: {e}"),
+                );
+                return Ok(false);
+            }
+        };
+        match decide_host_key(&recorded, server_public_key) {
+            HostKeyDecision::Accept => Ok(true),
+            HostKeyDecision::Learn => {
                 if let Some(parent) = self.path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
@@ -147,23 +223,8 @@ impl client::Handler for KnownHostsHandler {
                 }
                 Ok(true)
             }
-            Err(e) => {
-                let fp = Self::fingerprint(server_public_key);
-                log::error!(
-                    "SSH host key for {}:{} does not match the recorded one ({}). New fingerprint: {}",
-                    self.host,
-                    self.port,
-                    e,
-                    fp
-                );
-                if let Ok(mut slot) = self.mismatch.lock() {
-                    *slot = Some(SshHostKeyMismatch {
-                        host: self.host.clone(),
-                        port: self.port,
-                        fingerprint: fp,
-                        known_hosts_path: self.path.to_string_lossy().into_owned(),
-                    });
-                }
+            HostKeyDecision::Mismatch => {
+                self.record_mismatch(server_public_key, "no recorded key matches");
                 // Returning `Ok(false)` makes russh tear the handshake down;
                 // `open()` notices the mismatch slot was filled and converts
                 // the resulting connect error into [`SshHostKeyMismatch`].
@@ -269,15 +330,23 @@ pub async fn open(config: &ConnectionConfig) -> Result<SshTunnel> {
         ..Default::default()
     });
 
-    let mut session = match client::connect(
+    let connect = client::connect(
         ssh_config,
         (config.ssh_host.as_str(), config.ssh_port),
         handler,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
+    );
+    let mut session = match tokio::time::timeout(SSH_CONNECT_TIMEOUT, connect).await {
+        Err(_) => {
+            return Err(anyhow!(
+                "SSH connect to {}:{} timed out after {}s (TCP connect + key exchange). \
+                 Check the SSH host, port and any firewall in between.",
+                config.ssh_host,
+                config.ssh_port,
+                SSH_CONNECT_TIMEOUT.as_secs()
+            ));
+        }
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             // If the handshake aborted because we rejected the key, prefer
             // the structured mismatch error over russh's generic message —
             // the frontend keys off this to offer a one-click "Forget &
@@ -292,7 +361,18 @@ pub async fn open(config: &ConnectionConfig) -> Result<SshTunnel> {
         }
     };
 
-    authenticate(&mut session, config).await?;
+    match tokio::time::timeout(SSH_AUTH_TIMEOUT, authenticate(&mut session, config)).await {
+        Ok(res) => res?,
+        Err(_) => {
+            return Err(anyhow!(
+                "SSH authentication to {}:{} as '{}' timed out after {}s",
+                config.ssh_host,
+                config.ssh_port,
+                config.ssh_user,
+                SSH_AUTH_TIMEOUT.as_secs()
+            ));
+        }
+    }
 
     let remote_host = config.host.clone();
     let remote_port = config.port;
@@ -719,7 +799,90 @@ CUrE7QRAvdVpD5e3zKH/MZjilWrMOm6cyI1LKBCssLztPyvOALtroLAPlp7WYWfu\n\
             "fingerprint should be SHA256-formatted, got {}",
             info.fingerprint
         );
+        assert!(
+            !info.fingerprint.starts_with("SHA256:SHA256:"),
+            "fingerprint must not carry a doubled prefix, got {}",
+            info.fingerprint
+        );
         assert_eq!(info.known_hosts_path, kh.to_string_lossy());
+    }
+
+    const ED25519_A: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ";
+    const ED25519_B: &str = "AAAAC3NzaC1lZDI1NTE5AAAAILIG2T/B0l0gaqj3puu510tu9N1OkQ4znY3LYuEm5zCF";
+    const ECDSA_A: &str = "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBPE4fDFuVL82Uaz4rs7XiEECEa9X5g00M7382/sRcHWlMc1VMS2XQwPsnh7Ll25Z9afxEnE2+kLuPxKoKv3GvBM=";
+
+    fn key(b64: &str) -> PublicKey {
+        russh::keys::parse_public_key_base64(b64).unwrap()
+    }
+
+    #[test]
+    fn fingerprint_matches_ssh_keygen_output() {
+        // Values produced by `ssh-keygen -lf` for the same public keys.
+        assert_eq!(
+            fingerprint_sha256(&key(ED25519_A)),
+            "SHA256:T7SvZ2cslqpPj6nKzitCBHHlpVF3r3MvLwmFL0fk0IE"
+        );
+        assert_eq!(
+            fingerprint_sha256(&key(ECDSA_A)),
+            "SHA256:JRJHmpWlbGz7ff1jT02Oou7RNzFqOZHK7+B030cAFk4"
+        );
+    }
+
+    #[test]
+    fn decide_host_key_policy() {
+        let a = key(ED25519_A);
+        let b = key(ED25519_B);
+        let ec = key(ECDSA_A);
+        assert_eq!(decide_host_key(&[], &a), HostKeyDecision::Learn);
+        assert_eq!(
+            decide_host_key(std::slice::from_ref(&a), &a),
+            HostKeyDecision::Accept
+        );
+        assert_eq!(
+            decide_host_key(&[ec.clone(), a.clone()], &a),
+            HostKeyDecision::Accept,
+            "any matching recorded key is enough"
+        );
+        assert_eq!(
+            decide_host_key(std::slice::from_ref(&a), &b),
+            HostKeyDecision::Mismatch
+        );
+        assert_eq!(
+            decide_host_key(std::slice::from_ref(&a), &ec),
+            HostKeyDecision::Mismatch,
+            "a key of a different algorithm must not be learned once the host is pinned"
+        );
+    }
+
+    #[tokio::test]
+    async fn known_hosts_handler_rejects_key_with_different_algorithm() {
+        let dir = tempfile::tempdir().unwrap();
+        let kh = dir.path().join("known_hosts");
+        std::fs::write(
+            &kh,
+            format!("[host.example]:2222 ssh-ed25519 {ED25519_A}\n"),
+        )
+        .unwrap();
+        let mut handler = KnownHostsHandler::new(kh.clone(), "host.example".into(), 2222);
+        let slot = handler.mismatch.clone();
+
+        let accepted = handler.check_server_key(&key(ECDSA_A)).await.unwrap();
+        assert!(!accepted, "algorithm switch must be treated as a mismatch");
+        let info = slot.lock().unwrap().take().expect("mismatch recorded");
+        assert_eq!(info.port, 2222);
+        assert_eq!(
+            info.fingerprint,
+            "SHA256:JRJHmpWlbGz7ff1jT02Oou7RNzFqOZHK7+B030cAFk4"
+        );
+        let content = std::fs::read_to_string(&kh).unwrap();
+        assert!(
+            !content.contains("ecdsa"),
+            "the unverified key must not be appended: {content}"
+        );
+
+        // A different port of the same host is a separate entry: first contact.
+        let mut other_port = KnownHostsHandler::new(kh.clone(), "host.example".into(), 22);
+        assert!(other_port.check_server_key(&key(ECDSA_A)).await.unwrap());
     }
 
     #[tokio::test]

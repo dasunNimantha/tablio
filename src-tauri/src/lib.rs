@@ -24,7 +24,6 @@ pub fn run() {
     let pool_manager = Arc::new(PoolManager::new());
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(pool_manager)
         .invoke_handler(tauri::generate_handler![
