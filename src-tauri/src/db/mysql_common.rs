@@ -3,7 +3,7 @@ use sqlx::{Column, MySqlPool, Row, TypeInfo};
 use std::time::Instant;
 
 use crate::models::*;
-use crate::util::sql::{split_sql_statements, statement_is_select_like};
+use crate::util::sql::{split_sql_statements_for, statement_is_select_like, SqlDialect};
 
 /// Returns true when the server supports `ALTER TABLE ... RENAME COLUMN ... TO ...`.
 ///
@@ -272,40 +272,13 @@ pub fn mysql_variable_category(name: &str) -> &str {
 /// matrix is identical across drivers — see the doc comment there for
 /// the rationale and the full list of patterns blocked.
 pub fn filter_is_unsafe(filter: &str) -> bool {
-    let s = filter.trim();
-    if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return true;
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return true;
-    }
-    u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
+    filter_unsafe_reason(filter).is_some()
 }
 
 /// Mirrors `pg_common::filter_unsafe_reason` so MySQL-family drivers
 /// can produce the same precise error messages.
 pub fn filter_unsafe_reason(filter: &str) -> Option<&'static str> {
-    let s = filter.trim();
-    if s.contains(';') {
-        return Some("statement terminator (`;`)");
-    }
-    if s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return Some("SQL comment markers (`--` / `/* */`)");
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return Some("nested `(SELECT ...)` subquery");
-    }
-    if u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
-    {
-        return Some("`UNION SELECT` clause");
-    }
-    None
+    crate::util::sql::filter_unsafe_reason_for(filter, crate::util::sql::SqlDialect::MySql)
 }
 
 pub fn format_bytes(bytes: Option<i64>) -> String {
@@ -653,7 +626,7 @@ pub async fn my_execute_query(pool: &MySqlPool, _database: &str, sql: &str) -> R
     // Everything runs on a single pinned connection so session
     // variables (`SET @x = ...;`) and temp tables survive between
     // statements.
-    let statements = split_sql_statements(sql);
+    let statements = split_sql_statements_for(sql, SqlDialect::MySql);
     if statements.is_empty() {
         return Err(anyhow::anyhow!("Query is empty"));
     }

@@ -182,38 +182,11 @@ fn sql_default_is_unsafe(s: &str) -> bool {
 /// markers `--` / `/* */`, nested `(SELECT ...)` subqueries, and
 /// `UNION SELECT` shape changes.
 fn filter_is_unsafe(filter: &str) -> bool {
-    let s = filter.trim();
-    if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return true;
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return true;
-    }
-    u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
+    filter_unsafe_reason(filter).is_some()
 }
 
 fn filter_unsafe_reason(filter: &str) -> Option<&'static str> {
-    let s = filter.trim();
-    if s.contains(';') {
-        return Some("statement terminator (`;`)");
-    }
-    if s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return Some("SQL comment markers (`--` / `/* */`)");
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return Some("nested `(SELECT ...)` subquery");
-    }
-    if u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
-    {
-        return Some("`UNION SELECT` clause");
-    }
-    None
+    crate::util::sql::filter_unsafe_reason_for(filter, crate::util::sql::SqlDialect::Generic)
 }
 
 fn format_bytes(bytes: i64) -> String {

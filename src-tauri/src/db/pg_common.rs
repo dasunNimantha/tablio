@@ -3,7 +3,7 @@ use sqlx::{Column, PgPool, Row, TypeInfo};
 use std::time::Instant;
 
 use crate::models::*;
-use crate::util::sql::{split_sql_statements, statement_is_select_like};
+use crate::util::sql::{split_sql_statements_for, statement_is_select_like, SqlDialect};
 
 pub fn pg_row_to_json_values(
     row: &sqlx::postgres::PgRow,
@@ -139,42 +139,14 @@ pub fn quote_ident(name: &str) -> String {
 /// Drivers should call this directly (not roll their own) so the matrix
 /// stays uniform — that's why the function is `pub`.
 pub fn filter_is_unsafe(filter: &str) -> bool {
-    let s = filter.trim();
-    if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return true;
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return true;
-    }
-    // UNION-based injection (narrow patterns to avoid false positives e.g. `'a UNION b'`)
-    u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
+    filter_unsafe_reason(filter).is_some()
 }
 
 /// Human-readable explanation of *what* `filter_is_unsafe` rejected, so
 /// drivers can surface a better error than "invalid characters".
 /// Returns `None` when the fragment is safe.
 pub fn filter_unsafe_reason(filter: &str) -> Option<&'static str> {
-    let s = filter.trim();
-    if s.contains(';') {
-        return Some("statement terminator (`;`)");
-    }
-    if s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return Some("SQL comment markers (`--` / `/* */`)");
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return Some("nested `(SELECT ...)` subquery");
-    }
-    if u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
-    {
-        return Some("`UNION SELECT` clause");
-    }
-    None
+    crate::util::sql::filter_unsafe_reason_for(filter, crate::util::sql::SqlDialect::Postgres)
 }
 
 /// Strict check for SQL fragments that should never contain string
@@ -1018,7 +990,7 @@ pub async fn pg_execute_query(pool: &PgPool, _database: &str, sql: &str) -> Resu
     // All statements are run on a single pinned connection so
     // session-local state (temp tables, transactions, search_path
     // changes) carries between them.
-    let statements = split_sql_statements(sql);
+    let statements = split_sql_statements_for(sql, SqlDialect::Postgres);
     if statements.is_empty() {
         return Err(anyhow::anyhow!("Query is empty"));
     }
