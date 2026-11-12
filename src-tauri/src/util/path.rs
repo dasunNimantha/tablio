@@ -52,9 +52,69 @@ pub fn expand_tilde_path(path: &str) -> PathBuf {
     PathBuf::from(expand_tilde(path))
 }
 
+/// A SQLite connection target as typed into the connection dialog.
+///
+/// Mirrors how `db::sqlite::SqliteDriver::connect` interprets the value:
+/// either a bare path (`~/data.db`) or a `sqlite:` URL whose path part is
+/// tilde-expanded and whose `?query` is kept verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteTarget {
+    /// URL to hand to sqlx.
+    pub url: String,
+    /// Filesystem path of the database file (tilde-expanded).
+    pub path: String,
+    /// True for in-memory databases, which have no file to back up.
+    pub in_memory: bool,
+}
+
+pub fn resolve_sqlite_target(database: &str) -> SqliteTarget {
+    let (path, query) = match database.strip_prefix("sqlite:") {
+        Some(rest) => {
+            let rest = rest.strip_prefix("//").unwrap_or(rest);
+            match rest.find('?') {
+                Some(idx) => (expand_tilde(&rest[..idx]), &rest[idx..]),
+                None => (expand_tilde(rest), ""),
+            }
+        }
+        None => (expand_tilde(database), ""),
+    };
+    let in_memory = path.is_empty()
+        || path == ":memory:"
+        || query.split(['?', '&']).any(|p| p == "mode=memory");
+    SqliteTarget {
+        url: format!("sqlite:{}{}", path, query),
+        path,
+        in_memory,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlite_target_forms() {
+        let t = resolve_sqlite_target("/data/app.db");
+        assert_eq!(t.path, "/data/app.db");
+        assert_eq!(t.url, "sqlite:/data/app.db");
+        assert!(!t.in_memory);
+
+        let t = resolve_sqlite_target("sqlite:/data/app.db?mode=ro");
+        assert_eq!(t.path, "/data/app.db");
+        assert_eq!(t.url, "sqlite:/data/app.db?mode=ro");
+        assert!(!t.in_memory);
+
+        let t = resolve_sqlite_target("sqlite:///data/app.db");
+        assert_eq!(t.path, "/data/app.db");
+
+        assert!(resolve_sqlite_target("sqlite::memory:").in_memory);
+        assert!(resolve_sqlite_target("sqlite:file.db?mode=memory&cache=shared").in_memory);
+
+        if let Some(home) = dirs::home_dir() {
+            let t = resolve_sqlite_target("sqlite:~/x.db?mode=rwc");
+            assert_eq!(t.path, home.join("x.db").to_string_lossy());
+        }
+    }
 
     #[test]
     fn passthrough_for_absolute_and_relative_paths() {

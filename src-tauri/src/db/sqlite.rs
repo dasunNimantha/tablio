@@ -254,6 +254,10 @@ impl DatabaseDriver for SqliteDriver {
         Ok(true)
     }
 
+    async fn close(&self) {
+        self.pool.close().await;
+    }
+
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
         Ok(vec![DatabaseInfo {
             name: "main".to_string(),
