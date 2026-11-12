@@ -851,3 +851,261 @@ async fn cassandra_create_table_no_pk_fails() {
 
     teardown_keyspace(&driver, &ks).await;
 }
+
+fn col_index(data: &TableData, name: &str) -> usize {
+    data.columns
+        .iter()
+        .position(|c| c.name == name)
+        .unwrap_or_else(|| panic!("column {name} missing"))
+}
+
+#[tokio::test]
+async fn cassandra_fetch_rows_headers_align_with_cells() {
+    let driver = create_driver().await;
+    let ks = setup_keyspace(&driver).await;
+    let tbl = unique_table("align");
+
+    // Regular columns all have position -1 in system_schema.columns;
+    // names chosen so catalog order differs from alphabetical order.
+    driver
+        .execute_query(
+            "",
+            &format!(
+                "CREATE TABLE {}.{} (id uuid PRIMARY KEY, name text, email text, age int)",
+                ks, tbl
+            ),
+        )
+        .await
+        .unwrap();
+    let id = uuid::Uuid::new_v4();
+    driver
+        .execute_query(
+            "",
+            &format!(
+                "INSERT INTO {}.{} (id, name, email, age) VALUES ({}, 'Alice', 'alice@example.com', 42)",
+                ks, tbl, id
+            ),
+        )
+        .await
+        .unwrap();
+
+    let data = driver
+        .fetch_rows(&ks, &ks, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows.len(), 1);
+    let row = &data.rows[0];
+    assert_eq!(row.len(), data.columns.len());
+    assert_eq!(
+        row[col_index(&data, "id")],
+        serde_json::json!(id.to_string())
+    );
+    assert_eq!(row[col_index(&data, "name")], serde_json::json!("Alice"));
+    assert_eq!(
+        row[col_index(&data, "email")],
+        serde_json::json!("alice@example.com")
+    );
+    assert_eq!(row[col_index(&data, "age")], serde_json::json!(42));
+    assert!(data.columns[col_index(&data, "id")].is_primary_key);
+
+    // list_columns must agree with the fetched header order.
+    let listed = driver.list_columns(&ks, &ks, &tbl).await.unwrap();
+    let listed_names: Vec<&str> = listed.iter().map(|c| c.name.as_str()).collect();
+    let fetched_names: Vec<&str> = data.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(listed_names, fetched_names);
+
+    teardown_keyspace(&driver, &ks).await;
+}
+
+#[tokio::test]
+async fn cassandra_fetch_rows_compound_key_alignment_and_paging() {
+    let driver = create_driver().await;
+    let ks = setup_keyspace(&driver).await;
+    let tbl = unique_table("ckey");
+
+    driver
+        .execute_query(
+            "",
+            &format!(
+                "CREATE TABLE {}.{} (zz int, aa int, val text, PRIMARY KEY (zz, aa))",
+                ks, tbl
+            ),
+        )
+        .await
+        .unwrap();
+    for i in 0..7 {
+        driver
+            .execute_query(
+                "",
+                &format!(
+                    "INSERT INTO {}.{} (zz, aa, val) VALUES (1, {}, 'v{}')",
+                    ks, tbl, i, i
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    let data = driver
+        .fetch_rows(&ks, &ks, &tbl, 2, 3, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows.len(), 3);
+    assert_eq!(data.total_rows, 7);
+    let names: Vec<&str> = data.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["zz", "aa", "val"]);
+    for row in &data.rows {
+        let aa = row[1].as_i64().unwrap();
+        assert_eq!(row[2], serde_json::json!(format!("v{}", aa)));
+    }
+    assert_eq!(data.rows[0][1], serde_json::json!(2));
+
+    teardown_keyspace(&driver, &ks).await;
+}
+
+#[tokio::test]
+async fn cassandra_big_integers_round_trip_through_apply_changes() {
+    let driver = create_driver().await;
+    let ks = setup_keyspace(&driver).await;
+    let tbl = unique_table("bigid");
+
+    driver
+        .execute_query(
+            "",
+            &format!(
+                "CREATE TABLE {}.{} (id bigint PRIMARY KEY, v varint, d decimal, note text)",
+                ks, tbl
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            "",
+            &format!(
+                "INSERT INTO {}.{} (id, v, d, note) VALUES (1234567890123456789, 123456789012345678901234567890, 12345678901234567890.123456789, 'a')",
+                ks, tbl
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            "",
+            &format!(
+                "INSERT INTO {}.{} (id, v, d, note) VALUES (1234567890123456790, -5, -0.5, 'b')",
+                ks, tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let data = driver
+        .fetch_rows(&ks, &ks, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    let id_idx = col_index(&data, "id");
+    let row = data
+        .rows
+        .iter()
+        .find(|r| r[id_idx] == serde_json::json!("1234567890123456789"))
+        .expect("big id must be an exact string");
+    assert_eq!(
+        row[col_index(&data, "v")],
+        serde_json::json!("123456789012345678901234567890")
+    );
+    assert_eq!(
+        row[col_index(&data, "d")],
+        serde_json::json!("12345678901234567890.123456789")
+    );
+    let small = data
+        .rows
+        .iter()
+        .find(|r| r[id_idx] == serde_json::json!("1234567890123456790"))
+        .unwrap();
+    assert_eq!(small[col_index(&data, "v")], serde_json::json!(-5));
+    assert_eq!(small[col_index(&data, "d")], serde_json::json!(-0.5));
+
+    let changes = DataChanges {
+        connection_id: "test".into(),
+        database: ks.clone(),
+        schema: ks.clone(),
+        table: tbl.clone(),
+        updates: vec![CellChange {
+            row_index: 0,
+            primary_key_values: vec![("id".into(), serde_json::json!("1234567890123456789"))],
+            column_name: "note".into(),
+            old_value: serde_json::json!("a"),
+            new_value: serde_json::json!("edited"),
+        }],
+        inserts: vec![],
+        deletes: vec![DeleteRow {
+            primary_key_values: vec![("id".into(), serde_json::json!("1234567890123456790"))],
+        }],
+    };
+    driver.apply_changes(&changes).await.unwrap();
+
+    let result = driver
+        .execute_query("", &format!("SELECT id, note FROM {}.{}", ks, tbl))
+        .await
+        .unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], serde_json::json!("1234567890123456789"));
+    assert_eq!(result.rows[0][1], serde_json::json!("edited"));
+
+    teardown_keyspace(&driver, &ks).await;
+}
+
+#[tokio::test]
+async fn cassandra_filter_allows_semicolon_inside_quotes() {
+    let driver = create_driver().await;
+    let ks = setup_keyspace(&driver).await;
+    let tbl = unique_table("fq");
+
+    driver
+        .execute_query(
+            "",
+            &format!(
+                "CREATE TABLE {}.{} (id int PRIMARY KEY, note text)",
+                ks, tbl
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            "",
+            &format!("INSERT INTO {}.{} (id, note) VALUES (1, 'a;b--c')", ks, tbl),
+        )
+        .await
+        .unwrap();
+
+    let data = driver
+        .fetch_rows(
+            &ks,
+            &ks,
+            &tbl,
+            0,
+            10,
+            Vec::new(),
+            Some("note = 'a;b--c'".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(data.rows.len(), 1);
+
+    let rejected = driver
+        .fetch_rows(
+            &ks,
+            &ks,
+            &tbl,
+            0,
+            10,
+            Vec::new(),
+            Some("id = 1; DROP TABLE x".into()),
+        )
+        .await;
+    assert!(rejected.is_err());
+
+    teardown_keyspace(&driver, &ks).await;
+}

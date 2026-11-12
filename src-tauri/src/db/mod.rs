@@ -137,4 +137,39 @@ pub trait DatabaseDriver: Send + Sync {
     async fn drop_role(&self, name: &str) -> Result<()>;
     async fn alter_role(&self, req: &AlterRoleRequest) -> Result<()>;
     async fn test_connection(&self) -> Result<bool>;
+
+    /// Close the driver's connections and wait until they are released.
+    /// Used before an operation that must not race with open handles
+    /// (replacing a SQLite database file). Drivers without such a need
+    /// rely on `Drop`.
+    async fn close(&self) {}
+}
+
+/// Format a host for the authority part of a connection URL.
+///
+/// IPv6 literals must be wrapped in brackets (`[::1]`) or the URL
+/// parser reads the first `:` as the port separator. A zone id
+/// (`fe80::1%eth0`) has its `%` percent-encoded as RFC 6874 requires.
+/// Hostnames, IPv4 literals and already-bracketed hosts pass through.
+pub fn url_host(host: &str) -> String {
+    let h = host.trim();
+    if h.starts_with('[') || !h.contains(':') {
+        return h.to_string();
+    }
+    format!("[{}]", h.replace('%', "%25"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::url_host;
+
+    #[test]
+    fn url_host_brackets_ipv6_only() {
+        assert_eq!(url_host("localhost"), "localhost");
+        assert_eq!(url_host("10.0.0.1"), "10.0.0.1");
+        assert_eq!(url_host("::1"), "[::1]");
+        assert_eq!(url_host("2001:db8::5"), "[2001:db8::5]");
+        assert_eq!(url_host("[::1]"), "[::1]");
+        assert_eq!(url_host("fe80::1%eth0"), "[fe80::1%25eth0]");
+    }
 }

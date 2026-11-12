@@ -10,10 +10,14 @@
 //! since they can't be displayed (or matched by fingerprint) in a useful
 //! way.
 
-use russh::keys::{parse_public_key_base64, HashAlg};
+use data_encoding::BASE64_MIME;
+use hmac::{Hmac, KeyInit, Mac};
+use russh::keys::parse_public_key_base64;
 use serde::{Deserialize, Serialize};
+use sha1::Sha1;
 
-use crate::db::ssh_tunnel::known_hosts_path_pub;
+use crate::db::ssh_tunnel::{fingerprint_sha256, known_hosts_path_pub};
+use crate::util::json_store;
 
 /// A single recognised entry in `~/.tablio/known_hosts` rendered for the
 /// frontend. The `fingerprint` is recomputed from the stored key so the UI
@@ -39,21 +43,47 @@ pub async fn list_known_hosts() -> Result<Vec<KnownHostEntry>, String> {
     Ok(parse_known_hosts(&content))
 }
 
+/// Remove recorded host keys for `host:port`.
+///
+/// Two callers use this:
+///
+/// * The Known Hosts dialog deletes one specific key: `fingerprint` is the
+///   fingerprint of a recorded entry and only that entry is removed.
+/// * "Forget & Retry" after a host-key mismatch passes the fingerprint of
+///   the *new* key the server just presented, which by definition is not
+///   recorded. In that case (or when `all_keys` is `true`) every entry for
+///   `host:port` is removed, including hashed (`|1|...`) and multi-host
+///   lines, so the retry can record the new key on first contact.
 #[tauri::command]
-pub async fn forget_known_host(host: String, port: u16, fingerprint: String) -> Result<(), String> {
+pub async fn forget_known_host(
+    host: String,
+    port: u16,
+    fingerprint: String,
+    all_keys: Option<bool>,
+) -> Result<(), String> {
     let path = known_hosts_path_pub().map_err(|e| e.to_string())?;
-    if !path.exists() {
+    let _guard = json_store::STORE_LOCK.lock().await;
+    let content = match tokio::fs::read_to_string(&path).await {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("Failed to read known_hosts: {e}")),
+    };
+
+    let new_content = if all_keys.unwrap_or(false) {
+        remove_host_entries(&content, &host, port)
+    } else {
+        remove_entry(&content, &host, port, &fingerprint)
+    };
+    if new_content == content {
         return Ok(());
     }
-    let content = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|e| format!("Failed to read known_hosts: {e}"))?;
 
-    let new_content = remove_entry(&content, &host, port, &fingerprint);
-
-    tokio::fs::write(&path, new_content)
-        .await
-        .map_err(|e| format!("Failed to write known_hosts: {e}"))?;
+    tokio::task::spawn_blocking(move || {
+        json_store::write_atomic_private(&path, new_content.as_bytes())
+    })
+    .await
+    .map_err(|e| format!("Failed to write known_hosts: {e}"))?
+    .map_err(|e| format!("Failed to write known_hosts: {e}"))?;
     Ok(())
 }
 
@@ -61,28 +91,110 @@ fn parse_known_hosts(content: &str) -> Vec<KnownHostEntry> {
     content.lines().filter_map(parse_line).collect()
 }
 
-/// Rewrite `content` with any line whose parsed `(host, port, fingerprint)`
-/// triple matches the request removed. Comments, blank lines, and
-/// unparseable entries (hashed hosts, `@cert-authority`, multi-host blobs
-/// we don't recognise) are preserved verbatim so we never silently mutate
-/// state we don't fully understand.
+/// Rewrite `content` without the entries for `host:port` whose key has
+/// `fingerprint`. If no entry for `host:port` has that fingerprint (the
+/// host-key-mismatch recovery case, where the caller only knows the new,
+/// unrecorded key) every entry for `host:port` is removed instead.
 fn remove_entry(content: &str, host: &str, port: u16, fingerprint: &str) -> String {
-    let kept: Vec<&str> = content
-        .lines()
-        .filter(|line| match parse_line(line) {
-            Some(entry) => {
-                !(entry.host == host && entry.port == port && entry.fingerprint == fingerprint)
-            }
-            None => true,
-        })
-        .collect();
+    let wanted = normalize_fingerprint(fingerprint);
+    let fingerprint_recorded = content.lines().any(|line| {
+        line_matches_host(line, host, port)
+            && line_fingerprint(line).as_deref() == Some(wanted.as_str())
+    });
+    if !fingerprint_recorded {
+        return remove_host_entries(content, host, port);
+    }
+    rewrite(content, |line| {
+        line_matches_host(line, host, port)
+            && line_fingerprint(line).as_deref() == Some(wanted.as_str())
+    })
+}
+
+/// Rewrite `content` without any entry recorded for `host:port`.
+/// Comments, blank lines, marker lines (`@cert-authority`, `@revoked`) and
+/// entries for other hosts are preserved verbatim.
+fn remove_host_entries(content: &str, host: &str, port: u16) -> String {
+    rewrite(content, |line| line_matches_host(line, host, port))
+}
+
+fn rewrite(content: &str, drop_line: impl Fn(&str) -> bool) -> String {
+    let kept: Vec<&str> = content.lines().filter(|line| !drop_line(line)).collect();
     let mut out = kept.join("\n");
-    // Preserve trailing newline if the original had one (or if we still
-    // have any content) so the file stays POSIX-clean.
+    // Preserve trailing newline if we still have any content so the file
+    // stays POSIX-clean.
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
     out
+}
+
+/// Accept both the `ssh-keygen` form (`SHA256:abc`) and the doubled prefix
+/// (`SHA256:SHA256:abc`) older builds produced.
+fn normalize_fingerprint(fp: &str) -> String {
+    let mut s = fp.trim();
+    while let Some(rest) = s.strip_prefix("SHA256:") {
+        if rest.starts_with("SHA256:") {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    s.to_string()
+}
+
+/// Fingerprint of the key stored on a known_hosts line, if it parses.
+fn line_fingerprint(line: &str) -> Option<String> {
+    let mut parts = line.split_whitespace();
+    let first = parts.next()?;
+    if first.starts_with('@') || first.starts_with('#') {
+        return None;
+    }
+    let _key_type = parts.next()?;
+    let key = parse_public_key_base64(parts.next()?).ok()?;
+    Some(fingerprint_sha256(&key))
+}
+
+/// Does this known_hosts line record a key for `host:port`? Handles
+/// comma-separated host lists, `[host]:port` syntax and hashed
+/// (`|1|salt|hash`) entries the same way OpenSSH and russh match them.
+/// Marker lines (`@cert-authority`, `@revoked`) never match: they are not
+/// plain trust entries and must not be removed as a side effect.
+fn line_matches_host(line: &str, host: &str, port: u16) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('@') {
+        return false;
+    }
+    let Some(field) = trimmed.split_whitespace().next() else {
+        return false;
+    };
+    let host_port = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    };
+    field
+        .split(',')
+        .any(|pattern| host_pattern_matches(pattern, &host_port))
+}
+
+fn host_pattern_matches(pattern: &str, host_port: &str) -> bool {
+    if let Some(hashed) = pattern.strip_prefix("|1|") {
+        let mut parts = hashed.split('|');
+        let (Some(salt), Some(hash)) = (parts.next(), parts.next()) else {
+            return false;
+        };
+        let (Ok(salt), Ok(hash)) = (
+            BASE64_MIME.decode(salt.as_bytes()),
+            BASE64_MIME.decode(hash.as_bytes()),
+        ) else {
+            return false;
+        };
+        let Ok(mac) = Hmac::<Sha1>::new_from_slice(&salt) else {
+            return false;
+        };
+        return mac.chain_update(host_port).verify_slice(&hash).is_ok();
+    }
+    pattern.eq_ignore_ascii_case(host_port)
 }
 
 fn parse_line(line: &str) -> Option<KnownHostEntry> {
@@ -105,7 +217,7 @@ fn parse_line(line: &str) -> Option<KnownHostEntry> {
 
     let (host, port) = parse_host_field(host_field)?;
     let key = parse_public_key_base64(key_b64).ok()?;
-    let fingerprint = format!("SHA256:{}", key.fingerprint(HashAlg::Sha256));
+    let fingerprint = fingerprint_sha256(&key);
     Some(KnownHostEntry {
         host,
         port,
@@ -142,7 +254,7 @@ mod tests {
 
     fn fingerprint_of(b64: &str) -> String {
         let key = parse_public_key_base64(b64).unwrap();
-        format!("SHA256:{}", key.fingerprint(HashAlg::Sha256))
+        fingerprint_sha256(&key)
     }
 
     #[test]
@@ -236,12 +348,78 @@ mod tests {
     }
 
     #[test]
-    fn remove_entry_no_match_leaves_content_unchanged_modulo_newline() {
+    fn remove_entry_with_unrecorded_fingerprint_forgets_host() {
+        // Host-key mismatch recovery: the caller only knows the new key's
+        // fingerprint (KEY_B) while the file holds the old key (KEY_A).
         let fp_b = fingerprint_of(KEY_B);
-        let content = format!("host.example ssh-ed25519 {KEY_A}\n");
+        let content = format!(
+            "host.example ssh-ed25519 {KEY_A}\n\
+             other.example ssh-ed25519 {KEY_A}\n",
+        );
         let after = remove_entry(&content, "host.example", 22, &fp_b);
-        // Same fingerprint mismatch -> entry must survive.
-        assert!(after.contains("host.example"));
+        assert!(!after.contains("host.example"), "{after}");
+        assert!(after.contains("other.example"), "{after}");
+    }
+
+    #[test]
+    fn remove_entry_with_recorded_fingerprint_keeps_other_keys_of_host() {
+        let fp_a = fingerprint_of(KEY_A);
+        let content = format!(
+            "host.example ssh-ed25519 {KEY_A}\n\
+             host.example ssh-ed25519 {KEY_B}\n",
+        );
+        let after = remove_entry(&content, "host.example", 22, &fp_a);
+        assert!(!after.contains(KEY_A), "{after}");
+        assert!(after.contains(KEY_B), "{after}");
+    }
+
+    #[test]
+    fn remove_entry_accepts_doubled_prefix_fingerprint() {
+        let doubled = format!("SHA256:{}", fingerprint_of(KEY_A));
+        let content = format!(
+            "host.example ssh-ed25519 {KEY_A}\n\
+             host.example ssh-ed25519 {KEY_B}\n",
+        );
+        let after = remove_entry(&content, "host.example", 22, &doubled);
+        assert!(!after.contains(KEY_A), "{after}");
+        assert!(after.contains(KEY_B), "{after}");
+    }
+
+    #[test]
+    fn remove_host_entries_handles_ports_aliases_and_hashes() {
+        // `|1|salt|hash` for "[bastion]:2222", computed with
+        // HMAC-SHA1(salt, host) as OpenSSH's HashKnownHosts does.
+        let salt = [7u8; 20];
+        let mac = Hmac::<Sha1>::new_from_slice(&salt)
+            .unwrap()
+            .chain_update("[bastion]:2222")
+            .finalize()
+            .into_bytes();
+        let hashed = format!(
+            "|1|{}|{}",
+            data_encoding::BASE64.encode(&salt),
+            data_encoding::BASE64.encode(&mac)
+        );
+        let content = format!(
+            "# keep me\n\
+             [bastion]:2222 ssh-ed25519 {KEY_A}\n\
+             alias,[bastion]:2222 ssh-ed25519 {KEY_B}\n\
+             {hashed} ssh-ed25519 {KEY_A}\n\
+             bastion ssh-ed25519 {KEY_B}\n\
+             [bastion]:2200 ssh-ed25519 {KEY_B}\n\
+             @cert-authority [bastion]:2222 ssh-ed25519 {KEY_A}\n",
+        );
+        let after = remove_host_entries(&content, "bastion", 2222);
+        let lines: Vec<&str> = after.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "# keep me".to_string(),
+                format!("bastion ssh-ed25519 {KEY_B}"),
+                format!("[bastion]:2200 ssh-ed25519 {KEY_B}"),
+                format!("@cert-authority [bastion]:2222 ssh-ed25519 {KEY_A}"),
+            ]
+        );
     }
 
     #[test]

@@ -40,7 +40,7 @@ impl CockroachdbDriver {
             "postgres://{}:{}@{}:{}{}?sslmode={}",
             urlencoding::encode(&config.user),
             urlencoding::encode(&config.password),
-            config.host,
+            crate::db::url_host(&config.host),
             config.port,
             db_segment,
             ssl_mode
@@ -242,6 +242,9 @@ impl DatabaseDriver for CockroachdbDriver {
         table: &str,
     ) -> Result<Vec<ColumnInfo>> {
         let pool = self.get_pool(database).await?;
+        // Hidden columns (the implicit `rowid` of a table created
+        // without a primary key) are listed in information_schema but
+        // not returned by `SELECT *`, so they must not become headers.
         let rows = sqlx::query(
             "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, c.ordinal_position, \
                     c.is_identity, c.identity_generation, c.is_generated, \
@@ -258,6 +261,7 @@ impl DatabaseDriver for CockroachdbDriver {
                    AND tc.table_schema = $1 AND tc.table_name = $2 \
              ) pk ON pk.column_name = c.column_name \
              WHERE c.table_schema = $1 AND c.table_name = $2 \
+               AND c.is_hidden = 'NO' \
              ORDER BY c.ordinal_position",
         )
         .bind(schema)

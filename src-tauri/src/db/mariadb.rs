@@ -32,7 +32,7 @@ impl MariadbDriver {
             "mysql://{}:{}@{}:{}{}?ssl-mode={}",
             urlencoding::encode(&config.user),
             urlencoding::encode(&config.password),
-            config.host,
+            crate::db::url_host(&config.host),
             config.port,
             db_segment,
             ssl_mode

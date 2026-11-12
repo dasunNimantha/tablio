@@ -2198,3 +2198,145 @@ async fn sqlite_alter_table_add_duplicate_column_errors() {
     driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------------
+// Driver correctness regressions
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sqlite_console_transaction_in_one_run() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sq_txn");
+    driver
+        .execute_query(DB, &format!("CREATE TABLE {} (x INTEGER)", tbl))
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            DB,
+            &format!("BEGIN; INSERT INTO {} VALUES (1); COMMIT", tbl),
+        )
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(DB, &format!("SELECT COUNT(*) FROM {}", tbl))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!(1));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_console_temp_table_in_one_run() {
+    let (driver, path) = create_driver().await;
+    let r = driver
+        .execute_query(
+            DB,
+            "CREATE TEMP TABLE t(x); INSERT INTO t VALUES(1); SELECT * FROM t",
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(r.rows[0][0], serde_json::json!(1));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_console_failed_transaction_does_not_poison_pool() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sq_txfail");
+    driver
+        .execute_query(DB, &format!("CREATE TABLE {} (x INTEGER)", tbl))
+        .await
+        .unwrap();
+    assert!(driver
+        .execute_query(
+            DB,
+            &format!("BEGIN; INSERT INTO {} VALUES (1); SELEC broken", tbl)
+        )
+        .await
+        .is_err());
+    assert!(driver
+        .execute_query(DB, &format!("BEGIN; INSERT INTO {} VALUES (2)", tbl))
+        .await
+        .is_err());
+    for _ in 0..8 {
+        let r = driver
+            .execute_query(DB, &format!("SELECT COUNT(*) FROM {}", tbl))
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], serde_json::json!(0));
+    }
+    // A write from a fresh run must not be blocked by a lingering lock.
+    driver
+        .execute_query(DB, &format!("INSERT INTO {} VALUES (3)", tbl))
+        .await
+        .unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_big_integer_ids_round_trip_and_missing_rows_error() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("sq_bigid");
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {} (id INTEGER PRIMARY KEY, note TEXT); \
+                 INSERT INTO {} VALUES (1234567890123456789, 'a'), (1234567890123456790, 'b')",
+                tbl, tbl
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0][0], serde_json::json!("1234567890123456789"));
+
+    let changes = DataChanges {
+        connection_id: "test".into(),
+        database: DB.into(),
+        schema: SCHEMA.into(),
+        table: tbl.clone(),
+        updates: vec![CellChange {
+            row_index: 0,
+            column_name: "note".into(),
+            old_value: serde_json::json!("a"),
+            new_value: serde_json::json!("edited"),
+            primary_key_values: vec![("id".into(), data.rows[0][0].clone())],
+        }],
+        inserts: vec![],
+        deletes: vec![DeleteRow {
+            primary_key_values: vec![("id".into(), data.rows[1][0].clone())],
+        }],
+    };
+    driver.apply_changes(&changes).await.unwrap();
+    let after = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(after.rows.len(), 1);
+    assert_eq!(after.rows[0][1], serde_json::json!("edited"));
+
+    let missing = DataChanges {
+        connection_id: "test".into(),
+        database: DB.into(),
+        schema: SCHEMA.into(),
+        table: tbl.clone(),
+        updates: vec![CellChange {
+            row_index: 0,
+            column_name: "note".into(),
+            old_value: serde_json::json!("x"),
+            new_value: serde_json::json!("y"),
+            primary_key_values: vec![("id".into(), serde_json::json!(42))],
+        }],
+        inserts: vec![],
+        deletes: vec![],
+    };
+    let err = driver.apply_changes(&missing).await.unwrap_err();
+    assert!(err.to_string().contains("no matching row"), "{err}");
+    let _ = std::fs::remove_file(&path);
+}

@@ -26,38 +26,11 @@ fn bracket(ident: &str) -> String {
 /// same set of filter patterns as Postgres / MySQL / SQLite. See the
 /// doc comment on the Postgres helper for the threat model.
 fn filter_is_unsafe(filter: &str) -> bool {
-    let s = filter.trim();
-    if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return true;
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return true;
-    }
-    u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
+    filter_unsafe_reason(filter).is_some()
 }
 
 fn filter_unsafe_reason(filter: &str) -> Option<&'static str> {
-    let s = filter.trim();
-    if s.contains(';') {
-        return Some("statement terminator (`;`)");
-    }
-    if s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return Some("SQL comment markers (`--` / `/* */`)");
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return Some("nested `(SELECT ...)` subquery");
-    }
-    if u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
-    {
-        return Some("`UNION SELECT` clause");
-    }
-    None
+    crate::util::sql::filter_unsafe_reason_for(filter, crate::util::sql::SqlDialect::Generic)
 }
 
 fn three_part_table(database: &str, schema: &str, table: &str) -> String {
@@ -87,6 +60,152 @@ fn json_to_mssql_literal(val: &serde_json::Value) -> String {
     }
 }
 
+/// Text rendering of the raw TDS date/time values, matching the other
+/// drivers (`YYYY-MM-DD HH:MM:SS[.fraction]`, fraction only when
+/// non-zero, `+HH:MM` offset for datetimeoffset). The strings are valid
+/// SQL Server literals, so a date/time primary key round-trips through
+/// grid edits.
+mod tds_time {
+    use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+    use tiberius::time as t;
+
+    fn base_1900() -> NaiveDate {
+        NaiveDate::from_ymd_opt(1900, 1, 1).unwrap_or_default()
+    }
+
+    fn base_0001() -> NaiveDate {
+        NaiveDate::from_ymd_opt(1, 1, 1).unwrap_or_default()
+    }
+
+    /// `HH:MM:SS` plus `.fraction` (trailing zeros trimmed) for a time of
+    /// day given in units of `10^-scale` seconds.
+    fn time_of_day(increments: u64, scale: u8) -> String {
+        let scale = u32::from(scale.min(9));
+        let per_sec = 10u64.pow(scale);
+        let secs = increments / per_sec;
+        let frac = increments % per_sec;
+        let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
+        let mut out = format!("{:02}:{:02}:{:02}", h, m, s);
+        if frac > 0 {
+            let digits = format!("{:0width$}", frac, width = scale as usize);
+            out.push('.');
+            out.push_str(digits.trim_end_matches('0'));
+        }
+        out
+    }
+
+    fn date_str(d: NaiveDate) -> String {
+        d.format("%Y-%m-%d").to_string()
+    }
+
+    pub fn date(d: t::Date) -> String {
+        base_0001()
+            .checked_add_signed(Duration::days(i64::from(d.days())))
+            .map(date_str)
+            .unwrap_or_else(|| format!("{:?}", d))
+    }
+
+    pub fn time(tm: t::Time) -> String {
+        time_of_day(tm.increments(), tm.scale())
+    }
+
+    pub fn datetime(d: t::DateTime) -> String {
+        // seconds_fragments are 1/300 s; render as milliseconds the
+        // way SQL Server does (.000 / .003 / .007).
+        let millis = (u64::from(d.seconds_fragments()) * 10 + 1) / 3;
+        match base_1900().checked_add_signed(Duration::days(i64::from(d.days()))) {
+            Some(day) => format!("{} {}", date_str(day), time_of_day(millis, 3)),
+            None => format!("{:?}", d),
+        }
+    }
+
+    pub fn smalldatetime(d: t::SmallDateTime) -> String {
+        let minutes = u64::from(d.seconds_fragments());
+        match base_1900().checked_add_signed(Duration::days(i64::from(d.days()))) {
+            Some(day) => format!("{} {}", date_str(day), time_of_day(minutes * 60, 0)),
+            None => format!("{:?}", d),
+        }
+    }
+
+    pub fn datetime2(d: t::DateTime2) -> String {
+        format!("{} {}", date(d.date()), time(d.time()))
+    }
+
+    pub fn datetimeoffset(d: t::DateTimeOffset) -> String {
+        // The wire value is UTC; show local time with its offset.
+        let dt2 = d.datetime2();
+        let offset = i64::from(d.offset());
+        let tm = dt2.time();
+        let scale = u32::from(tm.scale().min(9));
+        let per_sec = 10u64.pow(scale);
+        let utc_day =
+            match base_0001().checked_add_signed(Duration::days(i64::from(dt2.date().days()))) {
+                Some(day) => day,
+                None => return format!("{:?}", d),
+            };
+        let secs = tm.increments() / per_sec;
+        let frac = tm.increments() % per_sec;
+        let utc = NaiveDateTime::new(utc_day, NaiveTime::MIN) + Duration::seconds(secs as i64);
+        let local = utc + Duration::minutes(offset);
+        let local_secs = u64::from(local.time().num_seconds_from_midnight());
+        let sign = if offset < 0 { '-' } else { '+' };
+        format!(
+            "{} {}{}{:02}:{:02}",
+            date_str(local.date()),
+            time_of_day(local_secs * per_sec + frac, scale as u8),
+            sign,
+            offset.abs() / 60,
+            offset.abs() % 60
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn renders_iso_like_strings() {
+            // 2024-01-02 = 739_251 days after 0001-01-01.
+            let days_0001 =
+                (NaiveDate::from_ymd_opt(2024, 1, 2).unwrap() - base_0001()).num_days() as u32;
+            let days_1900 =
+                (NaiveDate::from_ymd_opt(2024, 1, 2).unwrap() - base_1900()).num_days() as i32;
+            assert_eq!(date(t::Date::new(days_0001)), "2024-01-02");
+            let tm = t::Time::new((3 * 3600 + 4 * 60 + 5) * 10_000_000 + 1_234_500, 7);
+            assert_eq!(time(tm), "03:04:05.12345");
+            assert_eq!(
+                datetime2(t::DateTime2::new(
+                    t::Date::new(days_0001),
+                    t::Time::new(3600 * 10_000_000, 7)
+                )),
+                "2024-01-02 01:00:00"
+            );
+            // 1/300 s fragments: 300 = 1 s, 1 = .003
+            assert_eq!(
+                datetime(t::DateTime::new(days_1900, 3600 * 300 + 1)),
+                "2024-01-02 01:00:00.003"
+            );
+            assert_eq!(
+                smalldatetime(t::SmallDateTime::new(days_1900 as u16, 61)),
+                "2024-01-02 01:01:00"
+            );
+            // 23:30 UTC at +05:30 is 05:00 the next day locally.
+            let utc = t::DateTime2::new(
+                t::Date::new(days_0001),
+                t::Time::new((23 * 3600 + 30 * 60) * 10_000_000 + 5_000_000, 7),
+            );
+            assert_eq!(
+                datetimeoffset(t::DateTimeOffset::new(utc, 330)),
+                "2024-01-03 05:00:00.5+05:30"
+            );
+            assert_eq!(
+                datetimeoffset(t::DateTimeOffset::new(utc, -60)),
+                "2024-01-02 22:30:00.5-01:00"
+            );
+        }
+    }
+}
+
 fn column_data_to_json(data: &ColumnData<'_>) -> serde_json::Value {
     match data {
         ColumnData::U8(v) => v
@@ -99,7 +218,7 @@ fn column_data_to_json(data: &ColumnData<'_>) -> serde_json::Value {
             .map(|x| serde_json::json!(x))
             .unwrap_or(serde_json::Value::Null),
         ColumnData::I64(v) => v
-            .map(|x| serde_json::json!(x))
+            .map(crate::util::sql::i64_to_json)
             .unwrap_or(serde_json::Value::Null),
         ColumnData::F32(v) => v
             .map(|x| serde_json::json!(x))
@@ -137,22 +256,22 @@ fn column_data_to_json(data: &ColumnData<'_>) -> serde_json::Value {
             .map(|x| serde_json::Value::String(x.to_string()))
             .unwrap_or(serde_json::Value::Null),
         ColumnData::DateTime(v) => v
-            .map(|d| serde_json::Value::String(format!("{:?}", d)))
+            .map(|d| serde_json::Value::String(tds_time::datetime(d)))
             .unwrap_or(serde_json::Value::Null),
         ColumnData::SmallDateTime(v) => v
-            .map(|d| serde_json::Value::String(format!("{:?}", d)))
+            .map(|d| serde_json::Value::String(tds_time::smalldatetime(d)))
             .unwrap_or(serde_json::Value::Null),
         ColumnData::Time(v) => v
-            .map(|d| serde_json::Value::String(format!("{:?}", d)))
+            .map(|t| serde_json::Value::String(tds_time::time(t)))
             .unwrap_or(serde_json::Value::Null),
         ColumnData::Date(v) => v
-            .map(|d| serde_json::Value::String(format!("{:?}", d)))
+            .map(|d| serde_json::Value::String(tds_time::date(d)))
             .unwrap_or(serde_json::Value::Null),
         ColumnData::DateTime2(v) => v
-            .map(|d| serde_json::Value::String(format!("{:?}", d)))
+            .map(|d| serde_json::Value::String(tds_time::datetime2(d)))
             .unwrap_or(serde_json::Value::Null),
         ColumnData::DateTimeOffset(v) => v
-            .map(|d| serde_json::Value::String(format!("{:?}", d)))
+            .map(|d| serde_json::Value::String(tds_time::datetimeoffset(d)))
             .unwrap_or(serde_json::Value::Null),
     }
 }
@@ -197,6 +316,91 @@ fn rows_to_grid(rows: Vec<Row>) -> (Vec<String>, Vec<Vec<serde_json::Value>>) {
     (columns, data)
 }
 
+/// `IF @@ROWCOUNT = 0 THROW ...` placed right after a keyed UPDATE /
+/// DELETE so an edit that matches no row fails the batch instead of
+/// silently succeeding.
+fn no_row_matched_guard(action: &str, pk: &[(String, serde_json::Value)]) -> String {
+    let msg = match crate::util::sql::ensure_row_matched(0, action, pk) {
+        Err(e) => e.to_string(),
+        Ok(()) => String::new(),
+    };
+    // THROW messages are limited to 2048 characters.
+    let msg: String = msg.chars().take(2000).collect();
+    format!(
+        "IF @@ROWCOUNT = 0 THROW 50000, N'{}', 1;",
+        msg.replace('\'', "''")
+    )
+}
+
+/// Like `json_to_mssql_literal`, but uses the column type: numeric
+/// strings (big ids / exact decimals) become bare literals, and
+/// `YYYY-MM-DD HH:MM:SS` strings for datetime / smalldatetime columns
+/// use the ISO 8601 `T` separator, the only form those types parse
+/// independently of the session language / DATEFORMAT.
+fn typed_mssql_literal(data_type: Option<&str>, val: &serde_json::Value) -> String {
+    if let (Some(t), serde_json::Value::String(s)) = (data_type, val) {
+        if crate::util::sql::is_numeric_type_name(t) {
+            if let Some(n) = crate::util::sql::numeric_literal(s) {
+                return n.to_string();
+            }
+        }
+        let lower = t.to_ascii_lowercase();
+        if lower == "datetime" || lower == "smalldatetime" {
+            let b = s.as_bytes();
+            let looks_iso = b.len() >= 19
+                && b[4] == b'-'
+                && b[7] == b'-'
+                && b[10] == b' '
+                && b[13] == b':'
+                && b[..10]
+                    .iter()
+                    .enumerate()
+                    .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit());
+            if looks_iso {
+                let iso = format!("{}T{}", &s[..10], &s[11..]);
+                return format!("N'{}'", iso.replace('\'', "''"));
+            }
+        }
+    }
+    json_to_mssql_literal(val)
+}
+
+type MssqlClient = Client<MssqlStream>;
+
+async fn client_select(
+    c: &mut MssqlClient,
+    sql: &str,
+) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>)> {
+    let stream = c.simple_query(sql).await.map_err(|e| anyhow!("{}", e))?;
+    let rows = stream
+        .into_first_result()
+        .await
+        .map_err(|e| anyhow!("{}", e))?;
+    Ok(rows_to_grid(rows))
+}
+
+async fn client_exec(c: &mut MssqlClient, sql: &str) -> Result<u64> {
+    let r = c.execute(sql, &[]).await.map_err(|e| anyhow!("{}", e))?;
+    Ok(r.rows_affected().iter().copied().sum())
+}
+
+async fn client_batch(c: &mut MssqlClient, sql: &str) -> Result<()> {
+    c.simple_query(sql)
+        .await
+        .map_err(|e| anyhow!("{}", e))?
+        .into_results()
+        .await
+        .map_err(|e| anyhow!("{}", e))?;
+    Ok(())
+}
+
+async fn client_use_database(c: &mut MssqlClient, database: &str) -> Result<()> {
+    if !database.trim().is_empty() {
+        client_batch(c, &format!("USE {}", bracket(database))).await?;
+    }
+    Ok(())
+}
+
 impl MssqlDriver {
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
         let mut tcfg = Config::new();
@@ -233,37 +437,38 @@ impl MssqlDriver {
 
     async fn run_select(&self, sql: &str) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>)> {
         let mut c = self.client.lock().await;
-        let stream = c.simple_query(sql).await.map_err(|e| anyhow!("{}", e))?;
-        let rows = stream
-            .into_first_result()
-            .await
-            .map_err(|e| anyhow!("{}", e))?;
-        Ok(rows_to_grid(rows))
+        client_select(&mut c, sql).await
     }
 
     async fn run_exec(&self, sql: &str) -> Result<u64> {
         let mut c = self.client.lock().await;
-        let r = c.execute(sql, &[]).await.map_err(|e| anyhow!("{}", e))?;
-        Ok(r.rows_affected().iter().copied().sum())
+        client_exec(&mut c, sql).await
     }
 
     async fn run_batch(&self, sql: &str) -> Result<()> {
         let mut c = self.client.lock().await;
-        c.simple_query(sql)
-            .await
-            .map_err(|e| anyhow!("{}", e))?
-            .into_results()
-            .await
-            .map_err(|e| anyhow!("{}", e))?;
-        Ok(())
+        client_batch(&mut c, sql).await
     }
 
-    async fn use_database(&self, database: &str) -> Result<()> {
-        if !database.trim().is_empty() {
-            self.run_batch(&format!("USE {}", bracket(database)))
-                .await?;
-        }
-        Ok(())
+    // The driver shares one connection, so a `USE` and the statements
+    // it governs must run under a single lock acquisition; otherwise
+    // another task can switch the database in between. The `*_in`
+    // helpers do exactly that.
+
+    async fn run_select_in(
+        &self,
+        database: &str,
+        sql: &str,
+    ) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>)> {
+        let mut c = self.client.lock().await;
+        client_use_database(&mut c, database).await?;
+        client_select(&mut c, sql).await
+    }
+
+    async fn run_batch_in(&self, database: &str, sql: &str) -> Result<()> {
+        let mut c = self.client.lock().await;
+        client_use_database(&mut c, database).await?;
+        client_batch(&mut c, sql).await
     }
 
     fn is_ddl(sql: &str) -> bool {
@@ -842,7 +1047,19 @@ impl DatabaseDriver for MssqlDriver {
                 .collect::<Vec<_>>()
                 .join(", ")
         } else if pk_cols.is_empty() {
-            bracket(&columns[0].name).to_string()
+            // First column that can be sorted on; text / ntext / image /
+            // xml / spatial columns cannot appear in ORDER BY.
+            columns
+                .iter()
+                .find(|c| {
+                    let t = c.data_type.to_ascii_lowercase();
+                    !matches!(
+                        t.as_str(),
+                        "text" | "ntext" | "image" | "xml" | "geography" | "geometry"
+                    )
+                })
+                .map(|c| bracket(&c.name))
+                .unwrap_or_else(|| "(SELECT NULL)".to_string())
         } else {
             pk_cols
                 .iter()
@@ -903,42 +1120,37 @@ impl DatabaseDriver for MssqlDriver {
     }
 
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult> {
-        self.use_database(database).await?;
         let start = Instant::now();
 
         // Multi-statement support: see the matching comment in
         // `pg_common::pg_execute_query`. We split the input on
         // top-level semicolons and run each leading statement on
-        // the same `Client` (held under `self.client`), then pick
-        // the exec path for the LAST statement based on its
-        // shape — so `CREATE VIEW v ...; SELECT * FROM v;` returns
-        // rows from the SELECT.
-        //
-        // We don't fall back to a single-batch send here even when
-        // there's exactly one statement, because `tiberius::execute`
-        // happily handles trailing comments / whitespace.
+        // the same `Client`, then pick the exec path for the LAST
+        // statement based on its shape — so `CREATE VIEW v ...;
+        // SELECT * FROM v;` returns rows from the SELECT. The lock is
+        // held for the `USE` and every statement so no other task can
+        // switch the database in between.
         let statements = split_sql_statements(sql);
-        if statements.is_empty() {
+        let Some((last, leading)) = statements.split_last() else {
             return Err(anyhow!("Query is empty"));
-        }
+        };
 
-        for stmt in &statements[..statements.len() - 1] {
-            if Self::statement_is_select_like(stmt) {
+        let mut c = self.client.lock().await;
+        client_use_database(&mut c, database).await?;
+
+        for stmt in leading {
+            if Self::statement_is_select_like(stmt) || Self::is_ddl(stmt) {
                 // Even a leading SELECT could materialise a temp
                 // table via SELECT INTO. Run it as a batch so any
                 // side effects land, and discard the rowset.
-                self.run_batch(stmt).await?;
-            } else if Self::is_ddl(stmt) {
-                self.run_batch(stmt).await?;
+                client_batch(&mut c, stmt).await?;
             } else {
-                self.run_exec(stmt).await?;
+                client_exec(&mut c, stmt).await?;
             }
         }
 
-        let last = statements.last().unwrap();
-
         if Self::statement_is_select_like(last) {
-            let (columns, rows) = self.run_select(last).await?;
+            let (columns, rows) = client_select(&mut c, last).await?;
             let elapsed = start.elapsed().as_millis() as u64;
             let n = rows.len() as u64;
             return Ok(QueryResult {
@@ -951,7 +1163,7 @@ impl DatabaseDriver for MssqlDriver {
         }
 
         if Self::is_ddl(last) {
-            self.run_batch(last).await?;
+            client_batch(&mut c, last).await?;
             let elapsed = start.elapsed().as_millis() as u64;
             return Ok(QueryResult {
                 columns: vec![],
@@ -962,7 +1174,7 @@ impl DatabaseDriver for MssqlDriver {
             });
         }
 
-        let rows_affected = self.run_exec(last).await?;
+        let rows_affected = client_exec(&mut c, last).await?;
         let elapsed = start.elapsed().as_millis() as u64;
         Ok(QueryResult {
             columns: vec![],
@@ -974,10 +1186,25 @@ impl DatabaseDriver for MssqlDriver {
     }
 
     async fn explain_query(&self, database: &str, sql: &str) -> Result<ExplainResult> {
-        self.use_database(database).await?;
         let start = Instant::now();
-        let plan_batch = format!("SET SHOWPLAN_XML ON; {}; SET SHOWPLAN_XML OFF;", sql);
-        let result = self.run_select(&plan_batch).await;
+        // `SET SHOWPLAN_XML` must be the only statement in its batch,
+        // so ON / query / OFF are three batches on the same connection,
+        // under one lock, and OFF runs even when the query fails.
+        let result = {
+            let mut c = self.client.lock().await;
+            let planned = async {
+                client_use_database(&mut c, database).await?;
+                client_batch(&mut c, "SET SHOWPLAN_XML ON").await?;
+                client_select(&mut c, sql).await
+            }
+            .await;
+            let off = client_batch(&mut c, "SET SHOWPLAN_XML OFF").await;
+            match (planned, off) {
+                (Ok(r), Ok(())) => Ok(r),
+                (Err(e), _) => Err(e),
+                (Ok(_), Err(e)) => Err(e),
+            }
+        };
         let elapsed = start.elapsed().as_millis() as u64;
         match result {
             Ok((cols, rows)) => {
@@ -1029,9 +1256,9 @@ impl DatabaseDriver for MssqlDriver {
                 position: None,
             }));
         }
-        self.use_database(database).await?;
         let batch = format!("SET PARSEONLY ON; {}; SET PARSEONLY OFF;", sql);
         let mut client = self.client.lock().await;
+        client_use_database(&mut client, database).await?;
         match client.execute(&*batch, &[]).await {
             Ok(_) => Ok(None),
             Err(e) => {
@@ -1110,6 +1337,19 @@ impl DatabaseDriver for MssqlDriver {
 
     async fn apply_changes(&self, changes: &DataChanges) -> Result<()> {
         let fq = three_part_table(&changes.database, &changes.schema, &changes.table);
+        // Column types decide how string values are written (numeric
+        // strings unquoted, datetime strings in a language-independent
+        // form).
+        let col_types: std::collections::HashMap<String, String> = self
+            .list_columns(&changes.database, &changes.schema, &changes.table)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.name, c.data_type))
+            .collect();
+        let lit = |col: &str, val: &serde_json::Value| -> String {
+            typed_mssql_literal(col_types.get(col).map(String::as_str), val)
+        };
         let mut stmts = Vec::new();
         stmts.push("SET XACT_ABORT ON; BEGIN TRAN;".to_string());
         for update in &changes.updates {
@@ -1119,12 +1359,12 @@ impl DatabaseDriver for MssqlDriver {
             let set_clause = format!(
                 "{} = {}",
                 bracket(&update.column_name),
-                json_to_mssql_literal(&update.new_value)
+                lit(&update.column_name, &update.new_value)
             );
             let where_clause: Vec<String> = update
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| format!("{} = {}", bracket(col), json_to_mssql_literal(val)))
+                .map(|(col, val)| format!("{} = {}", bracket(col), lit(col, val)))
                 .collect();
             stmts.push(format!(
                 "UPDATE {} SET {} WHERE {};",
@@ -1132,14 +1372,12 @@ impl DatabaseDriver for MssqlDriver {
                 set_clause,
                 where_clause.join(" AND ")
             ));
+            // XACT_ABORT makes THROW roll back the whole batch.
+            stmts.push(no_row_matched_guard("update", &update.primary_key_values));
         }
         for insert in &changes.inserts {
             let cols: Vec<String> = insert.values.iter().map(|(n, _)| bracket(n)).collect();
-            let vals: Vec<String> = insert
-                .values
-                .iter()
-                .map(|(_, v)| json_to_mssql_literal(v))
-                .collect();
+            let vals: Vec<String> = insert.values.iter().map(|(c, v)| lit(c, v)).collect();
             stmts.push(format!(
                 "INSERT INTO {} ({}) VALUES ({});",
                 fq,
@@ -1154,13 +1392,14 @@ impl DatabaseDriver for MssqlDriver {
             let where_clause: Vec<String> = delete
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| format!("{} = {}", bracket(col), json_to_mssql_literal(val)))
+                .map(|(col, val)| format!("{} = {}", bracket(col), lit(col, val)))
                 .collect();
             stmts.push(format!(
                 "DELETE FROM {} WHERE {};",
                 fq,
                 where_clause.join(" AND ")
             ));
+            stmts.push(no_row_matched_guard("delete", &delete.primary_key_values));
         }
         stmts.push("COMMIT TRAN;".to_string());
 
@@ -1197,14 +1436,13 @@ impl DatabaseDriver for MssqlDriver {
         if !pk.is_empty() {
             parts.push(format!("PRIMARY KEY ({})", pk.join(", ")));
         }
-        self.use_database(database).await?;
         let sql = format!(
             "CREATE TABLE {}.{} ({})",
             bracket(schema),
             bracket(table_name),
             parts.join(", ")
         );
-        self.run_batch(&sql).await?;
+        self.run_batch_in(database, &sql).await?;
         Ok(())
     }
 
@@ -1215,7 +1453,6 @@ impl DatabaseDriver for MssqlDriver {
         table_name: &str,
         operations: &[AlterTableOperation],
     ) -> Result<()> {
-        self.use_database(database).await?;
         // Track the live table name across the loop so ops queued
         // after `RenameTable` target the renamed object (matches
         // pg_alter_table / my_alter_table / sqlite alter_table).
@@ -1322,7 +1559,7 @@ impl DatabaseDriver for MssqlDriver {
                                  WHERE s.name = N'{}' AND t.name = N'{}' AND c.name = N'{}'",
                                 schema.replace('\'', "''"), current_table.replace('\'', "''"), column_name.replace('\'', "''")
                             );
-                        let (_, rows) = self.run_select(&find_constraint).await?;
+                        let (_, rows) = self.run_select_in(database, &find_constraint).await?;
                         if let Some(constraint_name) = rows
                             .first()
                             .and_then(|r| r.first())
@@ -1339,7 +1576,7 @@ impl DatabaseDriver for MssqlDriver {
                     }
                 },
             };
-            self.run_batch(&stmt).await?;
+            self.run_batch_in(database, &stmt).await?;
         }
         Ok(())
     }
@@ -1351,7 +1588,6 @@ impl DatabaseDriver for MssqlDriver {
         object_name: &str,
         object_type: &str,
     ) -> Result<()> {
-        self.use_database(database).await?;
         let fq = format!("{}.{}", bracket(schema), bracket(object_name));
         let sql = match object_type.to_uppercase().as_str() {
             "TABLE" | "BASE TABLE" => format!("DROP TABLE {}", fq),
@@ -1365,7 +1601,7 @@ impl DatabaseDriver for MssqlDriver {
                     object_name.replace('\'', "''"),
                     schema.replace('\'', "''"),
                 );
-                let (_, rows) = self.run_select(&q).await?;
+                let (_, rows) = self.run_select_in(database, &q).await?;
                 let tbl = rows
                     .first()
                     .and_then(|r| r.first())
@@ -1382,14 +1618,13 @@ impl DatabaseDriver for MssqlDriver {
             }
             _ => anyhow::bail!("Unsupported drop type {}", object_type),
         };
-        self.run_batch(&sql).await?;
+        self.run_batch_in(database, &sql).await?;
         Ok(())
     }
 
     async fn truncate_table(&self, database: &str, schema: &str, table_name: &str) -> Result<()> {
-        self.use_database(database).await?;
         let sql = format!("TRUNCATE TABLE {}.{}", bracket(schema), bracket(table_name));
-        self.run_batch(&sql).await?;
+        self.run_batch_in(database, &sql).await?;
         Ok(())
     }
 
@@ -1404,37 +1639,59 @@ impl DatabaseDriver for MssqlDriver {
         if rows.is_empty() {
             return Ok(0);
         }
-        self.use_database(database).await?;
         let fq = format!("{}.{}", bracket(schema), bracket(table));
         let cols = columns
             .iter()
             .map(|c| bracket(c))
             .collect::<Vec<_>>()
             .join(", ");
-        let mut n = 0u64;
         const BATCH_SIZE: usize = 100;
-        for chunk in rows.chunks(BATCH_SIZE) {
-            let values_list: Vec<String> = chunk
-                .iter()
-                .map(|row| {
-                    let vals = row
-                        .iter()
-                        .map(json_to_mssql_literal)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("({})", vals)
-                })
-                .collect();
-            let sql = format!(
-                "INSERT INTO {} ({}) VALUES {}",
-                fq,
-                cols,
-                values_list.join(", ")
-            );
-            let affected = self.run_exec(&sql).await?;
-            n += affected;
+        let sqls: Vec<String> = rows
+            .chunks(BATCH_SIZE)
+            .map(|chunk| {
+                let values_list: Vec<String> = chunk
+                    .iter()
+                    .map(|row| {
+                        let vals = row
+                            .iter()
+                            .map(json_to_mssql_literal)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("({})", vals)
+                    })
+                    .collect();
+                format!(
+                    "INSERT INTO {} ({}) VALUES {}",
+                    fq,
+                    cols,
+                    values_list.join(", ")
+                )
+            })
+            .collect();
+
+        // All-or-nothing like the Postgres / MySQL drivers: one
+        // transaction on the (shared) connection, held under one lock.
+        let mut c = self.client.lock().await;
+        client_use_database(&mut c, database).await?;
+        client_batch(&mut c, "BEGIN TRANSACTION").await?;
+        let inserted = async {
+            let mut n = 0u64;
+            for sql in &sqls {
+                n += client_exec(&mut c, sql).await?;
+            }
+            Ok::<u64, anyhow::Error>(n)
         }
-        Ok(n)
+        .await;
+        match inserted {
+            Ok(n) => {
+                client_batch(&mut c, "COMMIT TRANSACTION").await?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = client_batch(&mut c, "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION").await;
+                Err(e)
+            }
+        }
     }
 
     async fn get_server_activity(&self) -> Result<Vec<ServerActivity>> {

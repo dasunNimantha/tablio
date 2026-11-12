@@ -3,10 +3,12 @@ use async_trait::async_trait;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::response::query_result::QueryRowsResult;
+use scylla::response::{PagingState, PagingStateResponse};
 use std::time::Instant;
 
 use crate::db::DatabaseDriver;
 use crate::models::*;
+use crate::util::sql::i64_to_json;
 
 pub struct CassandraDriver {
     session: Session,
@@ -17,38 +19,17 @@ pub struct CassandraDriver {
 /// statement injection from the local UI) is identical, so we apply
 /// the same heuristic across drivers for consistency.
 fn filter_is_unsafe(filter: &str) -> bool {
-    let s = filter.trim();
-    if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return true;
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return true;
-    }
-    u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
+    filter_unsafe_reason(filter).is_some()
 }
 
 fn filter_unsafe_reason(filter: &str) -> Option<&'static str> {
-    let s = filter.trim();
-    if s.contains(';') {
-        return Some("statement terminator (`;`)");
-    }
-    if s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return Some("CQL comment markers (`--` / `/* */`)");
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return Some("nested `(SELECT ...)` subquery");
-    }
-    if u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
+    match crate::util::sql::filter_unsafe_reason_for(filter, crate::util::sql::SqlDialect::Postgres)
     {
-        return Some("`UNION SELECT` clause");
+        Some("SQL comment markers (`--` / `/* */`)") => {
+            Some("CQL comment markers (`--` / `/* */`)")
+        }
+        other => other,
     }
-    None
 }
 
 const SYSTEM_KEYSPACES: &[&str] = &[
@@ -64,7 +45,13 @@ const SYSTEM_KEYSPACES: &[&str] = &[
 
 impl CassandraDriver {
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
-        let addr = format!("{}:{}", config.host, config.port);
+        // Bracket IPv6 literals so the port separator is unambiguous.
+        let host = config.host.trim();
+        let addr = if host.contains(':') && !host.starts_with('[') {
+            format!("[{}]:{}", host, config.port)
+        } else {
+            format!("{}:{}", host, config.port)
+        };
         let mut builder = SessionBuilder::new().known_node(&addr);
 
         if !config.user.is_empty() {
@@ -82,7 +69,7 @@ fn cql_value_to_json(_col_type: &str, raw: &scylla::value::CqlValue) -> serde_js
         CqlValue::Ascii(s) | CqlValue::Text(s) => serde_json::Value::String(s.clone()),
         CqlValue::Boolean(b) => serde_json::Value::Bool(*b),
         CqlValue::Int(i) => serde_json::json!(*i),
-        CqlValue::BigInt(i) => serde_json::json!(*i),
+        CqlValue::BigInt(i) => i64_to_json(*i),
         CqlValue::SmallInt(i) => serde_json::json!(*i),
         CqlValue::TinyInt(i) => serde_json::json!(*i),
         CqlValue::Float(f) => serde_json::json!(*f),
@@ -97,9 +84,17 @@ fn cql_value_to_json(_col_type: &str, raw: &scylla::value::CqlValue) -> serde_js
             let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
             serde_json::Value::String(format!("0x{}", hex))
         }
-        CqlValue::Varint(v) => serde_json::Value::String(format!("{:?}", v)),
-        CqlValue::Decimal(d) => serde_json::Value::String(format!("{:?}", d)),
-        CqlValue::Counter(c) => serde_json::json!(c.0),
+        CqlValue::Varint(v) => {
+            exact_decimal_to_json(&signed_be_bytes_to_decimal(v.as_signed_bytes_be_slice()))
+        }
+        CqlValue::Decimal(d) => {
+            let (bytes, scale) = d.as_signed_be_bytes_slice_and_exponent();
+            exact_decimal_to_json(&scaled_decimal_text(
+                &signed_be_bytes_to_decimal(bytes),
+                scale,
+            ))
+        }
+        CqlValue::Counter(c) => i64_to_json(c.0),
         CqlValue::Set(items) => {
             let arr: Vec<serde_json::Value> =
                 items.iter().map(|v| cql_value_to_json("", v)).collect();
@@ -171,8 +166,119 @@ fn json_to_cql_literal(val: &serde_json::Value) -> String {
     }
 }
 
+/// Like `json_to_cql_literal`, but a string value destined for a
+/// numeric column is emitted unquoted once it is validated as a plain
+/// numeric literal.
+fn typed_cql_literal(data_type: Option<&str>, val: &serde_json::Value) -> String {
+    if let (Some(t), serde_json::Value::String(s)) = (data_type, val) {
+        if crate::util::sql::is_numeric_type_name(t) {
+            if let Some(n) = crate::util::sql::numeric_literal(s) {
+                return n.to_string();
+            }
+        }
+    }
+    json_to_cql_literal(val)
+}
+
 fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Reorder (and if necessary extend) the catalog column list so it
+/// follows `result_names`, the column order of the cells actually
+/// returned by the server. Columns missing from the catalog get a
+/// minimal placeholder entry so headers and cells always line up.
+fn align_columns_to_result(columns: Vec<ColumnInfo>, result_names: Vec<String>) -> Vec<ColumnInfo> {
+    if result_names.is_empty() {
+        return columns;
+    }
+    let mut by_name: std::collections::HashMap<String, ColumnInfo> =
+        columns.into_iter().map(|c| (c.name.clone(), c)).collect();
+    result_names
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let mut col = by_name.remove(&name).unwrap_or_else(|| ColumnInfo {
+                name: name.clone(),
+                data_type: "unknown".to_string(),
+                is_nullable: true,
+                is_primary_key: false,
+                default_value: None,
+                ordinal_position: 0,
+                is_auto_generated: false,
+            });
+            col.ordinal_position = i as i32 + 1;
+            col
+        })
+        .collect()
+}
+
+/// Decimal text of a big-endian two's-complement integer.
+fn signed_be_bytes_to_decimal(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "0".to_string();
+    }
+    let negative = bytes[0] & 0x80 != 0;
+    let mut mag: Vec<u8> = if negative {
+        // Two's complement negate: invert and add one.
+        let mut v: Vec<u8> = bytes.iter().map(|b| !b).collect();
+        for b in v.iter_mut().rev() {
+            let (n, overflow) = b.overflowing_add(1);
+            *b = n;
+            if !overflow {
+                break;
+            }
+        }
+        v
+    } else {
+        bytes.to_vec()
+    };
+    // Repeated division by 10 over the base-256 digits.
+    let mut digits = Vec::new();
+    while mag.iter().any(|&b| b != 0) {
+        let mut rem: u32 = 0;
+        for b in mag.iter_mut() {
+            let cur = (rem << 8) | u32::from(*b);
+            *b = (cur / 10) as u8;
+            rem = cur % 10;
+        }
+        digits.push(char::from(b'0' + rem as u8));
+    }
+    if digits.is_empty() {
+        digits.push('0');
+    }
+    if negative {
+        digits.push('-');
+    }
+    digits.iter().rev().collect()
+}
+
+/// Decimal text of `unscaled * 10^-scale`.
+fn scaled_decimal_text(unscaled: &str, scale: i32) -> String {
+    let (sign, digits) = match unscaled.strip_prefix('-') {
+        Some(d) => ("-", d),
+        None => ("", unscaled),
+    };
+    if scale <= 0 {
+        if digits == "0" {
+            return "0".to_string();
+        }
+        return format!("{}{}{}", sign, digits, "0".repeat((-scale) as usize));
+    }
+    let scale = scale as usize;
+    let padded = if digits.len() <= scale {
+        format!("{}{}", "0".repeat(scale - digits.len() + 1), digits)
+    } else {
+        digits.to_string()
+    };
+    let (int_part, frac_part) = padded.split_at(padded.len() - scale);
+    format!("{}{}.{}", sign, int_part, frac_part)
+}
+
+/// JSON for an exact decimal string: a number when it survives the
+/// f64 round trip unchanged, otherwise the exact text.
+fn exact_decimal_to_json(text: &str) -> serde_json::Value {
+    crate::util::sql::exact_numeric_text_to_json(text)
 }
 
 fn rows_from_result(result: &QueryRowsResult) -> (Vec<String>, Vec<Vec<serde_json::Value>>) {
@@ -314,22 +420,49 @@ impl DatabaseDriver for CassandraDriver {
             .into_rows_result()
             .map_err(|e| anyhow!("{}", e))?;
 
-        let mut columns = Vec::new();
+        // `position` is only meaningful within a kind (0..n for the
+        // partition and clustering keys, -1 for every static/regular
+        // column), so sort by kind first. This matches the order in
+        // which `SELECT *` returns cells: partition keys, clustering
+        // keys, then the remaining columns by name.
+        let mut keyed: Vec<(u8, i32, ColumnInfo)> = Vec::new();
         if let Ok(rows) = result.rows::<(String, String, String, i32)>() {
             for (col_name, col_type, kind, position) in rows.flatten() {
                 let is_pk = kind == "partition_key" || kind == "clustering";
-                columns.push(ColumnInfo {
-                    name: col_name,
-                    data_type: col_type,
-                    is_nullable: !is_pk,
-                    is_primary_key: is_pk,
-                    default_value: None,
-                    ordinal_position: position,
-                    is_auto_generated: false,
-                });
+                let rank = match kind.as_str() {
+                    "partition_key" => 0,
+                    "clustering" => 1,
+                    "static" => 2,
+                    _ => 3,
+                };
+                keyed.push((
+                    rank,
+                    position,
+                    ColumnInfo {
+                        name: col_name,
+                        data_type: col_type,
+                        is_nullable: !is_pk,
+                        is_primary_key: is_pk,
+                        default_value: None,
+                        ordinal_position: position,
+                        is_auto_generated: false,
+                    },
+                ));
             }
         }
-        columns.sort_by_key(|c| c.ordinal_position);
+        keyed.sort_by(|a, b| {
+            (a.0, a.1)
+                .cmp(&(b.0, b.1))
+                .then_with(|| a.2.name.cmp(&b.2.name))
+        });
+        let columns = keyed
+            .into_iter()
+            .enumerate()
+            .map(|(i, (_, _, mut c))| {
+                c.ordinal_position = i as i32 + 1;
+                c
+            })
+            .collect();
         Ok(columns)
     }
 
@@ -433,35 +566,6 @@ impl DatabaseDriver for CassandraDriver {
             None => String::new(),
         };
 
-        // Total row count -- previously we computed `LIMIT (offset + limit)`,
-        // pulled the entire window into memory, then reported the fetched
-        // page size as `total_rows`. That meant pagination UI was wrong
-        // (total stuck at the page boundary) and deep pages OOM'd.
-        //
-        // CQL has no real OFFSET, so we do it in two stages:
-        //   1. `SELECT COUNT(*) ... [WHERE ...]` for the true total.
-        //      `ALLOW FILTERING` is required when the WHERE references
-        //      non-key columns; we always send it for consistency.
-        //   2. `SELECT * ... [WHERE ...] LIMIT (offset + limit)` for the
-        //      data, then skip+take in Rust. We can't avoid loading
-        //      `offset` rows -- that's a CQL limitation -- but at least
-        //      the total is now correct.
-        let count_cql = format!(
-            "SELECT COUNT(*) FROM {}{} ALLOW FILTERING",
-            qualified, where_clause
-        );
-        let count_result = self
-            .session
-            .query_unpaged(count_cql.as_str(), &[])
-            .await
-            .map_err(|e| anyhow!("{}", e))?
-            .into_rows_result()
-            .map_err(|e| anyhow!("{}", e))?;
-        let total_rows: i64 = count_result
-            .first_row::<(i64,)>()
-            .map(|(c,)| c)
-            .unwrap_or(0);
-
         let mut cql = format!("SELECT * FROM {}{}", qualified, where_clause);
 
         if !sort.is_empty() {
@@ -492,28 +596,84 @@ impl DatabaseDriver for CassandraDriver {
             cql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
 
-        // Saturating add prevents an integer overflow if the caller
-        // passes hostile pagination parameters; the worst that can
-        // happen is we send the largest representable LIMIT, which
-        // Cassandra will then reject or truncate cleanly.
-        let fetch_limit = offset.saturating_add(limit);
-        cql.push_str(&format!(" LIMIT {} ALLOW FILTERING", fetch_limit));
+        // CQL has no OFFSET, so the first `offset` rows still have to
+        // be read and skipped. Fetch them page by page (instead of one
+        // unpaged response holding offset+limit rows), keep only the
+        // requested window plus one extra row to know whether another
+        // page exists, and stop as soon as that is reached. Saturating
+        // arithmetic keeps hostile pagination parameters from
+        // overflowing.
+        let wanted = offset.saturating_add(limit).saturating_add(1);
+        cql.push_str(&format!(
+            " LIMIT {} ALLOW FILTERING",
+            wanted.min(i32::MAX as u64)
+        ));
+        let page_size = limit.saturating_add(1).clamp(1, 5000) as i32;
+        let mut statement = scylla::statement::Statement::new(cql);
+        statement.set_page_size(page_size);
 
-        let result = self
-            .session
-            .query_unpaged(cql.as_str(), &[])
-            .await
-            .map_err(|e| anyhow!("{}", e))?
-            .into_rows_result()
-            .map_err(|e| anyhow!("{}", e))?;
+        let mut paging_state = PagingState::start();
+        let mut result_columns: Option<Vec<String>> = None;
+        let mut seen: u64 = 0;
+        let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+        loop {
+            let (page, paging_response) = self
+                .session
+                .query_single_page(statement.clone(), &[], paging_state)
+                .await
+                .map_err(|e| anyhow!("{}", e))?;
+            let page = page.into_rows_result().map_err(|e| anyhow!("{}", e))?;
+            let (names, page_rows) = rows_from_result(&page);
+            if result_columns.is_none() {
+                result_columns = Some(names);
+            }
+            for row in page_rows {
+                if seen >= offset && (rows.len() as u64) <= limit {
+                    rows.push(row);
+                }
+                seen += 1;
+            }
+            if (rows.len() as u64) > limit || seen >= wanted {
+                break;
+            }
+            match paging_response {
+                PagingStateResponse::HasMorePages { state } => paging_state = state,
+                PagingStateResponse::NoMorePages => break,
+            }
+        }
+        let has_more = (rows.len() as u64) > limit;
+        rows.truncate(limit as usize);
 
-        let (_, all_rows) = rows_from_result(&result);
+        // Header order must match cell order exactly: the grid looks up
+        // primary-key values by header index, so a mismatch makes edits
+        // target the wrong row. Use the result's own column specs as
+        // the source of truth and attach catalog metadata by name.
+        let columns = align_columns_to_result(columns, result_columns.unwrap_or_default());
 
-        let rows: Vec<Vec<serde_json::Value>> = all_rows
-            .into_iter()
-            .skip(offset as usize)
-            .take(limit as usize)
-            .collect();
+        // An exact `COUNT(*)` needs a full scan in Cassandra and times
+        // out (or is refused) on large tables. It is best-effort: when
+        // it fails, report a lower bound that still lets the grid page
+        // forward (one past the current window when more rows exist).
+        let fetched_through = offset + rows.len() as u64 + u64::from(has_more);
+        let count_cql = format!(
+            "SELECT COUNT(*) FROM {}{} ALLOW FILTERING",
+            qualified, where_clause
+        );
+        let counted = match self.session.query_unpaged(count_cql.as_str(), &[]).await {
+            Ok(res) => res
+                .into_rows_result()
+                .ok()
+                .and_then(|r| r.first_row::<(i64,)>().ok())
+                .map(|(c,)| c),
+            Err(e) => {
+                log::warn!("Cassandra COUNT(*) failed, using approximate total: {}", e);
+                None
+            }
+        };
+        let total_rows = match counted {
+            Some(c) => c.max(fetched_through as i64),
+            None => fetched_through as i64,
+        };
 
         Ok(TableData {
             columns,
@@ -650,6 +810,21 @@ impl DatabaseDriver for CassandraDriver {
         let tbl = &changes.table;
         let qualified = format!("{}.{}", quote_ident(ks), quote_ident(tbl));
 
+        // Column types let numeric values that arrive as strings (big
+        // integers / exact decimals the frontend cannot hold as JS
+        // numbers) be written as bare numeric literals: CQL rejects a
+        // quoted string for bigint/varint/decimal columns.
+        let col_types: std::collections::HashMap<String, String> = self
+            .list_columns(ks, ks, tbl)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.name, c.data_type))
+            .collect();
+        let lit = |col: &str, val: &serde_json::Value| -> String {
+            typed_cql_literal(col_types.get(col).map(String::as_str), val)
+        };
+
         let mut stmts = Vec::new();
 
         for update in &changes.updates {
@@ -659,13 +834,13 @@ impl DatabaseDriver for CassandraDriver {
             let pk_clause: Vec<String> = update
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_cql_literal(val)))
+                .map(|(col, val)| format!("{} = {}", quote_ident(col), lit(col, val)))
                 .collect();
             stmts.push(format!(
                 "UPDATE {} SET {} = {} WHERE {}",
                 qualified,
                 quote_ident(&update.column_name),
-                json_to_cql_literal(&update.new_value),
+                lit(&update.column_name, &update.new_value),
                 pk_clause.join(" AND ")
             ));
         }
@@ -673,11 +848,7 @@ impl DatabaseDriver for CassandraDriver {
         for insert in &changes.inserts {
             let col_names: Vec<String> =
                 insert.values.iter().map(|(c, _)| quote_ident(c)).collect();
-            let vals: Vec<String> = insert
-                .values
-                .iter()
-                .map(|(_, v)| json_to_cql_literal(v))
-                .collect();
+            let vals: Vec<String> = insert.values.iter().map(|(c, v)| lit(c, v)).collect();
             stmts.push(format!(
                 "INSERT INTO {} ({}) VALUES ({})",
                 qualified,
@@ -693,7 +864,7 @@ impl DatabaseDriver for CassandraDriver {
             let pk_clause: Vec<String> = delete
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_cql_literal(val)))
+                .map(|(col, val)| format!("{} = {}", quote_ident(col), lit(col, val)))
                 .collect();
             stmts.push(format!(
                 "DELETE FROM {} WHERE {}",
