@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 use crate::db::DatabaseDriver;
 use crate::models::*;
 use crate::util::path::expand_tilde;
-use crate::util::sql::{split_sql_statements, statement_is_select_like};
+use crate::util::sql::{
+    ensure_row_matched, i64_to_json, script_transaction_state, split_sql_statements,
+    statement_is_select_like, ScriptTxn,
+};
 
 pub struct SqliteDriver {
     pool: SqlitePool,
@@ -72,8 +75,14 @@ fn sqlite_row_to_json_values(
     row: &sqlx::sqlite::SqliteRow,
     col_count: usize,
 ) -> Vec<serde_json::Value> {
+    let width = row.len();
     let mut values = Vec::with_capacity(col_count);
     for i in 0..col_count {
+        // Never index past the row's own width.
+        if i >= width {
+            values.push(serde_json::Value::Null);
+            continue;
+        }
         let col = row.column(i);
         let type_name = col.type_info().name();
         let val: serde_json::Value = match type_name {
@@ -85,8 +94,8 @@ fn sqlite_row_to_json_values(
             "INTEGER" => row
                 .try_get::<i64, _>(i)
                 .ok()
-                .map(|v| serde_json::Value::Number(v.into()))
-                .unwrap_or(serde_json::Value::Null),
+                .map(i64_to_json)
+                .unwrap_or_else(|| decode_dynamic_sqlite_cell(row, i)),
             "REAL" => row
                 .try_get::<f64, _>(i)
                 .ok()
@@ -135,7 +144,7 @@ fn sqlite_row_to_json_values(
 /// decoder accepts the cell first.
 fn decode_dynamic_sqlite_cell(row: &sqlx::sqlite::SqliteRow, i: usize) -> serde_json::Value {
     if let Ok(Some(n)) = row.try_get::<Option<i64>, _>(i) {
-        return serde_json::Value::Number(n.into());
+        return i64_to_json(n);
     }
     if let Ok(Some(n)) = row.try_get::<Option<f64>, _>(i) {
         if let Some(num) = serde_json::Number::from_f64(n) {
@@ -150,6 +159,72 @@ fn decode_dynamic_sqlite_cell(row: &sqlx::sqlite::SqliteRow, i: usize) -> serde_
         return serde_json::Value::String(format!("X'{}'", hex));
     }
     serde_json::Value::Null
+}
+
+async fn sqlite_run_statements(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    statements: &[String],
+    start: Instant,
+) -> Result<QueryResult> {
+    let Some((last, leading)) = statements.split_last() else {
+        anyhow::bail!("Query is empty");
+    };
+
+    // Run every non-last statement as a side-effect execute. Use
+    // rows_affected for any DML the user mixed in but discard the
+    // rowsets — only the last statement's output is shown.
+    let mut total_affected: u64 = 0;
+    for stmt in leading {
+        let result = sqlx::query(sqlx::AssertSqlSafe(stmt.clone()))
+            .execute(&mut **conn)
+            .await?;
+        total_affected = total_affected.saturating_add(result.rows_affected());
+    }
+
+    // SELECT / WITH / PRAGMA / EXPLAIN return rows; everything else
+    // just emits rows_affected.
+    let last = last.clone();
+    let last_is_select =
+        statement_is_select_like(&last, &["SELECT", "WITH", "PRAGMA", "EXPLAIN", "VALUES"]);
+
+    if last_is_select {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(last))
+            .fetch_all(&mut **conn)
+            .await?;
+        let elapsed = start.elapsed().as_millis() as u64;
+
+        let columns: Vec<String> = rows
+            .first()
+            .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
+            .unwrap_or_default();
+
+        let col_count = columns.len();
+        let data_rows: Vec<Vec<serde_json::Value>> = rows
+            .iter()
+            .map(|r| sqlite_row_to_json_values(r, col_count))
+            .collect();
+
+        Ok(QueryResult {
+            columns,
+            rows: data_rows,
+            rows_affected: 0,
+            execution_time_ms: elapsed,
+            is_select: true,
+        })
+    } else {
+        let result = sqlx::query(sqlx::AssertSqlSafe(last))
+            .execute(&mut **conn)
+            .await?;
+        let elapsed = start.elapsed().as_millis() as u64;
+
+        Ok(QueryResult {
+            columns: vec![],
+            rows: vec![],
+            rows_affected: total_affected.saturating_add(result.rows_affected()),
+            execution_time_ms: elapsed,
+            is_select: false,
+        })
+    }
 }
 
 fn quote_ident(name: &str) -> String {
@@ -182,38 +257,11 @@ fn sql_default_is_unsafe(s: &str) -> bool {
 /// markers `--` / `/* */`, nested `(SELECT ...)` subqueries, and
 /// `UNION SELECT` shape changes.
 fn filter_is_unsafe(filter: &str) -> bool {
-    let s = filter.trim();
-    if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return true;
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return true;
-    }
-    u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
+    filter_unsafe_reason(filter).is_some()
 }
 
 fn filter_unsafe_reason(filter: &str) -> Option<&'static str> {
-    let s = filter.trim();
-    if s.contains(';') {
-        return Some("statement terminator (`;`)");
-    }
-    if s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return Some("SQL comment markers (`--` / `/* */`)");
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return Some("nested `(SELECT ...)` subquery");
-    }
-    if u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
-    {
-        return Some("`UNION SELECT` clause");
-    }
-    None
+    crate::util::sql::filter_unsafe_reason_for(filter, crate::util::sql::SqlDialect::Generic)
 }
 
 fn format_bytes(bytes: i64) -> String {
@@ -491,27 +539,9 @@ impl DatabaseDriver for SqliteDriver {
         let start = Instant::now();
 
         // SQLite's `sqlite3_prepare_v2` compiles ONE statement per
-        // call. sqlx's `query().fetch_all()` uses prepare under the
-        // hood, so multi-statement inputs like `CREATE VIEW v ...;
-        // SELECT * FROM v;` only ever compile the first statement —
-        // the trailing SELECT never runs. The previous code routed
-        // on the FIRST keyword of the whole input ("CREATE" → exec
-        // path), which created the view but discarded the SELECT's
-        // rows entirely.
-        //
-        // Fix: split the input into individual statements, run each
-        // one in sequence, and return rows from the LAST one (if
-        // it's SELECT-like). This is what every SQL CLI does
-        // naturally — psql, sqlite3 shell, mysql client — and
-        // matches what users expect when they paste a DDL+DML
-        // script into the Query tab.
-        //
-        // TODO(#XXX): the same fix should be applied to
-        // pg_common::pg_execute_query, mysql_common::my_execute_query,
-        // and mssql::execute_query — they all have the same
-        // first-keyword routing bug. Doing one driver at a time
-        // here to keep the fix scope minimal; this commit is on the
-        // critical path of issue #126 testing.
+        // call, so the input is split into individual statements, run
+        // in sequence, and the result of the LAST one is returned (if
+        // it's SELECT-like) — what every SQL CLI does.
         let statements = split_sql_statements(sql);
 
         // Empty input or only comments / whitespace.
@@ -525,69 +555,31 @@ impl DatabaseDriver for SqliteDriver {
             });
         }
 
-        // Run every non-last statement as a side-effect execute.
-        // Use rows_affected for any DML the user mixed in but
-        // discard the rowsets — only the last statement's output
-        // is shown to the user, by convention.
-        let mut total_affected: u64 = 0;
-        for stmt in &statements[..statements.len() - 1] {
-            let stmt_owned = stmt.clone();
-            let result = sqlx::query(sqlx::AssertSqlSafe(stmt_owned))
-                .execute(&self.pool)
-                .await?;
-            total_affected = total_affected.saturating_add(result.rows_affected());
+        // One pinned connection for the whole run, so BEGIN ... COMMIT
+        // and TEMP tables created by earlier statements are visible to
+        // later ones.
+        let mut conn = self.pool.acquire().await?;
+        let outcome = sqlite_run_statements(&mut conn, &statements, start).await;
+
+        // Never return the connection to the pool inside a transaction.
+        let txn = script_transaction_state(&statements);
+        let left_open = outcome.is_ok() && txn == ScriptTxn::LeftOpen;
+        if txn != ScriptTxn::Untouched && (outcome.is_err() || left_open) {
+            if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+                // "cannot rollback - no transaction is active" means the
+                // connection is already clean.
+                if !e.to_string().contains("no transaction is active") {
+                    conn.close_on_drop();
+                }
+            }
         }
-
-        // Decide how to run the last statement based on its leading
-        // keyword. SELECT / WITH / PRAGMA / EXPLAIN return rows;
-        // everything else just emits rows_affected.
-        let last = statements.last().unwrap().clone();
-        let last_is_select =
-            statement_is_select_like(&last, &["SELECT", "WITH", "PRAGMA", "EXPLAIN"]);
-
-        if last_is_select {
-            let rows = sqlx::query(sqlx::AssertSqlSafe(last))
-                .fetch_all(&self.pool)
-                .await?;
-            let elapsed = start.elapsed().as_millis() as u64;
-
-            let columns: Vec<String> = if rows.is_empty() {
-                vec![]
-            } else {
-                rows[0]
-                    .columns()
-                    .iter()
-                    .map(|c| c.name().to_string())
-                    .collect()
-            };
-
-            let col_count = columns.len();
-            let data_rows: Vec<Vec<serde_json::Value>> = rows
-                .iter()
-                .map(|r| sqlite_row_to_json_values(r, col_count))
-                .collect();
-
-            Ok(QueryResult {
-                columns,
-                rows: data_rows,
-                rows_affected: 0,
-                execution_time_ms: elapsed,
-                is_select: true,
-            })
-        } else {
-            let result = sqlx::query(sqlx::AssertSqlSafe(last))
-                .execute(&self.pool)
-                .await?;
-            let elapsed = start.elapsed().as_millis() as u64;
-
-            Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                rows_affected: total_affected.saturating_add(result.rows_affected()),
-                execution_time_ms: elapsed,
-                is_select: false,
-            })
+        if left_open {
+            anyhow::bail!(
+                "The script left a transaction open; it was rolled back. \
+                 Include COMMIT (or ROLLBACK) in the same run."
+            );
         }
+        outcome
     }
 
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {
@@ -1064,9 +1056,10 @@ impl DatabaseDriver for SqliteDriver {
                 set_clause,
                 where_clause.join(" AND ")
             );
-            sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            let result = sqlx::query(sqlx::AssertSqlSafe(&*sql))
                 .execute(&mut *tx)
                 .await?;
+            ensure_row_matched(result.rows_affected(), "update", &update.primary_key_values)?;
         }
 
         for insert in &changes.inserts {
@@ -1101,9 +1094,10 @@ impl DatabaseDriver for SqliteDriver {
                 quote_ident(&changes.table),
                 where_clause.join(" AND ")
             );
-            sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            let result = sqlx::query(sqlx::AssertSqlSafe(&*sql))
                 .execute(&mut *tx)
                 .await?;
+            ensure_row_matched(result.rows_affected(), "delete", &delete.primary_key_values)?;
         }
 
         tx.commit().await?;

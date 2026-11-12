@@ -3,7 +3,10 @@ use sqlx::{Column, MySqlPool, Row, TypeInfo};
 use std::time::Instant;
 
 use crate::models::*;
-use crate::util::sql::{split_sql_statements, statement_is_select_like};
+use crate::util::sql::{
+    ensure_row_matched, is_numeric_type_name, numeric_literal, script_transaction_state,
+    split_sql_statements_for, statement_is_select_like, ScriptTxn, SqlDialect,
+};
 
 /// Returns true when the server supports `ALTER TABLE ... RENAME COLUMN ... TO ...`.
 ///
@@ -113,92 +116,113 @@ mod version_tests {
     }
 }
 
+/// Convert a MySQL / MariaDB / TiDB row into JSON cells.
+///
+/// Rows should be fetched with the text protocol (`sqlx::raw_sql`): then
+/// every value arrives as the server's text, which keeps DECIMAL exact
+/// and lets values that the typed decoders reject (TIME beyond
+/// 00:00-24:00, zero dates, YEAR, ...) fall back to that text instead
+/// of rendering as NULL. Never panics on a column-count mismatch.
 pub fn mysql_row_to_json_values(
     row: &sqlx::mysql::MySqlRow,
     col_count: usize,
 ) -> Vec<serde_json::Value> {
-    let mut values = Vec::with_capacity(col_count);
-    for i in 0..col_count {
-        let col = row.column(i);
-        let type_name = col.type_info().name();
-        let val: serde_json::Value = match type_name {
-            "BOOLEAN" | "TINYINT(1)" => row
-                .try_get::<bool, _>(i)
-                .ok()
-                .map(serde_json::Value::Bool)
-                .unwrap_or(serde_json::Value::Null),
-            "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" => row
-                .try_get::<i32, _>(i)
-                .ok()
-                .map(|v| serde_json::Value::Number(v.into()))
-                .unwrap_or(serde_json::Value::Null),
-            "BIGINT" => row
-                .try_get::<i64, _>(i)
-                .ok()
-                .map(|v| serde_json::Value::Number(v.into()))
-                .unwrap_or(serde_json::Value::Null),
-            "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" | "INT UNSIGNED" => row
-                .try_get::<u32, _>(i)
-                .ok()
-                .map(|v| serde_json::Value::Number(v.into()))
-                .unwrap_or(serde_json::Value::Null),
-            "BIGINT UNSIGNED" => row
-                .try_get::<u64, _>(i)
-                .ok()
-                .map(|v| serde_json::Value::Number(v.into()))
-                .unwrap_or(serde_json::Value::Null),
-            "FLOAT" | "DOUBLE" => row
-                .try_get::<f64, _>(i)
-                .ok()
-                .and_then(serde_json::Number::from_f64)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
-            "DECIMAL" | "NEWDECIMAL" => row
-                .try_get::<rust_decimal::Decimal, _>(i)
-                .ok()
-                .map(|d| {
-                    use rust_decimal::prelude::ToPrimitive;
-                    d.to_f64()
-                        .and_then(serde_json::Number::from_f64)
-                        .map(serde_json::Value::Number)
-                        .unwrap_or(serde_json::Value::String(d.to_string()))
-                })
-                .unwrap_or(serde_json::Value::Null),
-            "JSON" => row
-                .try_get::<serde_json::Value, _>(i)
-                .unwrap_or(serde_json::Value::Null),
-            "DATETIME" | "TIMESTAMP" => row
-                .try_get::<chrono::NaiveDateTime, _>(i)
-                .ok()
-                .map(|dt| serde_json::Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string()))
-                .unwrap_or(serde_json::Value::Null),
-            "DATE" => row
-                .try_get::<chrono::NaiveDate, _>(i)
-                .ok()
-                .map(|d| serde_json::Value::String(d.format("%Y-%m-%d").to_string()))
-                .unwrap_or(serde_json::Value::Null),
-            "TIME" => row
-                .try_get::<chrono::NaiveTime, _>(i)
-                .ok()
-                .map(|t| serde_json::Value::String(t.format("%H:%M:%S").to_string()))
-                .unwrap_or(serde_json::Value::Null),
-            "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" => row
-                .try_get::<Vec<u8>, _>(i)
-                .ok()
-                .map(|b| {
-                    let hex_str: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
-                    serde_json::Value::String(format!("0x{}", hex_str))
-                })
-                .unwrap_or(serde_json::Value::Null),
-            _ => row
-                .try_get::<String, _>(i)
-                .ok()
-                .map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null),
-        };
-        values.push(val);
+    let width = row.len();
+    (0..col_count)
+        .map(|i| {
+            if i < width {
+                mysql_cell_to_json(row, i)
+            } else {
+                serde_json::Value::Null
+            }
+        })
+        .collect()
+}
+
+fn hex_json(prefix: &str, bytes: &[u8]) -> serde_json::Value {
+    let hex_str: String = bytes.iter().map(|byte| format!("{:02x}", byte)).collect();
+    serde_json::Value::String(format!("{}{}", prefix, hex_str))
+}
+
+fn mysql_cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Value {
+    use crate::util::sql::{exact_numeric_text_to_json, i64_to_json, u64_to_json};
+    use serde_json::Value;
+    use sqlx::ValueRef;
+
+    let raw = match row.try_get_raw(i) {
+        Ok(raw) => raw,
+        Err(_) => return Value::Null,
+    };
+    if raw.is_null() {
+        return Value::Null;
     }
-    values
+    let type_name = raw.type_info().name().to_string();
+    // Raw value bytes (the server's text for text-protocol rows).
+    let bytes = || row.try_get_unchecked::<Vec<u8>, _>(i).ok();
+    let text = || bytes().and_then(|b| String::from_utf8(b).ok());
+
+    let decoded: Option<Value> = match type_name.as_str() {
+        "BOOLEAN" => row.try_get::<bool, _>(i).ok().map(Value::Bool),
+        "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "BIGINT" => {
+            row.try_get::<i64, _>(i).ok().map(i64_to_json)
+        }
+        "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" | "INT UNSIGNED"
+        | "BIGINT UNSIGNED" => row.try_get::<u64, _>(i).ok().map(u64_to_json),
+        "FLOAT" | "DOUBLE" => row
+            .try_get::<f64, _>(i)
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number),
+        "DECIMAL" => text().map(|t| exact_numeric_text_to_json(&t)).or_else(|| {
+            row.try_get::<rust_decimal::Decimal, _>(i)
+                .ok()
+                .map(|d| exact_numeric_text_to_json(&d.to_string()))
+        }),
+        "YEAR" => text()
+            .and_then(|t| t.trim().parse::<i64>().ok())
+            .map(|y| Value::Number(y.into())),
+        "BIT" => bytes().map(|b| {
+            if b.len() <= 8 {
+                let v = b
+                    .iter()
+                    .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte));
+                u64_to_json(v)
+            } else {
+                hex_json("0x", &b)
+            }
+        }),
+        "JSON" => row.try_get::<serde_json::Value, _>(i).ok(),
+        "DATETIME" | "TIMESTAMP" => row
+            .try_get::<chrono::NaiveDateTime, _>(i)
+            .ok()
+            .map(|dt| Value::String(dt.format("%Y-%m-%d %H:%M:%S%.f").to_string())),
+        "DATE" => row
+            .try_get::<chrono::NaiveDate, _>(i)
+            .ok()
+            .map(|d| Value::String(d.format("%Y-%m-%d").to_string())),
+        "TIME" => row
+            .try_get::<chrono::NaiveTime, _>(i)
+            .ok()
+            .map(|t| Value::String(t.format("%H:%M:%S%.f").to_string())),
+        "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" | "GEOMETRY" => {
+            bytes().map(|b| hex_json("0x", &b))
+        }
+        _ => None,
+    };
+    if let Some(v) = decoded {
+        return v;
+    }
+
+    // Everything else (strings, ENUM/SET, and values a typed decoder
+    // rejected such as `0000-00-00` or `-838:59:59`): the server text,
+    // or hex when it is not valid UTF-8.
+    match bytes() {
+        Some(b) => match String::from_utf8(b) {
+            Ok(s) => Value::String(s),
+            Err(e) => hex_json("0x", e.as_bytes()),
+        },
+        None => Value::String(format!("<{} value>", type_name)),
+    }
 }
 
 pub fn quote_ident(name: &str) -> String {
@@ -272,40 +296,13 @@ pub fn mysql_variable_category(name: &str) -> &str {
 /// matrix is identical across drivers — see the doc comment there for
 /// the rationale and the full list of patterns blocked.
 pub fn filter_is_unsafe(filter: &str) -> bool {
-    let s = filter.trim();
-    if s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return true;
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return true;
-    }
-    u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
+    filter_unsafe_reason(filter).is_some()
 }
 
 /// Mirrors `pg_common::filter_unsafe_reason` so MySQL-family drivers
 /// can produce the same precise error messages.
 pub fn filter_unsafe_reason(filter: &str) -> Option<&'static str> {
-    let s = filter.trim();
-    if s.contains(';') {
-        return Some("statement terminator (`;`)");
-    }
-    if s.contains("--") || s.contains("/*") || s.contains("*/") {
-        return Some("SQL comment markers (`--` / `/* */`)");
-    }
-    let u = s.to_uppercase();
-    if u.contains("(SELECT") {
-        return Some("nested `(SELECT ...)` subquery");
-    }
-    if u.contains(" UNION SELECT")
-        || u.contains(" UNION ALL SELECT")
-        || u.contains(" UNION DISTINCT SELECT")
-    {
-        return Some("`UNION SELECT` clause");
-    }
-    None
+    crate::util::sql::filter_unsafe_reason_for(filter, crate::util::sql::SqlDialect::MySql)
 }
 
 pub fn format_bytes(bytes: Option<i64>) -> String {
@@ -622,7 +619,9 @@ pub async fn my_fetch_rows_impl(
         offset
     );
 
-    let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+    // Text protocol keeps DECIMAL exact and lets out-of-range values
+    // (TIME > 24h, zero dates) fall back to the server text.
+    let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
         .fetch_all(pool)
         .await?;
     let col_count = columns.len();
@@ -640,7 +639,7 @@ pub async fn my_fetch_rows_impl(
     })
 }
 
-pub async fn my_execute_query(pool: &MySqlPool, _database: &str, sql: &str) -> Result<QueryResult> {
+pub async fn my_execute_query(pool: &MySqlPool, database: &str, sql: &str) -> Result<QueryResult> {
     let start = Instant::now();
 
     // Multi-statement support: see the matching comment in
@@ -653,39 +652,129 @@ pub async fn my_execute_query(pool: &MySqlPool, _database: &str, sql: &str) -> R
     // Everything runs on a single pinned connection so session
     // variables (`SET @x = ...;`) and temp tables survive between
     // statements.
-    let statements = split_sql_statements(sql);
+    let statements = split_sql_statements_for(sql, SqlDialect::MySql);
     if statements.is_empty() {
         return Err(anyhow::anyhow!("Query is empty"));
     }
 
     let mut conn = pool.acquire().await?;
 
-    for stmt in &statements[..statements.len() - 1] {
+    // Run against the database selected in the console. The pooled
+    // connection's default database is restored afterwards so other
+    // users of the pool are unaffected (also covers a `USE` inside the
+    // script itself).
+    let script_uses_db = statements
+        .iter()
+        .any(|s| statement_is_select_like(s, &["USE "]));
+    let wants_db = !database.trim().is_empty();
+    let original_db: Option<Option<String>> = if wants_db || script_uses_db {
+        let row = sqlx::raw_sql("SELECT DATABASE()")
+            .fetch_one(&mut *conn)
+            .await?;
+        Some(row.try_get::<Option<String>, _>(0).unwrap_or(None))
+    } else {
+        None
+    };
+    let mut switched = false;
+    if wants_db {
+        let current = original_db.clone().flatten();
+        if current.as_deref() != Some(database) {
+            let use_sql = format!("USE {}", quote_ident(database));
+            sqlx::raw_sql(sqlx::AssertSqlSafe(use_sql.as_str()))
+                .execute(&mut *conn)
+                .await?;
+            switched = true;
+        }
+    }
+
+    let outcome = my_run_statements(&mut conn, &statements, start).await;
+
+    // Never hand a connection back to the pool inside a transaction
+    // (sqlx does not roll back a user-issued BEGIN / START TRANSACTION)
+    // or with session state that changes how later queries behave.
+    let txn = script_transaction_state(&statements);
+    let left_open = outcome.is_ok() && txn == ScriptTxn::LeftOpen;
+    if txn != ScriptTxn::Untouched
+        && (outcome.is_err() || left_open)
+        && sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.is_err()
+    {
+        conn.close_on_drop();
+    }
+    let dirty_session = statements.iter().any(|s| {
+        statement_is_select_like(
+            s,
+            &[
+                "SET AUTOCOMMIT",
+                "SET @@AUTOCOMMIT",
+                "SET SESSION AUTOCOMMIT",
+                "LOCK TABLE",
+                "XA ",
+            ],
+        )
+    });
+    if dirty_session {
+        conn.close_on_drop();
+    }
+    if switched || script_uses_db {
+        match original_db.flatten() {
+            Some(db) => {
+                let use_sql = format!("USE {}", quote_ident(&db));
+                if sqlx::raw_sql(sqlx::AssertSqlSafe(use_sql.as_str()))
+                    .execute(&mut *conn)
+                    .await
+                    .is_err()
+                {
+                    conn.close_on_drop();
+                }
+            }
+            // There is no way to "un-USE" back to no default database.
+            None => conn.close_on_drop(),
+        }
+    }
+
+    if left_open {
+        anyhow::bail!(
+            "The script left a transaction open; it was rolled back. \
+             Include COMMIT (or ROLLBACK) in the same run."
+        );
+    }
+    outcome
+}
+
+async fn my_run_statements(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>,
+    statements: &[String],
+    start: Instant,
+) -> Result<QueryResult> {
+    let Some((last, leading)) = statements.split_last() else {
+        return Err(anyhow::anyhow!("Query is empty"));
+    };
+
+    for stmt in leading {
         sqlx::raw_sql(sqlx::AssertSqlSafe(stmt.as_str()))
-            .execute(&mut *conn)
+            .execute(&mut **conn)
             .await?;
     }
 
-    let last = statements.last().unwrap().as_str();
+    let last = last.as_str();
     let last_is_select = statement_is_select_like(
         last,
-        &["SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "WITH"],
+        &[
+            "SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "WITH", "TABLE", "VALUES",
+        ],
     );
 
     if last_is_select {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(last))
-            .fetch_all(&mut *conn)
+        // Text protocol: exact DECIMALs and server text for values the
+        // typed decoders cannot represent.
+        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(last))
+            .fetch_all(&mut **conn)
             .await?;
         let elapsed = start.elapsed().as_millis() as u64;
-        let columns: Vec<String> = if rows.is_empty() {
-            vec![]
-        } else {
-            rows[0]
-                .columns()
-                .iter()
-                .map(|c| c.name().to_string())
-                .collect()
-        };
+        let columns: Vec<String> = rows
+            .first()
+            .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
+            .unwrap_or_default();
         let col_count = columns.len();
         let data_rows: Vec<Vec<serde_json::Value>> = rows
             .iter()
@@ -700,7 +789,7 @@ pub async fn my_execute_query(pool: &MySqlPool, _database: &str, sql: &str) -> R
         })
     } else {
         let result = sqlx::raw_sql(sqlx::AssertSqlSafe(last))
-            .execute(&mut *conn)
+            .execute(&mut **conn)
             .await?;
         let elapsed = start.elapsed().as_millis() as u64;
         Ok(QueryResult {
@@ -797,6 +886,223 @@ pub async fn my_create_table(
 }
 
 #[allow(clippy::collapsible_match)]
+/// A column's current definition, read from `information_schema`, so
+/// `MODIFY COLUMN` / `CHANGE COLUMN` (which replace the whole
+/// definition) can be rebuilt with only the intended attribute changed.
+#[derive(Debug, Clone, Default)]
+pub struct MyColumnDef {
+    pub column_type: String,
+    pub is_nullable: bool,
+    pub default: Option<String>,
+    pub extra: String,
+    pub comment: String,
+    pub charset: Option<String>,
+    pub collation: Option<String>,
+    pub generation_expression: Option<String>,
+}
+
+async fn server_is_mariadb(pool: &MySqlPool) -> bool {
+    match sqlx::query("SELECT VERSION() AS v").fetch_one(pool).await {
+        Ok(row) => row
+            .try_get::<String, _>("v")
+            .map(|v| v.to_ascii_lowercase().contains("mariadb"))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+async fn my_fetch_column_def(
+    pool: &MySqlPool,
+    database: &str,
+    table: &str,
+    column: &str,
+) -> Result<MyColumnDef> {
+    let sql = "SELECT CAST(COLUMN_TYPE AS CHAR) AS COLUMN_TYPE, \
+                      CAST(IS_NULLABLE AS CHAR) AS IS_NULLABLE, \
+                      CAST(COLUMN_DEFAULT AS CHAR) AS COLUMN_DEFAULT, \
+                      CAST(EXTRA AS CHAR) AS EXTRA, \
+                      CAST(COLUMN_COMMENT AS CHAR) AS COLUMN_COMMENT, \
+                      CAST(CHARACTER_SET_NAME AS CHAR) AS CHARACTER_SET_NAME, \
+                      CAST(COLLATION_NAME AS CHAR) AS COLLATION_NAME, \
+                      CAST(GENERATION_EXPRESSION AS CHAR) AS GENERATION_EXPRESSION \
+               FROM information_schema.COLUMNS \
+               WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?";
+    let row = sqlx::query(sql)
+        .bind(database)
+        .bind(table)
+        .bind(column)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| anyhow!("Column {} not found in table {}", column, table))?;
+    let opt = |name: &str| -> Option<String> {
+        row.try_get::<Option<String>, _>(name)
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty())
+    };
+    Ok(MyColumnDef {
+        column_type: row.try_get("COLUMN_TYPE")?,
+        is_nullable: opt("IS_NULLABLE")
+            .map(|s| s.eq_ignore_ascii_case("YES"))
+            .unwrap_or(true),
+        default: row
+            .try_get::<Option<String>, _>("COLUMN_DEFAULT")
+            .ok()
+            .flatten(),
+        extra: opt("EXTRA").unwrap_or_default(),
+        comment: opt("COLUMN_COMMENT").unwrap_or_default(),
+        charset: opt("CHARACTER_SET_NAME"),
+        collation: opt("COLLATION_NAME"),
+        generation_expression: opt("GENERATION_EXPRESSION"),
+    })
+}
+
+/// Escape text for a MySQL single-quoted string literal (the server
+/// treats backslash as an escape by default).
+fn my_quote_string(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+/// `CURRENT_TIMESTAMP`, `current_timestamp(3)`, `NOW()`, ... — the
+/// temporal defaults that are written without quotes or parentheses.
+fn is_current_timestamp_expr(s: &str) -> bool {
+    let u = s.trim().to_ascii_uppercase();
+    let base = u.split('(').next().unwrap_or("").trim();
+    matches!(
+        base,
+        "CURRENT_TIMESTAMP"
+            | "NOW"
+            | "LOCALTIME"
+            | "LOCALTIMESTAMP"
+            | "CURRENT_DATE"
+            | "CURRENT_TIME"
+    ) && (!u.contains('(') || u.ends_with(')'))
+}
+
+/// Render the `DEFAULT ...` clause for an `information_schema`
+/// COLUMN_DEFAULT value.
+///
+/// * MariaDB (10.2.7+) already stores the default as SQL: literals
+///   quoted (`'pending'`), expressions bare (`current_timestamp()`),
+///   `NULL` for an explicit NULL default — so it is used verbatim.
+/// * MySQL / TiDB store literals unquoted (`pending`); expression
+///   defaults are flagged with `DEFAULT_GENERATED` in EXTRA and need
+///   parentheses unless they are a CURRENT_TIMESTAMP form.
+fn render_default(def: &MyColumnDef, mariadb: bool) -> Option<String> {
+    let d = def.default.as_ref()?;
+    if mariadb {
+        // MariaDB reports a nullable column without a default as
+        // `NULL`; that is the implicit default anyway, and it must not
+        // be carried over when the column becomes NOT NULL.
+        if d.trim().eq_ignore_ascii_case("NULL") {
+            return None;
+        }
+        return Some(format!("DEFAULT {}", d));
+    }
+    let lower_extra = def.extra.to_ascii_lowercase();
+    if is_current_timestamp_expr(d) {
+        return Some(format!("DEFAULT {}", d));
+    }
+    if lower_extra.contains("default_generated") {
+        let expr = d.trim();
+        if expr.starts_with('(') && expr.ends_with(')') {
+            return Some(format!("DEFAULT {}", expr));
+        }
+        return Some(format!("DEFAULT ({})", expr));
+    }
+    // Bit-value literals are reported as `b'101'`.
+    if (d.starts_with("b'") || d.starts_with("B'")) && d.ends_with('\'') && d.len() >= 3 {
+        return Some(format!("DEFAULT {}", d));
+    }
+    Some(format!("DEFAULT {}", my_quote_string(d)))
+}
+
+/// `ON UPDATE CURRENT_TIMESTAMP[(n)]` from EXTRA, if present.
+fn extract_on_update(extra: &str) -> Option<String> {
+    let lower = extra.to_ascii_lowercase();
+    let idx = lower.find("on update ")?;
+    let rest = &extra[idx + "on update ".len()..];
+    let expr = rest.split_whitespace().next()?;
+    Some(format!("ON UPDATE {}", expr))
+}
+
+fn type_is_character(column_type: &str) -> bool {
+    let lower = column_type.trim().to_ascii_lowercase();
+    [
+        "char",
+        "varchar",
+        "tinytext",
+        "text",
+        "mediumtext",
+        "longtext",
+        "enum",
+        "set",
+    ]
+    .iter()
+    .any(|t| {
+        lower == *t
+            || lower.starts_with(&format!("{}(", t))
+            || lower.starts_with(&format!("{} ", t))
+    })
+}
+
+/// Rebuild a full column definition (everything after the column name
+/// in `MODIFY` / `CHANGE COLUMN`). Charset/collation are only carried
+/// over when both the old and new type are character types and the new
+/// type does not spell out its own.
+pub fn render_column_definition(def: &MyColumnDef, mariadb: bool) -> String {
+    let mut out = def.column_type.clone();
+    let lower_type = def.column_type.to_ascii_lowercase();
+    let type_sets_charset = lower_type.contains("character set")
+        || lower_type.contains("charset")
+        || lower_type.contains("collate");
+    if type_is_character(&def.column_type) && !type_sets_charset {
+        if let Some(cs) = &def.charset {
+            out.push_str(&format!(" CHARACTER SET {}", cs));
+        }
+        if let Some(coll) = &def.collation {
+            out.push_str(&format!(" COLLATE {}", coll));
+        }
+    }
+    let lower_extra = def.extra.to_ascii_lowercase();
+    if let Some(expr) = &def.generation_expression {
+        let kind = if lower_extra.contains("stored") || lower_extra.contains("persistent") {
+            "STORED"
+        } else {
+            "VIRTUAL"
+        };
+        out.push_str(&format!(" GENERATED ALWAYS AS ({}) {}", expr, kind));
+        // MariaDB rejects NULL / NOT NULL on generated columns.
+        if !mariadb && !def.is_nullable {
+            out.push_str(" NOT NULL");
+        }
+    } else {
+        out.push_str(if def.is_nullable {
+            " NULL"
+        } else {
+            " NOT NULL"
+        });
+        if let Some(d) = render_default(def, mariadb) {
+            out.push(' ');
+            out.push_str(&d);
+        }
+        if let Some(on_update) = extract_on_update(&def.extra) {
+            out.push(' ');
+            out.push_str(&on_update);
+        }
+        if lower_extra.contains("auto_increment") {
+            out.push_str(" AUTO_INCREMENT");
+        }
+    }
+    if lower_extra.contains("invisible") {
+        out.push_str(" INVISIBLE");
+    }
+    if !def.comment.is_empty() {
+        out.push_str(&format!(" COMMENT {}", my_quote_string(&def.comment)));
+    }
+    out
+}
+
 pub async fn my_alter_table(
     pool: &MySqlPool,
     database: &str,
@@ -827,10 +1133,8 @@ pub async fn my_alter_table(
             AlterTableOperation::SetDefault {
                 default_value: Some(d),
                 ..
-            } if !d.is_empty() => {
-                if sql_default_is_unsafe(d) {
-                    anyhow::bail!("Invalid character in default value");
-                }
+            } if !d.is_empty() && sql_default_is_unsafe(d) => {
+                anyhow::bail!("Invalid character in default value");
             }
             _ => {}
         }
@@ -881,12 +1185,8 @@ pub async fn my_alter_table(
                 // we fall back to the universal
                 // `CHANGE COLUMN <old> <new> <type>` form there.
                 // `CHANGE COLUMN` requires us to spell the column
-                // definition out, so we capture what we can preserve
-                // from INFORMATION_SCHEMA. This is a best-effort
-                // fallback: EXTRA flags, comments, and generated
-                // expressions are intentionally not carried over —
-                // each requires bespoke escaping and the only servers
-                // that take this branch are EOL or near-EOL.
+                // definition out, so it is rebuilt from
+                // INFORMATION_SCHEMA by `render_column_definition`.
                 if rename_column_supported(pool).await? {
                     format!(
                         "ALTER TABLE {} RENAME COLUMN {} TO {}",
@@ -895,40 +1195,17 @@ pub async fn my_alter_table(
                         quote_ident(new_name)
                     )
                 } else {
-                    let col_sql = "SELECT CAST(COLUMN_TYPE AS CHAR) AS COLUMN_TYPE, \
-                                           IS_NULLABLE, \
-                                           COLUMN_DEFAULT \
-                                   FROM information_schema.COLUMNS \
-                                   WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?";
-                    let row = sqlx::query(col_sql)
-                        .bind(database)
-                        .bind(&current_table)
-                        .bind(old_name)
-                        .fetch_optional(pool)
-                        .await?
-                        .ok_or_else(|| {
-                            anyhow!("Column {} not found in table {}", old_name, current_table)
-                        })?;
-                    let col_type: String = row.get("COLUMN_TYPE");
-                    let is_nullable: String = row.get("IS_NULLABLE");
-                    let default_value: Option<String> = row.try_get("COLUMN_DEFAULT").ok();
-                    let null_part = if is_nullable.eq_ignore_ascii_case("NO") {
-                        " NOT NULL"
-                    } else {
-                        ""
-                    };
-                    let default_part = match default_value {
-                        Some(d) if !d.is_empty() => format!(" DEFAULT {}", d),
-                        _ => String::new(),
-                    };
+                    // `CHANGE COLUMN` replaces the whole definition, so
+                    // rebuild it from information_schema to keep every
+                    // attribute (default, AUTO_INCREMENT, ON UPDATE,
+                    // comment, charset/collation).
+                    let def = my_fetch_column_def(pool, database, &current_table, old_name).await?;
                     format!(
-                        "ALTER TABLE {} CHANGE COLUMN {} {} {}{}{}",
+                        "ALTER TABLE {} CHANGE COLUMN {} {} {}",
                         table_ref,
                         quote_ident(old_name),
                         quote_ident(new_name),
-                        col_type,
-                        null_part,
-                        default_part
+                        render_column_definition(&def, server_is_mariadb(pool).await)
                     )
                 }
             }
@@ -936,42 +1213,32 @@ pub async fn my_alter_table(
                 column_name,
                 new_type,
             } => {
+                // MODIFY replaces the full definition: change only the
+                // type and keep nullability, default, AUTO_INCREMENT,
+                // ON UPDATE, comment and (for character types)
+                // charset/collation.
+                let mut def =
+                    my_fetch_column_def(pool, database, &current_table, column_name).await?;
+                def.column_type = new_type.clone();
                 format!(
                     "ALTER TABLE {} MODIFY COLUMN {} {}",
                     table_ref,
                     quote_ident(column_name),
-                    new_type
+                    render_column_definition(&def, server_is_mariadb(pool).await)
                 )
             }
             AlterTableOperation::SetNullable {
                 column_name,
                 nullable,
             } => {
-                let col_sql = "SELECT CAST(COLUMN_TYPE AS CHAR) AS COLUMN_TYPE \
-                               FROM information_schema.COLUMNS \
-                               WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?";
-                let row = sqlx::query(col_sql)
-                    .bind(database)
-                    .bind(&current_table)
-                    .bind(column_name)
-                    .fetch_optional(pool)
-                    .await?;
-                let col_type: String = row
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "Column {} not found in table {}",
-                            column_name,
-                            current_table
-                        )
-                    })?
-                    .get("COLUMN_TYPE");
-                let null_part = if *nullable { "" } else { " NOT NULL" };
+                let mut def =
+                    my_fetch_column_def(pool, database, &current_table, column_name).await?;
+                def.is_nullable = *nullable;
                 format!(
-                    "ALTER TABLE {} MODIFY COLUMN {} {}{}",
+                    "ALTER TABLE {} MODIFY COLUMN {} {}",
                     table_ref,
                     quote_ident(column_name),
-                    col_type,
-                    null_part
+                    render_column_definition(&def, server_is_mariadb(pool).await)
                 )
             }
             AlterTableOperation::SetDefault {
@@ -1144,7 +1411,56 @@ pub async fn my_validate_query(pool: &MySqlPool, sql: &str) -> Result<Option<Val
     }
 }
 
+/// `COLUMN_NAME -> COLUMN_TYPE` for one table.
+async fn my_column_types(
+    pool: &MySqlPool,
+    database: &str,
+    table: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    let rows = sqlx::query(
+        "SELECT CAST(COLUMN_NAME AS CHAR) AS n, CAST(COLUMN_TYPE AS CHAR) AS t \
+         FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+    )
+    .bind(database)
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| {
+            let n: String = r.try_get("n").ok()?;
+            let t: String = r.try_get("t").ok()?;
+            Some((n, t))
+        })
+        .collect())
+}
+
+/// Like `json_to_sql_literal`, but a string value for a numeric column
+/// is emitted as a bare literal once validated as a plain number.
+pub fn typed_sql_literal(data_type: Option<&str>, val: &serde_json::Value) -> String {
+    if let (Some(t), serde_json::Value::String(s)) = (data_type, val) {
+        if is_numeric_type_name(t) {
+            if let Some(n) = numeric_literal(s) {
+                return n.to_string();
+            }
+        }
+    }
+    json_to_sql_literal(val)
+}
+
 pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result<()> {
+    // Column types decide how string values are written: a string for an
+    // integer/decimal column (big ids the frontend cannot hold as a JS
+    // number) must be an unquoted literal, because MySQL compares a
+    // BIGINT column with a quoted string as DOUBLE and can match the
+    // wrong row.
+    let col_types: std::collections::HashMap<String, String> =
+        my_column_types(pool, &changes.database, &changes.table)
+            .await
+            .unwrap_or_default();
+    let lit = |col: &str, val: &serde_json::Value| -> String {
+        typed_sql_literal(col_types.get(col).map(String::as_str), val)
+    };
     let mut tx = pool.begin().await?;
     let fq_table = format!(
         "{}.{}",
@@ -1159,12 +1475,12 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
         let set_clause = format!(
             "{} = {}",
             quote_ident(&update.column_name),
-            json_to_sql_literal(&update.new_value)
+            lit(&update.column_name, &update.new_value)
         );
         let where_clause: Vec<String> = update
             .primary_key_values
             .iter()
-            .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_sql_literal(val)))
+            .map(|(col, val)| format!("{} = {}", quote_ident(col), lit(col, val)))
             .collect();
         let sql = format!(
             "UPDATE {} SET {} WHERE {}",
@@ -1172,18 +1488,18 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
             set_clause,
             where_clause.join(" AND ")
         );
-        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        // sqlx connects with CLIENT_FOUND_ROWS, so rows_affected counts
+        // matched rows: an UPDATE that writes identical values still
+        // reports 1 and is not mistaken for a missing row.
+        let result = sqlx::query(sqlx::AssertSqlSafe(&*sql))
             .execute(&mut *tx)
             .await?;
+        ensure_row_matched(result.rows_affected(), "update", &update.primary_key_values)?;
     }
 
     for insert in &changes.inserts {
         let cols: Vec<String> = insert.values.iter().map(|(c, _)| quote_ident(c)).collect();
-        let vals: Vec<String> = insert
-            .values
-            .iter()
-            .map(|(_, v)| json_to_sql_literal(v))
-            .collect();
+        let vals: Vec<String> = insert.values.iter().map(|(c, v)| lit(c, v)).collect();
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
             fq_table,
@@ -1202,16 +1518,17 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
         let where_clause: Vec<String> = delete
             .primary_key_values
             .iter()
-            .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_sql_literal(val)))
+            .map(|(col, val)| format!("{} = {}", quote_ident(col), lit(col, val)))
             .collect();
         let sql = format!(
             "DELETE FROM {} WHERE {}",
             fq_table,
             where_clause.join(" AND ")
         );
-        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        let result = sqlx::query(sqlx::AssertSqlSafe(&*sql))
             .execute(&mut *tx)
             .await?;
+        ensure_row_matched(result.rows_affected(), "delete", &delete.primary_key_values)?;
     }
 
     tx.commit().await?;
@@ -1622,5 +1939,81 @@ mod tests {
         let deserialized: ValidationError = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.message, err.message);
         assert!(deserialized.position.is_none());
+    }
+}
+
+#[cfg(test)]
+mod column_definition_tests {
+    use super::*;
+
+    fn def(t: &str) -> MyColumnDef {
+        MyColumnDef {
+            column_type: t.into(),
+            is_nullable: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mysql_literal_default_is_quoted() {
+        let mut d = def("varchar(20)");
+        d.is_nullable = false;
+        d.default = Some("it's".into());
+        d.comment = "a 'c'".into();
+        assert_eq!(
+            render_column_definition(&d, false),
+            "varchar(20) NOT NULL DEFAULT 'it''s' COMMENT 'a ''c'''"
+        );
+    }
+
+    #[test]
+    fn mariadb_default_is_verbatim_and_null_default_dropped() {
+        let mut d = def("varchar(20)");
+        d.default = Some("'pending'".into());
+        assert_eq!(
+            render_column_definition(&d, true),
+            "varchar(20) NULL DEFAULT 'pending'"
+        );
+        d.default = Some("NULL".into());
+        d.is_nullable = false;
+        assert_eq!(render_column_definition(&d, true), "varchar(20) NOT NULL");
+    }
+
+    #[test]
+    fn expression_defaults_and_extra_flags() {
+        let mut d = def("timestamp");
+        d.default = Some("CURRENT_TIMESTAMP".into());
+        d.extra = "DEFAULT_GENERATED on update CURRENT_TIMESTAMP".into();
+        assert_eq!(
+            render_column_definition(&d, false),
+            "timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+        );
+        let mut e = def("varchar(36)");
+        e.default = Some("uuid()".into());
+        e.extra = "DEFAULT_GENERATED".into();
+        assert_eq!(
+            render_column_definition(&e, false),
+            "varchar(36) NULL DEFAULT (uuid())"
+        );
+        let mut a = def("bigint");
+        a.is_nullable = false;
+        a.extra = "auto_increment".into();
+        assert_eq!(
+            render_column_definition(&a, false),
+            "bigint NOT NULL AUTO_INCREMENT"
+        );
+    }
+
+    #[test]
+    fn charset_only_for_character_types() {
+        let mut d = def("varchar(50)");
+        d.charset = Some("utf8mb4".into());
+        d.collation = Some("utf8mb4_bin".into());
+        assert_eq!(
+            render_column_definition(&d, false),
+            "varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL"
+        );
+        d.column_type = "int".into();
+        assert_eq!(render_column_definition(&d, false), "int NULL");
     }
 }

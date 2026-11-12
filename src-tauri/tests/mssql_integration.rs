@@ -2485,3 +2485,322 @@ async fn mssql_alter_table_add_duplicate_column_errors() {
         .await
         .ok();
 }
+
+// ---------------------------------------------------------------------------
+// Driver correctness regressions
+// ---------------------------------------------------------------------------
+
+fn mssql_changes(
+    db: &str,
+    tbl: &str,
+    updates: Vec<CellChange>,
+    deletes: Vec<DeleteRow>,
+) -> DataChanges {
+    DataChanges {
+        connection_id: "test".into(),
+        database: db.into(),
+        schema: SCHEMA.into(),
+        table: tbl.into(),
+        updates,
+        inserts: vec![],
+        deletes,
+    }
+}
+
+#[tokio::test]
+async fn mssql_date_time_types_render_as_iso_strings() {
+    let (driver, db) = mssql_driver!();
+    let r = driver
+        .execute_query(
+            &db,
+            "SELECT CAST('2024-01-02 03:04:05.123' AS datetime) AS dt, \
+                    CAST('2024-01-02 03:04:00' AS smalldatetime) AS sdt, \
+                    CAST('2024-01-02' AS date) AS d, \
+                    CAST('03:04:05.1234567' AS time(7)) AS t, \
+                    CAST('2024-01-02 03:04:05.5' AS datetime2(7)) AS dt2, \
+                    CAST('2024-01-02 03:04:05' AS datetime2(0)) AS dt2z, \
+                    CAST('2024-01-02 03:04:05.25 +05:30' AS datetimeoffset(7)) AS dto, \
+                    CAST(1234567890123456789 AS bigint) AS big, CAST(7 AS bigint) AS small",
+        )
+        .await
+        .unwrap();
+    let get = |name: &str| -> serde_json::Value {
+        let idx = r.columns.iter().position(|c| c == name).unwrap();
+        r.rows[0][idx].clone()
+    };
+    use serde_json::json;
+    assert_eq!(get("dt"), json!("2024-01-02 03:04:05.123"));
+    assert_eq!(get("sdt"), json!("2024-01-02 03:04:00"));
+    assert_eq!(get("d"), json!("2024-01-02"));
+    assert_eq!(get("t"), json!("03:04:05.1234567"));
+    assert_eq!(get("dt2"), json!("2024-01-02 03:04:05.5"));
+    assert_eq!(get("dt2z"), json!("2024-01-02 03:04:05"));
+    assert_eq!(get("dto"), json!("2024-01-02 03:04:05.25+05:30"));
+    assert_eq!(get("big"), json!("1234567890123456789"));
+    assert_eq!(get("small"), json!(7));
+}
+
+#[tokio::test]
+async fn mssql_datetime_primary_keys_round_trip_through_edits() {
+    let (driver, db) = mssql_driver!();
+    for (ty, value) in [
+        ("datetime", "2024-01-02 03:04:05.127"),
+        ("datetime2(7)", "2024-01-02 03:04:05.1234567"),
+        ("datetimeoffset(7)", "2024-01-02 03:04:05.5 +05:30"),
+        ("smalldatetime", "2024-01-02 03:04:00"),
+        ("date", "2024-01-02"),
+    ] {
+        let tbl = unique_table("mssql_dtpk");
+        driver
+            .execute_query(
+                &db,
+                &format!(
+                    "CREATE TABLE [{tbl}] (k {ty} NOT NULL PRIMARY KEY, v NVARCHAR(10)); \
+                     INSERT INTO [{tbl}] VALUES ('{value}', N'a')"
+                ),
+            )
+            .await
+            .unwrap();
+        let data = driver
+            .fetch_rows(&db, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+            .await
+            .unwrap();
+        let key = data.rows[0][0].clone();
+        assert!(key.is_string(), "{ty}: {key:?}");
+        let changes = mssql_changes(
+            &db,
+            &tbl,
+            vec![CellChange {
+                row_index: 0,
+                column_name: "v".into(),
+                old_value: serde_json::json!("a"),
+                new_value: serde_json::json!("b"),
+                primary_key_values: vec![("k".into(), key.clone())],
+            }],
+            vec![],
+        );
+        driver
+            .apply_changes(&changes)
+            .await
+            .unwrap_or_else(|e| panic!("{ty} key {key}: {e}"));
+        let after = driver
+            .fetch_rows(&db, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+            .await
+            .unwrap();
+        assert_eq!(after.rows[0][1], serde_json::json!("b"), "{ty}");
+        driver
+            .drop_object(&db, SCHEMA, &tbl, "TABLE")
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn mssql_explain_returns_showplan_xml() {
+    let (driver, db) = mssql_driver!();
+    let res = driver
+        .explain_query(&db, "SELECT name FROM sys.objects WHERE object_id = 1")
+        .await
+        .unwrap();
+    assert!(
+        res.raw_text.contains("ShowPlanXML"),
+        "unexpected plan: {}",
+        res.raw_text
+    );
+    // SHOWPLAN must be off again: a normal query returns rows.
+    let r = driver.execute_query(&db, "SELECT 1 AS one").await.unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!(1));
+    // A failing query still turns SHOWPLAN off.
+    let _ = driver
+        .explain_query(&db, "SELECT * FROM table_that_does_not_exist_xyz")
+        .await;
+    let r = driver.execute_query(&db, "SELECT 2 AS two").await.unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!(2));
+}
+
+#[tokio::test]
+async fn mssql_concurrent_queries_keep_their_database() {
+    let (driver, db) = mssql_driver!();
+    let a = async {
+        for _ in 0..25 {
+            let r = driver
+                .execute_query("master", "SELECT DB_NAME() AS d")
+                .await
+                .unwrap();
+            assert_eq!(r.rows[0][0], serde_json::json!("master"));
+        }
+    };
+    let b = async {
+        for _ in 0..25 {
+            let r = driver
+                .execute_query(&db, "SELECT DB_NAME() AS d")
+                .await
+                .unwrap();
+            assert_eq!(r.rows[0][0], serde_json::json!(db.clone()));
+        }
+    };
+    tokio::join!(a, b);
+}
+
+#[tokio::test]
+async fn mssql_big_integer_ids_and_missing_rows() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("mssql_bigid");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE [{tbl}] (id BIGINT PRIMARY KEY, note NVARCHAR(20)); \
+                 INSERT INTO [{tbl}] VALUES (1234567890123456789, N'a'), (1234567890123456790, N'b')"
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0][0], serde_json::json!("1234567890123456789"));
+    let changes = mssql_changes(
+        &db,
+        &tbl,
+        vec![CellChange {
+            row_index: 0,
+            column_name: "note".into(),
+            old_value: serde_json::json!("a"),
+            new_value: serde_json::json!("edited"),
+            primary_key_values: vec![("id".into(), data.rows[0][0].clone())],
+        }],
+        vec![DeleteRow {
+            primary_key_values: vec![("id".into(), data.rows[1][0].clone())],
+        }],
+    );
+    driver.apply_changes(&changes).await.unwrap();
+    let after = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(after.rows.len(), 1);
+    assert_eq!(after.rows[0][1], serde_json::json!("edited"));
+
+    // One matching and one missing update: everything rolls back.
+    let missing = mssql_changes(
+        &db,
+        &tbl,
+        vec![
+            CellChange {
+                row_index: 0,
+                column_name: "note".into(),
+                old_value: serde_json::json!("edited"),
+                new_value: serde_json::json!("again"),
+                primary_key_values: vec![("id".into(), data.rows[0][0].clone())],
+            },
+            CellChange {
+                row_index: 1,
+                column_name: "note".into(),
+                old_value: serde_json::json!("x"),
+                new_value: serde_json::json!("y"),
+                primary_key_values: vec![("id".into(), serde_json::json!(42))],
+            },
+        ],
+        vec![],
+    );
+    let err = driver.apply_changes(&missing).await.unwrap_err();
+    assert!(err.to_string().contains("no matching row"), "{err}");
+    let r = driver
+        .execute_query(&db, &format!("SELECT note FROM [{tbl}]"))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!("edited"));
+    // The shared connection is usable and not left in a transaction.
+    let r = driver
+        .execute_query(&db, "SELECT @@TRANCOUNT AS c")
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!(0));
+    driver
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mssql_import_data_is_all_or_nothing() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("mssql_imp_tx");
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE [{tbl}] (id INT PRIMARY KEY, v NVARCHAR(10))"),
+        )
+        .await
+        .unwrap();
+    // 250 rows span several insert batches; the duplicate key sits in a
+    // later batch so earlier batches would already have been written.
+    let mut rows: Vec<Vec<serde_json::Value>> = (0..250)
+        .map(|i| vec![serde_json::json!(i), serde_json::json!("x")])
+        .collect();
+    rows[200][0] = serde_json::json!(5);
+    let res = driver
+        .import_data(&db, SCHEMA, &tbl, &["id".into(), "v".into()], &rows)
+        .await;
+    assert!(res.is_err());
+    let r = driver
+        .execute_query(&db, &format!("SELECT COUNT(*) AS c FROM [{tbl}]"))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!(0));
+    let r = driver
+        .execute_query(&db, "SELECT @@TRANCOUNT AS c")
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!(0));
+    driver
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mssql_fetch_rows_without_pk_and_text_first_column() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("mssql_nopk_text");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE [{tbl}] (body TEXT, n INT); INSERT INTO [{tbl}] VALUES ('a', 1), ('b', 2)"
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows.len(), 2);
+
+    let only_text = unique_table("mssql_only_text");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE [{only_text}] (body NTEXT); INSERT INTO [{only_text}] VALUES (N'z')"
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(&db, SCHEMA, &only_text, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows.len(), 1);
+    driver
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+    driver
+        .drop_object(&db, SCHEMA, &only_text, "TABLE")
+        .await
+        .unwrap();
+}
