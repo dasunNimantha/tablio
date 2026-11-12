@@ -48,26 +48,32 @@ fn config_path() -> Option<PathBuf> {
 
 /// Glob-style match of `pat` against `name` for the OpenSSH-style `*`
 /// and `?` wildcards. `!pattern` negation is handled by the caller.
+///
+/// Iterative matcher that only backtracks to the most recent `*`, so it
+/// runs in O(pattern × name) time. Naive recursion is exponential on
+/// patterns like `*a*a*a*a*b`, which hangs on a crafted config line.
 fn glob_match(pat: &str, name: &str) -> bool {
-    fn rec(p: &[u8], n: &[u8]) -> bool {
-        match (p.first(), n.first()) {
-            (None, None) => true,
-            (Some(b'*'), _) => {
-                // `*` matches zero or more chars.
-                if rec(&p[1..], n) {
-                    return true;
-                }
-                if !n.is_empty() && rec(p, &n[1..]) {
-                    return true;
-                }
-                false
-            }
-            (Some(b'?'), Some(_)) => rec(&p[1..], &n[1..]),
-            (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => rec(&p[1..], &n[1..]),
-            _ => false,
+    let (p, n) = (pat.as_bytes(), name.as_bytes());
+    let (mut pi, mut ni) = (0, 0);
+    // Position after the last `*` seen, and the name index it was tried at.
+    let mut star: Option<(usize, usize)> = None;
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == b'?' || p[pi].eq_ignore_ascii_case(&n[ni])) && p[pi] != b'*' {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star = Some((pi + 1, ni));
+            pi += 1;
+        } else if let Some((sp, sn)) = star {
+            // Let the last `*` absorb one more character and retry.
+            pi = sp;
+            ni = sn + 1;
+            star = Some((sp, sn + 1));
+        } else {
+            return false;
         }
     }
-    rec(pat.as_bytes(), name.as_bytes())
+    p[pi..].iter().all(|&c| c == b'*')
 }
 
 /// `Host pat1 pat2 !pat3 ...` — match if any positive pattern matches
@@ -208,6 +214,31 @@ mod tests {
         assert!(glob_match("host?", "hosta"));
         assert!(!glob_match("host?", "host"));
         assert!(glob_match("Foo", "foo"), "case-insensitive");
+    }
+
+    #[test]
+    fn glob_star_edge_cases() {
+        assert!(glob_match("", ""));
+        assert!(!glob_match("", "a"));
+        assert!(glob_match("**", ""));
+        assert!(glob_match("a*b*c", "aXXbYYc"));
+        assert!(!glob_match("a*b*c", "aXXbYY"));
+        assert!(
+            glob_match("*b", "abab"),
+            "star must backtrack past an early match"
+        );
+        assert!(glob_match("?*", "x"));
+        assert!(!glob_match("?*", ""));
+    }
+
+    #[test]
+    fn glob_many_stars_is_not_exponential() {
+        // Exponential under naive recursion; must return instantly.
+        let pat = "*a".repeat(20) + "b";
+        let name = "a".repeat(63);
+        let start = std::time::Instant::now();
+        assert!(!glob_match(&pat, &name));
+        assert!(start.elapsed() < std::time::Duration::from_millis(100));
     }
 
     #[test]
