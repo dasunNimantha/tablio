@@ -10,6 +10,8 @@ import {
   useConnectionStore,
   withHostKeyMismatchRetry,
 } from "./connectionStore";
+import { useTabStore, type TabInfo } from "./tabStore";
+import { useAlterTableDraftStore } from "./alterTableDraftStore";
 
 function baseConfig(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
   return {
@@ -481,5 +483,62 @@ describe("withHostKeyMismatchRetry", () => {
     await expect(promise).rejects.toBe(mismatchError);
     expect(action).toHaveBeenCalledTimes(1);
     expect(api.forgetKnownHost).not.toHaveBeenCalled();
+  });
+});
+
+describe("connectionStore.removeConnection", () => {
+  beforeEach(() => {
+    resetStore();
+    useTabStore.setState({ tabs: [], activeTabId: null, dirtyTabs: {} });
+    vi.spyOn(api, "deleteConnection").mockResolvedValue(undefined);
+    vi.spyOn(api, "disconnect").mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function tab(id: string, connectionId: string): TabInfo {
+    return {
+      id, type: "table", title: id, connectionId, connectionColor: "#000",
+      database: "db", schema: "public", table: "t",
+    };
+  }
+
+  it("disconnects, forgets the active state and closes the connection's tabs and drafts", async () => {
+    useConnectionStore.setState({
+      connections: [baseConfig(), baseConfig({ id: "conn-2" })],
+      activeConnections: new Set(["conn-1", "conn-2"]),
+    });
+    useTabStore.getState().openTab(tab("a", "conn-1"));
+    useTabStore.getState().openTab(tab("b", "conn-2"));
+    useAlterTableDraftStore.getState().setDraft("conn-1:db:public:t", { tableNameLocal: "t" });
+    useAlterTableDraftStore.getState().setDraft("conn-2:db:public:t", { tableNameLocal: "t" });
+
+    await useConnectionStore.getState().removeConnection("conn-1");
+
+    expect(api.disconnect).toHaveBeenCalledWith("conn-1");
+    const st = useConnectionStore.getState();
+    expect(st.connections.map((c) => c.id)).toEqual(["conn-2"]);
+    expect(st.activeConnections.has("conn-1")).toBe(false);
+    expect(useTabStore.getState().tabs.map((t) => t.id)).toEqual(["b"]);
+    expect(useAlterTableDraftStore.getState().getDraft("conn-1:db:public:t")).toBeUndefined();
+    expect(useAlterTableDraftStore.getState().getDraft("conn-2:db:public:t")).toBeDefined();
+  });
+
+  it("still removes the connection when the backend disconnect fails", async () => {
+    vi.mocked(api.disconnect).mockRejectedValue(new Error("not connected"));
+    useConnectionStore.setState({ connections: [baseConfig()] });
+    await useConnectionStore.getState().removeConnection("conn-1");
+    expect(useConnectionStore.getState().connections).toEqual([]);
+  });
+
+  it("keeps everything when deleting the saved config fails", async () => {
+    vi.mocked(api.deleteConnection).mockRejectedValue(new Error("io"));
+    useConnectionStore.setState({ connections: [baseConfig()], activeConnections: new Set(["conn-1"]) });
+    await useConnectionStore.getState().removeConnection("conn-1");
+    expect(api.disconnect).not.toHaveBeenCalled();
+    expect(useConnectionStore.getState().connections).toHaveLength(1);
+    expect(useConnectionStore.getState().error).toContain("io");
   });
 });
