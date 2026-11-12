@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo } from "react";
 import { api, LockInfo } from "../../lib/tauri";
 import { Loader2, ChevronUp, ChevronDown, Search, Lock } from "lucide-react";
 import { usePolling } from "../../hooks/usePolling";
+import { useIsTabActive } from "../Tabs/tabActive";
 
 interface Props {
   connectionId: string;
@@ -33,7 +34,9 @@ export function DashboardLocks({ connectionId, paused }: Props) {
   // Visibility-aware, re-entrancy-safe polling. See usePolling and
   // DashboardSessions for context on why hand-rolled setInterval was
   // dangerous when the window stayed minimized for hours.
-  usePolling(fetchLocks, 2000, !paused);
+  // Background tabs stay mounted; don't poll them.
+  const tabActive = useIsTabActive();
+  usePolling(fetchLocks, 2000, !paused && tabActive);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {

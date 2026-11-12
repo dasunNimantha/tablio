@@ -1,5 +1,5 @@
 import type { ColumnInfo } from "./tauri";
-import { caseInsensitiveLike, quoteIdent, supportsIlike, type DbType } from "./sqlDialect";
+import { caseInsensitiveLike, quoteIdent, stringLiteral, supportsIlike, type DbType } from "./sqlDialect";
 
 export type JoinType = "AND" | "OR";
 
@@ -43,6 +43,11 @@ const NUMERIC_TYPE_RE = /int|float|double|decimal|numeric|real|serial/i;
  * MSSQL `[col]`) — see `sqlDialect.quoteIdent`. The default of `"col"`
  * applies when `dbType` isn't supplied so legacy callers keep working.
  *
+ * String values are escaped per dialect (`sqlDialect.stringLiteral`):
+ * MySQL-family engines additionally get backslashes doubled. LIKE /
+ * ILIKE values are user-written patterns, so `%` and `_` keep their
+ * wildcard meaning there; plain comparisons don't treat them specially.
+ *
  * `ILIKE` is rewritten to `LOWER(col) LIKE LOWER('value')` on dialects
  * that don't support it natively (everything except Postgres and
  * CockroachDB), so the operator stays meaningful in the UI regardless
@@ -72,14 +77,14 @@ export function buildWhereClause(
     }
     const value = c.value.trim();
     if (c.operator === "LIKE") {
-      return `${col} LIKE '${value.replace(/'/g, "''")}'`;
+      return `${col} LIKE ${stringLiteral(dbType, value)}`;
     }
     if (c.operator === "ILIKE") {
       // PG / CRDB get the native operator. Everywhere else falls back
       // to a portable LOWER(...) LIKE LOWER(...) rewrite so the user's
       // case-insensitive intent isn't silently dropped on engines that
       // don't have ILIKE.
-      const literal = `'${value.replace(/'/g, "''")}'`;
+      const literal = stringLiteral(dbType, value);
       return supportsIlike(dbType)
         ? `${col} ILIKE ${literal}`
         : caseInsensitiveLike(dbType, col, literal);
@@ -94,7 +99,7 @@ export function buildWhereClause(
     if (isNum && DECIMAL_LITERAL.test(value)) {
       return `${col} ${c.operator} ${value}`;
     }
-    return `${col} ${c.operator} '${value.replace(/'/g, "''")}'`;
+    return `${col} ${c.operator} ${stringLiteral(dbType, value)}`;
   };
 
   if (valid.length === 1) return toClause(valid[0]);

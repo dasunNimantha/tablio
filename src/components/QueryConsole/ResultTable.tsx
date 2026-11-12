@@ -9,8 +9,12 @@ import { useToastStore } from "../../stores/toastStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { useUserSettingsStore } from "../../stores/userSettingsStore";
-import { boolLiteral, quoteIdent, quoteQualified } from "../../lib/sqlDialect";
+import { boolLiteral, quoteIdent, quoteQualified, stringLiteral } from "../../lib/sqlDialect";
 import { readZoomFactor } from "../../lib/zoom";
+import type { SourceTable } from "./simpleSelect";
+import { cellToText, compareCellValues, editorInputToValue, isNumericType } from "../../lib/cellValues";
+import { useReportTabDirty } from "../../hooks/useTabDirty";
+import { pendingInsertToNewRow, type PendingInsert } from "../DataGrid/pendingInsert";
 import "../DataGrid/ag-grid-theme.css";
 import "./QueryConsole.css";
 
@@ -89,59 +93,8 @@ function buildResultTableTheme(editorFontSize: number) {
   });
 }
 
-export interface SourceTable {
-  schema: string;
-  table: string;
-}
-
-/**
- * Best-effort extraction of schema.table from a simple SELECT query.
- * Returns null for JOINs, UNIONs, subqueries, CTEs, or non-SELECT statements.
- */
-export function parseSimpleSelect(sql: string): SourceTable | null {
-  const trimmed = sql.trim();
-  const upper = trimmed.toUpperCase();
-
-  if (!upper.startsWith("SELECT") && !upper.startsWith("WITH")) return null;
-  if (upper.startsWith("WITH")) return null;
-  if (/\bJOIN\b/i.test(trimmed)) return null;
-  if (/\bUNION\b/i.test(trimmed)) return null;
-  if (/\bINTERSECT\b/i.test(trimmed)) return null;
-  if (/\bEXCEPT\b/i.test(trimmed)) return null;
-
-  // Match FROM clause — support: FROM "schema"."table", FROM schema.table, FROM "table", FROM table
-  const fromMatch = trimmed.match(
-    /\bFROM\s+(?:"([^"]+)"\s*\.\s*"([^"]+)"|"([^"]+)"\s*\.\s*(\w+)|(\w+)\s*\.\s*"([^"]+)"|(\w+)\s*\.\s*(\w+)|"([^"]+)"|(\w+))/i
-  );
-  if (!fromMatch) return null;
-
-  let schema: string;
-  let table: string;
-
-  if (fromMatch[1] && fromMatch[2]) {
-    schema = fromMatch[1]; table = fromMatch[2]; // "schema"."table"
-  } else if (fromMatch[3] && fromMatch[4]) {
-    schema = fromMatch[3]; table = fromMatch[4]; // "schema".table
-  } else if (fromMatch[5] && fromMatch[6]) {
-    schema = fromMatch[5]; table = fromMatch[6]; // schema."table"
-  } else if (fromMatch[7] && fromMatch[8]) {
-    schema = fromMatch[7]; table = fromMatch[8]; // schema.table
-  } else if (fromMatch[9]) {
-    schema = ""; table = fromMatch[9]; // "table" — schema unknown, caller resolves
-  } else if (fromMatch[10]) {
-    schema = ""; table = fromMatch[10]; // table — schema unknown, caller resolves
-  } else {
-    return null;
-  }
-
-  // Reject if there's a comma after the table name (multiple tables)
-  const afterFrom = trimmed.slice((fromMatch.index ?? 0) + fromMatch[0].length).trimStart();
-  if (afterFrom.startsWith(",")) return null;
-  // Reject subqueries in FROM
-  if (afterFrom.startsWith("(")) return null;
-
-  return { schema, table };
-}
+export { parseSimpleSelect } from "./simpleSelect";
+export type { SourceTable } from "./simpleSelect";
 
 interface Props {
   result: QueryResult;
@@ -152,7 +105,22 @@ interface Props {
   database: string;
   sourceTable: SourceTable | null;
   onReExecute: () => void;
+  /** Owning tab, used to report unsaved edits before the tab closes. */
+  tabId?: string;
+  /** False while the owning tab is in the background: keyboard
+   *  shortcuts are ignored so they can't act on hidden results. */
+  isActive?: boolean;
 }
+
+/** Same value for edit-tracking purposes (NULL/undefined are equal). */
+function sameCellValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if ((a === null || a === undefined) && (b === null || b === undefined)) return true;
+  if (typeof a === "object" || typeof b === "object") return JSON.stringify(a) === JSON.stringify(b);
+  return false;
+}
+
+let nextResultInsertId = 1;
 
 interface RowObj {
   __rowIdx: number;
@@ -190,23 +158,7 @@ function generateTestValue(colName: string): unknown {
   return "test_" + Math.floor(Math.random() * 10000);
 }
 
-function parseCellValue(raw: string, dataType: string): unknown {
-  const t = dataType.toLowerCase();
-  if (t.includes("int") || t === "serial" || t === "bigserial" || t === "smallserial") {
-    const n = parseInt(raw.trim(), 10);
-    return isNaN(n) ? raw : n;
-  }
-  if (t.includes("float") || t.includes("double") || t.includes("decimal") || t.includes("numeric") || t === "real") {
-    const n = parseFloat(raw.trim());
-    return isNaN(n) ? raw : n;
-  }
-  if (t === "boolean" || t === "bool") {
-    return raw.trim().toLowerCase() === "true" || raw.trim() === "1";
-  }
-  return raw;
-}
-
-export function ResultTable({ result, resultMode, onToggleChart, onExport, connectionId, database, sourceTable, onReExecute }: Props) {
+export function ResultTable({ result, resultMode, onToggleChart, onExport, connectionId, database, sourceTable, onReExecute, tabId, isActive = true }: Props) {
   const addToast = useToastStore((s) => s.addToast);
   const openTab = useTabStore((s) => s.openTab);
   const connections = useConnectionStore((s) => s.connections);
@@ -225,11 +177,27 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchQueryRef = useRef("");
   const searchCurrentRef = useRef<{ rowIndex: number; colId: string } | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; rowIdx: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; rowIdx: number; colIdx: number } | null>(null);
   const [detailRowIdx, setDetailRowIdx] = useState<number | null>(null);
-  const [editingRows, setEditingRows] = useState<unknown[][]>(() =>
-    result.rows.map((r) => [...r])
-  );
+  // Edits are an overlay over `result.rows`: only changed cells are
+  // stored (row -> col -> value), so an edit costs O(1) instead of
+  // copying and rescanning every row and column.
+  const [cellEdits, setCellEdits] = useState<Map<number, Map<number, unknown>>>(() => new Map());
+  const [insertedRows, setInsertedRows] = useState<PendingInsert[]>([]);
+  const cellEditsRef = useRef(cellEdits);
+  cellEditsRef.current = cellEdits;
+  const containerRef = useRef<HTMLDivElement>(null);
+  const editingRows = useMemo((): unknown[][] => {
+    if (cellEdits.size === 0 && insertedRows.length === 0) return result.rows;
+    const rows = result.rows.slice();
+    cellEdits.forEach((cols, r) => {
+      const row = result.rows[r].slice();
+      cols.forEach((v, c) => { row[c] = v; });
+      rows[r] = row;
+    });
+    for (const ins of insertedRows) rows.push(ins.values);
+    return rows;
+  }, [result.rows, cellEdits, insertedRows]);
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
   const [deletedIndices, setDeletedIndices] = useState<Set<number>>(new Set());
   const [saving, setSaving] = useState(false);
@@ -237,7 +205,8 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
   const [fkMap, setFkMap] = useState<Map<string, ForeignKeyInfo>>(new Map());
 
   useEffect(() => {
-    setEditingRows(result.rows.map((r) => [...r]));
+    setCellEdits(new Map());
+    setInsertedRows([]);
     setDetailRowIdx(null);
     setSelectedIndices(new Set());
     setDeletedIndices(new Set());
@@ -278,7 +247,19 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
     return tableColumns.filter((c) => c.is_primary_key);
   }, [tableColumns]);
 
+  // Editing writes each result column back into the same-named column
+  // of `sourceTable`, so every result column must be a real column of
+  // that table (no computed / aliased / duplicated names) and the
+  // primary key must be present to address rows.
+  const resultColumnsMapToTable = useMemo(() => {
+    if (!tableColumns) return false;
+    const names = new Set(tableColumns.map((c) => c.name));
+    return new Set(result.columns).size === result.columns.length &&
+      result.columns.every((c) => names.has(c));
+  }, [tableColumns, result.columns]);
+
   const isUpdatable = sourceTable !== null && pkColumns.length > 0 &&
+    resultColumnsMapToTable &&
     pkColumns.every((pk) => result.columns.includes(pk.name));
 
   const columnInfos = useMemo((): ColumnInfo[] => {
@@ -307,53 +288,86 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
     }));
   }, [result.columns, tableColumns, sourceTable]);
 
+  // Row objects for unedited rows are built once per result and reused;
+  // only edited / deleted / inserted rows get fresh objects.
+  const baseRowObjs = useMemo((): RowObj[] => result.rows.map((row, i) => {
+    const obj: RowObj = { __rowIdx: i, __isInserted: false, __isDeleted: false };
+    result.columns.forEach((col, colIdx) => { obj[col] = row[colIdx]; });
+    return obj;
+  }), [result.rows, result.columns]);
+
   const rowData = useMemo((): RowObj[] => {
-    return editingRows.map((row, i) => {
-      const obj: RowObj = {
-        __rowIdx: i,
-        __isInserted: i >= result.rows.length,
-        __isDeleted: deletedIndices.has(i),
-      };
-      result.columns.forEach((col, colIdx) => {
-        obj[col] = row[colIdx];
-      });
+    const rows = baseRowObjs.map((base, i) => {
+      const edits = cellEdits.get(i);
+      const deleted = deletedIndices.has(i);
+      if (!edits && !deleted) return base;
+      const obj: RowObj = { ...base, __isDeleted: deleted };
+      edits?.forEach((v, c) => { obj[result.columns[c]] = v; });
       return obj;
     });
-  }, [editingRows, result.columns, result.rows.length, deletedIndices]);
+    insertedRows.forEach((ins, k) => {
+      const i = result.rows.length + k;
+      const obj: RowObj = { __rowIdx: i, __isInserted: true, __isDeleted: deletedIndices.has(i) };
+      result.columns.forEach((col, colIdx) => { obj[col] = ins.values[colIdx]; });
+      rows.push(obj);
+    });
+    return rows;
+  }, [baseRowObjs, cellEdits, insertedRows, deletedIndices, result.columns, result.rows.length]);
 
   const editCount = useMemo(() => {
-    let count = deletedIndices.size;
-    const insertedCount = Math.max(0, editingRows.length - result.rows.length);
-    count += insertedCount;
-    for (let r = 0; r < Math.min(editingRows.length, result.rows.length); r++) {
-      if (deletedIndices.has(r)) continue;
-      const orig = result.rows[r];
-      if (!orig) continue;
-      for (let c = 0; c < editingRows[r].length; c++) {
-        const ov = orig[c], nv = editingRows[r][c];
-        if (ov !== nv && !(ov === null && nv === null)) count++;
-      }
-    }
+    let count = 0;
+    deletedIndices.forEach((i) => { if (i < result.rows.length) count++; });
+    insertedRows.forEach((_, k) => { if (!deletedIndices.has(result.rows.length + k)) count++; });
+    cellEdits.forEach((cols, r) => { if (!deletedIndices.has(r)) count += cols.size; });
     return count;
-  }, [editingRows, result.rows, deletedIndices]);
+  }, [cellEdits, insertedRows, deletedIndices, result.rows.length]);
+
+  useReportTabDirty(tabId, "results", isUpdatable && editCount > 0);
 
   const handleCellChange = useCallback((rowIndex: number, colIndex: number, newValue: unknown) => {
-    setEditingRows((prev) => {
-      const next = prev.map((r) => [...r]);
-      next[rowIndex][colIndex] = newValue;
+    const base = result.rows.length;
+    if (rowIndex >= base) {
+      setInsertedRows((prev) => {
+        const k = rowIndex - base;
+        const target = prev[k];
+        if (!target) return prev;
+        const values = [...target.values];
+        const touched = [...target.touched];
+        values[colIndex] = newValue;
+        touched[colIndex] = true;
+        const next = [...prev];
+        next[k] = { ...target, values, touched };
+        return next;
+      });
+      return;
+    }
+    const orig = result.rows[rowIndex]?.[colIndex];
+    setCellEdits((prev) => {
+      const next = new Map(prev);
+      const cols = new Map(next.get(rowIndex) ?? []);
+      if (sameCellValue(orig, newValue)) cols.delete(colIndex);
+      else cols.set(colIndex, newValue);
+      if (cols.size === 0) next.delete(rowIndex);
+      else next.set(rowIndex, cols);
       return next;
     });
-  }, []);
+  }, [result.rows]);
 
   const handleAddRow = useCallback(() => {
-    setEditingRows((prev) => [...prev, result.columns.map(() => null)]);
+    setInsertedRows((prev) => [...prev, {
+      tempId: nextResultInsertId++,
+      values: result.columns.map(() => null),
+      touched: result.columns.map(() => false),
+    }]);
   }, [result.columns]);
 
   const handleGenerateTestData = useCallback(() => {
-    setEditingRows((prev) => [
-      ...prev,
-      result.columns.map((col) => generateTestValue(col)),
-    ]);
+    const values = result.columns.map((col) => generateTestValue(col));
+    setInsertedRows((prev) => [...prev, {
+      tempId: nextResultInsertId++,
+      values,
+      touched: values.map((v) => v !== null),
+    }]);
   }, [result.columns]);
 
   const handleDeleteSelected = useCallback(() => {
@@ -368,11 +382,12 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
   }, [selectedIndices]);
 
   const handleDiscard = useCallback(() => {
-    setEditingRows(result.rows.map((r) => [...r]));
+    setCellEdits(new Map());
+    setInsertedRows([]);
     setDeletedIndices(new Set());
     setSelectedIndices(new Set());
     gridApiRef.current?.deselectAll();
-  }, [result.rows]);
+  }, []);
 
   const handleSaveToDb = useCallback(async () => {
     if (!isUpdatable || !sourceTable) return;
@@ -384,33 +399,29 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
       const getPkValues = (row: unknown[]): [string, unknown][] =>
         pkColNames.map((name, i) => [name, row[pkColIndices[i]]]);
 
-      // Build updates
+      // Build updates (only edited cells are tracked)
       const updates: CellChange[] = [];
-      for (let r = 0; r < Math.min(editingRows.length, result.rows.length); r++) {
-        if (deletedIndices.has(r)) continue;
+      cellEdits.forEach((cols, r) => {
+        if (deletedIndices.has(r)) return;
         const orig = result.rows[r];
-        if (!orig) continue;
-        for (let c = 0; c < editingRows[r].length; c++) {
-          const ov = orig[c], nv = editingRows[r][c];
-          if (ov !== nv && !(ov === null && nv === null)) {
-            updates.push({
-              row_index: r,
-              column_name: result.columns[c],
-              old_value: ov,
-              new_value: nv,
-              primary_key_values: getPkValues(orig),
-            });
-          }
-        }
-      }
+        if (!orig) return;
+        cols.forEach((nv, c) => {
+          updates.push({
+            row_index: r,
+            column_name: result.columns[c],
+            old_value: orig[c],
+            new_value: nv,
+            primary_key_values: getPkValues(orig),
+          });
+        });
+      });
 
-      // Build inserts
+      // Build inserts: untouched columns are omitted so DEFAULT applies
       const inserts: NewRow[] = [];
-      for (let r = result.rows.length; r < editingRows.length; r++) {
-        if (deletedIndices.has(r)) continue;
-        const values: [string, unknown][] = result.columns.map((col, ci) => [col, editingRows[r][ci]]);
-        inserts.push({ values });
-      }
+      insertedRows.forEach((ins, k) => {
+        if (deletedIndices.has(result.rows.length + k)) return;
+        inserts.push(pendingInsertToNewRow(ins, result.columns));
+      });
 
       // Build deletes
       const deletes: DeleteRow[] = [];
@@ -441,7 +452,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
     } finally {
       setSaving(false);
     }
-  }, [isUpdatable, sourceTable, pkColumns, result, editingRows, deletedIndices, connectionId, database, addToast, onReExecute]);
+  }, [isUpdatable, sourceTable, pkColumns, result, cellEdits, insertedRows, deletedIndices, connectionId, database, addToast, onReExecute]);
 
   const lastClickedIdxRef = useRef<number | null>(null);
 
@@ -515,6 +526,10 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
         } : {}),
         sortable: true,
         resizable: true,
+        // Exact big integers / decimals arrive as strings; sort them
+        // numerically alongside regular numbers.
+        comparator: (a: unknown, b: unknown) =>
+          compareCellValues(a, b, !!colMeta && isNumericType(colMeta.data_type)),
         editable: (params) => {
           if (!isUpdatable) return false;
           if (!params.data) return false;
@@ -527,10 +542,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
           "cell-null": (params) => params.value === null || params.value === undefined,
           "cell-modified": (params) => {
             if (!params.data || params.data.__isInserted || params.data.__isDeleted) return false;
-            const orig = result.rows[params.data.__rowIdx];
-            if (!orig) return false;
-            const ov = orig[colIdx], nv = params.value;
-            return ov !== nv && !(ov === null && nv === null);
+            return cellEditsRef.current.get(params.data.__rowIdx)?.has(colIdx) ?? false;
           },
           "cell-inserted": (params) => params.data?.__isInserted === true,
           "cell-auto": (params) => {
@@ -556,18 +568,16 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
           return String(params.value);
         },
         valueSetter: (params) => {
-          const raw = params.newValue;
-          let parsed: unknown;
-          if ((raw === "" || raw === null || raw === undefined) && colMeta?.is_nullable) {
-            parsed = null;
-          } else if (raw === "" || raw === null || raw === undefined) {
-            parsed = raw;
-          } else if (colMeta) {
-            parsed = parseCellValue(String(raw), colMeta.data_type);
-          } else {
-            parsed = raw;
+          if (params.newValue === params.oldValue) return false;
+          if ((params.oldValue === null || params.oldValue === undefined) && params.newValue === "") return false;
+          const parsed = colMeta
+            ? editorInputToValue(params.newValue, colMeta)
+            : { ok: true as const, value: params.newValue };
+          if (!parsed.ok) {
+            addToast(`${col}: ${parsed.error}`, "error");
+            return false;
           }
-          handleCellChange(params.data.__rowIdx, colIdx, parsed);
+          handleCellChange(params.data.__rowIdx, colIdx, parsed.value);
           return true;
         },
       };
@@ -575,7 +585,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
     });
 
     return [rowNumCol, ...dataCols];
-  }, [result.columns, result.rows, handleCellChange, columnInfos, fkMap, tableColumns, isUpdatable]);
+  }, [result.columns, handleCellChange, columnInfos, fkMap, tableColumns, isUpdatable, addToast]);
 
   const selectedIndicesRef = useRef(selectedIndices);
   selectedIndicesRef.current = selectedIndices;
@@ -592,6 +602,10 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
   useEffect(() => {
     gridApiRef.current?.redrawRows();
   }, [selectedIndices, deletedIndices]);
+
+  useEffect(() => {
+    gridApiRef.current?.refreshCells({ force: true });
+  }, [cellEdits]);
 
   const defaultColDef = useMemo((): ColDef => ({
     resizable: true,
@@ -611,23 +625,35 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
   }), []);
 
   const [searchMatchIdx, setSearchMatchIdx] = useState(-1);
+  const rowCount = result.rows.length + insertedRows.length;
+
+  // Lower-cased text of the original cells, built once per result (and
+  // only once search is used) instead of on every keystroke / edit.
+  const searchActive = searchQuery.length > 0;
+  const baseSearchText = useMemo(
+    () => (searchActive ? result.rows.map((row) => row.map((v) => cellToText(v).toLowerCase())) : null),
+    [result.rows, searchActive],
+  );
 
   const searchMatches = useMemo(() => {
-    if (!searchQuery) return [];
+    if (!searchQuery || !baseSearchText) return [];
     const q = searchQuery.toLowerCase();
     const matches: { rowIndex: number; colId: string }[] = [];
     for (let r = 0; r < editingRows.length; r++) {
       if (deletedIndices.has(r)) continue;
-      for (let c = 0; c < editingRows[r].length; c++) {
-        const val = editingRows[r][c];
-        const str = (val === null || val === undefined) ? "null" : typeof val === "object" ? JSON.stringify(val) : String(val);
-        if (str.toLowerCase().includes(q) && result.columns[c]) {
+      const edits = cellEdits.get(r);
+      const row = editingRows[r];
+      for (let c = 0; c < row.length; c++) {
+        const str = r < baseSearchText.length && !edits?.has(c)
+          ? baseSearchText[r][c]
+          : cellToText(row[c]).toLowerCase();
+        if (str.includes(q) && result.columns[c]) {
           matches.push({ rowIndex: r, colId: result.columns[c] });
         }
       }
     }
     return matches;
-  }, [searchQuery, editingRows, result.columns, deletedIndices]);
+  }, [searchQuery, baseSearchText, editingRows, cellEdits, result.columns, deletedIndices]);
 
   const searchMatchCount = searchMatches.length;
 
@@ -672,8 +698,14 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
   }, [searchQuery]);
 
   useEffect(() => {
+    // Query tabs stay mounted in the background; only the visible result
+    // grid may react, and only to keystrokes from inside it (the SQL
+    // editor keeps its own Ctrl+F / Ctrl+A).
+    if (!isActive) return;
     let focusTimer: ReturnType<typeof setTimeout>;
     const handler = (e: KeyboardEvent) => {
+      const target = e.target as Node | null;
+      if (!target || !containerRef.current?.contains(target)) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setShowSearch(true);
@@ -695,7 +727,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
         if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
         if (target?.getAttribute("role") === "textbox") return;
         e.preventDefault();
-        setSelectedIndices(new Set(editingRows.map((_, i) => i)));
+        setSelectedIndices(new Set(Array.from({ length: rowCount }, (_, i) => i)));
       }
       if (isUpdatable && (e.key === "Delete" || e.key === "Backspace") && selectedIndices.size > 0) {
         const target = e.target as HTMLElement;
@@ -710,7 +742,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
       document.removeEventListener("keydown", handler);
       clearTimeout(focusTimer);
     };
-  }, [showSearch, selectedIndices, handleDeleteSelected, editingRows, isUpdatable]);
+  }, [showSearch, selectedIndices, handleDeleteSelected, rowCount, isUpdatable, isActive]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -729,8 +761,9 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
     if (!e) return;
     e.preventDefault();
     const z = readZoomFactor();
-    setContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx });
-  }, []);
+    const colIdx = event.column ? result.columns.indexOf(event.column.getColId()) : -1;
+    setContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx, colIdx });
+  }, [result.columns]);
 
   const handleCopyRowAsJson = useCallback(() => {
     if (contextMenu === null) return;
@@ -770,7 +803,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
         if (v === null) return "NULL";
         if (typeof v === "number") return String(v);
         if (typeof v === "boolean") return boolLiteral(dbType, v);
-        return `'${String(v).replace(/'/g, "''")}'`;
+        return stringLiteral(dbType, typeof v === "object" ? JSON.stringify(v) : String(v));
       })
       .join(", ");
     const tbl = quoteQualified(dbType, sourceTable.schema, sourceTable.table);
@@ -833,7 +866,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
   }, [result.columns, editingRows, deletedIndices]);
 
   return (
-    <div className="result-table-ag-wrapper">
+    <div className="result-table-ag-wrapper" ref={containerRef}>
       <div className="result-table-toolbar">
         {isUpdatable && (
           <>
@@ -853,6 +886,8 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
         <span className={`result-updatable-badge ${isUpdatable ? "updatable" : "readonly"}`} title={
           isUpdatable
             ? `Editable: ${sourceTable!.schema}.${sourceTable!.table} (PK: ${pkColumns.map(c => c.name).join(", ")})`
+            : sourceTable && pkColumns.length > 0 && !resultColumnsMapToTable
+              ? "Read-only: result has columns that aren't plain columns of the table"
             : sourceTable && pkColumns.length > 0
               ? `Read-only: primary key column${pkColumns.length > 1 ? "s" : ""} (${pkColumns.map(c => c.name).join(", ")}) not in result`
               : sourceTable
@@ -985,6 +1020,22 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
               Copy as INSERT
             </button>
           )}
+          {isUpdatable && (() => {
+            // Explicit NULL: clearing a text cell stores an empty string.
+            const colMeta = contextMenu.colIdx >= 0 ? columnInfos[contextMenu.colIdx] : null;
+            if (!colMeta || !colMeta.is_nullable || colMeta.is_primary_key) return null;
+            if (deletedIndices.has(contextMenu.rowIdx)) return null;
+            const cur = editingRows[contextMenu.rowIdx]?.[contextMenu.colIdx];
+            if (cur === null && contextMenu.rowIdx < result.rows.length) return null;
+            return (
+              <button
+                className="context-menu-item"
+                onClick={() => { handleCellChange(contextMenu.rowIdx, contextMenu.colIdx, null); setContextMenu(null); }}
+              >
+                Set {colMeta.name} to NULL
+              </button>
+            );
+          })()}
           {isUpdatable && (
             <>
               <div className="context-menu-divider" />

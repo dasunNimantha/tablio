@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  backslashEscapesInStrings,
   boolLiteral,
+  stringLiteral,
   caseInsensitiveLike,
   paginationClause,
   quoteIdent,
@@ -166,5 +168,29 @@ describe("boolLiteral", () => {
   it("uses lowercase true / false for cassandra", () => {
     expect(boolLiteral("cassandra", true)).toBe("true");
     expect(boolLiteral("cassandra", false)).toBe("false");
+  });
+});
+
+describe("stringLiteral", () => {
+  it("doubles single quotes on every dialect", () => {
+    const all: DbType[] = ["postgres", "mysql", "sqlite", "mariadb", "cockroachdb", "tidb", "cassandra", "mssql"];
+    for (const t of all) {
+      expect(stringLiteral(t, "O'Brien")).toBe("'O''Brien'");
+    }
+  });
+
+  it("doubles backslashes only on mysql-family dialects", () => {
+    expect(stringLiteral("mysql", "a\\b")).toBe("'a\\\\b'");
+    expect(stringLiteral("mariadb", "a\\b")).toBe("'a\\\\b'");
+    expect(stringLiteral("tidb", "a\\b")).toBe("'a\\\\b'");
+    expect(stringLiteral("postgres", "a\\b")).toBe("'a\\b'");
+    expect(stringLiteral("mssql", "a\\b")).toBe("'a\\b'");
+    expect(stringLiteral(undefined, "a\\b")).toBe("'a\\b'");
+  });
+
+  it("reports which dialects use backslash escapes", () => {
+    expect(backslashEscapesInStrings("mysql")).toBe(true);
+    expect(backslashEscapesInStrings("postgres")).toBe(false);
+    expect(backslashEscapesInStrings("mssql")).toBe(false);
   });
 });

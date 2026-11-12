@@ -4,6 +4,7 @@ import { formatDuration, filterSessions } from "../../lib/dashboardUtils";
 import { Loader2, XCircle, Search, Users } from "lucide-react";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { usePolling } from "../../hooks/usePolling";
+import { useIsTabActive } from "../Tabs/tabActive";
 
 interface Props {
   connectionId: string;
@@ -32,7 +33,9 @@ export function DashboardSessions({ connectionId, paused }: Props) {
   // Visibility-aware, re-entrancy-safe polling (see usePolling).
   // Replaces a hand-rolled setInterval that kept firing while the
   // window was minimized, accumulating in-flight Tauri calls.
-  usePolling(fetchActivity, 2000, !paused);
+  // Background tabs stay mounted; don't poll them.
+  const tabActive = useIsTabActive();
+  usePolling(fetchActivity, 2000, !paused && tabActive);
 
   const handleKill = async () => {
     if (!killTarget) return;

@@ -3,6 +3,7 @@ import { useShallow } from "zustand/react/shallow";
 import { X, Table2, Terminal, Code, Activity, BarChart3, Shield, TrendingUp } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { readZoomFactor } from "../../lib/zoom";
+import { ConfirmDialog } from "../ConfirmDialog";
 import "./Tabs.css";
 
 export function TabBar() {
@@ -21,6 +22,18 @@ export function TabBar() {
     tabId: string;
   } | null>(null);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [pendingClose, setPendingClose] = useState<{ titles: string[]; action: () => void } | null>(null);
+
+  /** Close tabs, confirming first when any of them holds unsaved work. */
+  const requestClose = (ids: string[], action: () => void) => {
+    const { isTabDirty, tabs: current } = useTabStore.getState();
+    const dirty = current.filter((t) => ids.includes(t.id) && isTabDirty(t.id));
+    if (dirty.length === 0) {
+      action();
+      return;
+    }
+    setPendingClose({ titles: dirty.map((t) => t.title), action });
+  };
   const tabsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -101,7 +114,7 @@ export function TabBar() {
               className="tab-close"
               onClick={(e) => {
                 e.stopPropagation();
-                closeTab(tab.id);
+                requestClose([tab.id], () => closeTab(tab.id));
               }}
             >
               <X size={12} />
@@ -134,30 +147,54 @@ export function TabBar() {
           >
             <button
               onClick={() => {
-                closeTab(contextMenu.tabId);
+                const id = contextMenu.tabId;
                 setContextMenu(null);
+                requestClose([id], () => closeTab(id));
               }}
             >
               Close
             </button>
             <button
               onClick={() => {
-                closeOtherTabs(contextMenu.tabId);
+                const id = contextMenu.tabId;
                 setContextMenu(null);
+                requestClose(
+                  tabs.filter((t) => t.id !== id).map((t) => t.id),
+                  () => closeOtherTabs(id),
+                );
               }}
             >
               Close Others
             </button>
             <button
               onClick={() => {
-                closeAllTabs();
                 setContextMenu(null);
+                requestClose(tabs.map((t) => t.id), () => closeAllTabs());
               }}
             >
               Close All
             </button>
           </div>
         </>
+      )}
+
+      {pendingClose && (
+        <ConfirmDialog
+          title="Discard unsaved changes?"
+          message={
+            pendingClose.titles.length === 1
+              ? `"${pendingClose.titles[0]}" has unsaved changes. Close it and discard them?`
+              : `These tabs have unsaved changes: ${pendingClose.titles.join(", ")}. Close them and discard the changes?`
+          }
+          confirmLabel="Discard and close"
+          danger
+          onConfirm={() => {
+            const { action } = pendingClose;
+            setPendingClose(null);
+            action();
+          }}
+          onCancel={() => setPendingClose(null)}
+        />
       )}
     </>
   );

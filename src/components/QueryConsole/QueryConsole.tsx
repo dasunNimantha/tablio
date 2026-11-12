@@ -12,6 +12,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { useToastStore } from "../../stores/toastStore";
 import { useTabStore } from "../../stores/tabStore";
 import { useUserSettingsStore } from "../../stores/userSettingsStore";
+import { useReportTabDirty } from "../../hooks/useTabDirty";
 import { readZoomFactor } from "../../lib/zoom";
 import "./QueryConsole.css";
 
@@ -68,6 +69,180 @@ const SQL_KEYWORDS = [
   "BIGSERIAL", "UUID", "JSONB", "JSON", "ARRAY", "INTERVAL",
 ];
 
+/**
+ * Per-editor completion context. Monaco completion providers are
+ * global per language, so a single provider is registered and it
+ * resolves the context from the model being completed: each query tab
+ * then completes its own connection's tables and its own history.
+ */
+interface CompletionContext {
+  loadTablesIfNeeded: () => Promise<void>;
+  loadColumnsForTable: (table: string, schema: string) => Promise<{ name: string; type: string }[]>;
+  getTables: () => { name: string; schema: string }[];
+  getHistory: () => HistoryEntry[];
+  suggestionsEnabled: () => boolean;
+}
+
+function completionContexts(monaco: Monaco): Map<string, CompletionContext> {
+  const m = monaco as any;
+  if (!m.__tablioCompletionContexts) m.__tablioCompletionContexts = new Map<string, CompletionContext>();
+  return m.__tablioCompletionContexts;
+}
+
+function contextForModel(monaco: Monaco, model: any): CompletionContext | undefined {
+  const uri = model?.uri?.toString?.();
+  return uri ? completionContexts(monaco).get(uri) : undefined;
+}
+
+function ensureCompletionProviders(monaco: Monaco) {
+  const m = monaco as any;
+  if (m.__tablioQueryProvidersRegistered) return;
+  m.__tablioQueryProvidersRegistered = true;
+  // Providers registered by older builds of this component (one per
+  // mounted editor, bound to that editor's refs).
+  for (const key of ["__tablioCompletionDisposable", "__tablioInlineDisposable"]) {
+    if (m[key]) {
+      try { m[key].dispose(); } catch {}
+      m[key] = undefined;
+    }
+  }
+
+  monaco.languages.registerCompletionItemProvider("sql", {
+    triggerCharacters: [".", "("],
+    provideCompletionItems: async (model: any, position: any) => {
+      const ctx = contextForModel(monaco, model);
+      if (!ctx) return { suggestions: [] };
+      await ctx.loadTablesIfNeeded();
+      const tables = ctx.getTables();
+      const word = model.getWordUntilPosition(position);
+
+      const range = {
+        startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
+        startColumn: word.startColumn, endColumn: word.endColumn,
+      };
+      const textBefore = model.getValueInRange({
+        startLineNumber: 1, startColumn: 1,
+        endLineNumber: position.lineNumber, endColumn: position.column,
+      });
+
+      const dotMatch = textBefore.match(/(\w+)\.\w*$/);
+      if (dotMatch) {
+        const tableName = dotMatch[1];
+        const entry = tables.find((t) => t.name === tableName);
+        const cols = await ctx.loadColumnsForTable(tableName, entry?.schema || "public");
+        return {
+          suggestions: cols.map((c, i) => ({
+            label: { label: c.name, description: c.type },
+            kind: monaco.languages.CompletionItemKind.Field,
+            insertText: c.name,
+            sortText: String(i).padStart(4, "0"),
+            range,
+          })),
+        };
+      }
+
+      const referencedTables = new Set<string>();
+      for (const mt of textBefore.matchAll(/\b(?:FROM|JOIN|UPDATE|INTO)\s+(\w+)/gi)) {
+        referencedTables.add(mt[1]);
+      }
+
+      const colSuggestions: any[] = [];
+      const seen = new Set<string>();
+      const colPromises = [...referencedTables].map(async (tName) => {
+        const entry = tables.find((t) => t.name === tName);
+        return { tName, cols: await ctx.loadColumnsForTable(tName, entry?.schema || "public") };
+      });
+      for (const { tName, cols } of await Promise.all(colPromises)) {
+        for (const c of cols) {
+          if (seen.has(c.name)) continue;
+          seen.add(c.name);
+          colSuggestions.push({
+            label: { label: c.name, description: c.type },
+            kind: monaco.languages.CompletionItemKind.Field,
+            insertText: c.name,
+            detail: tName,
+            sortText: "0" + c.name,
+            range,
+          });
+        }
+      }
+
+      const seenTables = new Set<string>();
+      const tableSuggestions = tables.filter((t) => {
+        if (seenTables.has(t.name)) return false;
+        seenTables.add(t.name);
+        return true;
+      }).map((t) => ({
+        label: { label: t.name, description: t.schema },
+        kind: monaco.languages.CompletionItemKind.Struct,
+        insertText: t.name,
+        sortText: "1" + t.name,
+        range,
+      }));
+
+      const kwSuggestions = SQL_KEYWORDS.map((kw) => ({
+        label: kw,
+        kind: monaco.languages.CompletionItemKind.Keyword,
+        insertText: kw + " ",
+        sortText: "2" + kw,
+        range,
+      }));
+
+      return { suggestions: [...colSuggestions, ...tableSuggestions, ...kwSuggestions] };
+    },
+  });
+
+  monaco.languages.registerInlineCompletionsProvider("sql", {
+    provideInlineCompletions(model: any, position: any) {
+      const ctx = contextForModel(monaco, model);
+      if (!ctx || !ctx.suggestionsEnabled()) return { items: [] };
+
+      const textUntilCursor = model.getValueInRange({
+        startLineNumber: 1, startColumn: 1,
+        endLineNumber: position.lineNumber, endColumn: position.column,
+      }).trimStart();
+
+      if (textUntilCursor.length < 3) return { items: [] };
+
+      const prefix = textUntilCursor.toLowerCase();
+      const matches = ctx.getHistory()
+        .filter((h: HistoryEntry) => h.sql.toLowerCase().startsWith(prefix) && h.sql.length > textUntilCursor.length)
+        .sort((a: HistoryEntry, b: HistoryEntry) => b.timestamp - a.timestamp);
+
+      if (matches.length === 0) return { items: [] };
+
+      const best = matches[0];
+      const insertText = best.sql.slice(textUntilCursor.length);
+
+      return {
+        items: [{
+          insertText,
+          range: {
+            startLineNumber: position.lineNumber,
+            startColumn: position.column,
+            endLineNumber: position.lineNumber,
+            endColumn: position.column,
+          },
+        }],
+      };
+    },
+    freeInlineCompletions() {},
+    disposeInlineCompletions() {},
+  } as any);
+}
+
+const DEFAULT_SQL = "SELECT 1;";
+const SQL_STORAGE_PREFIX = "tablio-query-sql:";
+
+/** Editor text is kept per tab for the session so a reload restores it. */
+function loadTabSql(tabId: string): string {
+  try {
+    const v = sessionStorage.getItem(SQL_STORAGE_PREFIX + tabId);
+    if (v !== null) return v;
+  } catch {}
+  return DEFAULT_SQL;
+}
+
 function formatValidationMessage(message: string) {
   return message.replace(/[A-Za-z]/, (char) => char.toUpperCase());
 }
@@ -75,6 +250,7 @@ function formatValidationMessage(message: string) {
 export function QueryConsole({ tabId, connectionId, database }: Props) {
   const addToast = useToastStore((s) => s.addToast);
   const setTabTitle = useTabStore((s) => s.setTabTitle);
+  const isActiveTab = useTabStore((s) => s.activeTabId === tabId);
   // Editor font size from user preferences (issue #62). Monaco
   // re-renders the option diff on every prop change so a live
   // adjustment in the Preferences dialog reflects immediately.
@@ -86,7 +262,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
   // "Save changes" button label. `null` until the user loads a
   // saved query (or saves a brand-new one).
   const [loadedSavedQuery, setLoadedSavedQuery] = useState<LoadedSavedQuery | null>(null);
-  const [sql, setSql] = useState("SELECT 1;");
+  const [sql, setSql] = useState(() => loadTabSql(tabId));
   const [result, setResult] = useState<QueryResult | null>(null);
   const [explainResult, setExplainResult] = useState<ExplainResult | null>(null);
   const [resultMode, setResultMode] = useState<ResultMode>("results");
@@ -114,6 +290,11 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
   const draggingRef = useRef(false);
   const themeVersionRef = useRef(0);
   const executeRef = useRef<() => void>(() => {});
+  // Guards against overlapping runs (Ctrl+Enter bypasses the disabled
+  // Execute button) and lets only the newest request update the UI.
+  const executingRef = useRef(false);
+  const requestSeqRef = useRef(0);
+  const modelUriRef = useRef<string | null>(null);
   const connRef = useRef({ connectionId, database });
   const tablesRef = useRef<{ name: string; schema: string }[]>([]);
   const tablesLoadedRef = useRef(false);
@@ -194,136 +375,35 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
   const handleEditorBeforeMount: BeforeMount = (monaco) => {
     monacoRef.current = monaco;
     syncTheme();
-
-    if ((monaco as any).__tablioCompletionDisposable) {
-      try { (monaco as any).__tablioCompletionDisposable.dispose(); } catch {}
-    }
-    if ((monaco as any).__tablioInlineDisposable) {
-      try { (monaco as any).__tablioInlineDisposable.dispose(); } catch {}
-    }
-
-    (monaco as any).__tablioCompletionDisposable = monaco.languages.registerCompletionItemProvider("sql", {
-      triggerCharacters: [".", "("],
-      provideCompletionItems: async (model: any, position: any) => {
-        await loadTablesIfNeeded();
-        const word = model.getWordUntilPosition(position);
-
-        const range = {
-          startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
-          startColumn: word.startColumn, endColumn: word.endColumn,
-        };
-        const textBefore = model.getValueInRange({
-          startLineNumber: 1, startColumn: 1,
-          endLineNumber: position.lineNumber, endColumn: position.column,
-        });
-
-        const dotMatch = textBefore.match(/(\w+)\.\w*$/);
-        if (dotMatch) {
-          const tableName = dotMatch[1];
-          const entry = tablesRef.current.find((t) => t.name === tableName);
-          const cols = await loadColumnsForTable(tableName, entry?.schema || "public");
-          return {
-            suggestions: cols.map((c, i) => ({
-              label: { label: c.name, description: c.type },
-              kind: monaco.languages.CompletionItemKind.Field,
-              insertText: c.name,
-              sortText: String(i).padStart(4, "0"),
-              range,
-            })),
-          };
-        }
-
-        const referencedTables = new Set<string>();
-        for (const m of textBefore.matchAll(/\b(?:FROM|JOIN|UPDATE|INTO)\s+(\w+)/gi)) {
-          referencedTables.add(m[1]);
-        }
-
-        const colSuggestions: any[] = [];
-        const seen = new Set<string>();
-        const colPromises = [...referencedTables].map(async (tName) => {
-          const entry = tablesRef.current.find((t) => t.name === tName);
-          return { tName, cols: await loadColumnsForTable(tName, entry?.schema || "public") };
-        });
-        for (const { tName, cols } of await Promise.all(colPromises)) {
-          for (const c of cols) {
-            if (seen.has(c.name)) continue;
-            seen.add(c.name);
-            colSuggestions.push({
-              label: { label: c.name, description: c.type },
-              kind: monaco.languages.CompletionItemKind.Field,
-              insertText: c.name,
-              detail: tName,
-              sortText: "0" + c.name,
-              range,
-            });
-          }
-        }
-
-        const seenTables = new Set<string>();
-        const tableSuggestions = tablesRef.current.filter((t) => {
-          if (seenTables.has(t.name)) return false;
-          seenTables.add(t.name);
-          return true;
-        }).map((t) => ({
-          label: { label: t.name, description: t.schema },
-          kind: monaco.languages.CompletionItemKind.Struct,
-          insertText: t.name,
-          sortText: "1" + t.name,
-          range,
-        }));
-
-        const kwSuggestions = SQL_KEYWORDS.map((kw) => ({
-          label: kw,
-          kind: monaco.languages.CompletionItemKind.Keyword,
-          insertText: kw + " ",
-          sortText: "2" + kw,
-          range,
-        }));
-
-        return { suggestions: [...colSuggestions, ...tableSuggestions, ...kwSuggestions] };
-      },
-    });
-
-    (monaco as any).__tablioInlineDisposable = monaco.languages.registerInlineCompletionsProvider("sql", {
-      provideInlineCompletions(model: any, position: any) {
-        if (!suggestionsEnabledRef.current) return { items: [] };
-
-        const textUntilCursor = model.getValueInRange({
-          startLineNumber: 1, startColumn: 1,
-          endLineNumber: position.lineNumber, endColumn: position.column,
-        }).trimStart();
-
-        if (textUntilCursor.length < 3) return { items: [] };
-
-        const prefix = textUntilCursor.toLowerCase();
-        const matches = historyRef.current
-          .filter((h: HistoryEntry) => h.sql.toLowerCase().startsWith(prefix) && h.sql.length > textUntilCursor.length)
-          .sort((a: HistoryEntry, b: HistoryEntry) => b.timestamp - a.timestamp);
-
-        if (matches.length === 0) return { items: [] };
-
-        const best = matches[0];
-        const insertText = best.sql.slice(textUntilCursor.length);
-
-        return {
-          items: [{
-            insertText,
-            range: {
-              startLineNumber: position.lineNumber,
-              startColumn: position.column,
-              endLineNumber: position.lineNumber,
-              endColumn: position.column,
-            },
-          }],
-        };
-      },
-      freeInlineCompletions() {},
-      disposeInlineCompletions() {},
-    });
+    ensureCompletionProviders(monaco);
   };
 
-  const handleEditorMount: OnMount = useCallback((editor) => {
+  const completionContextRef = useRef<CompletionContext>({
+    loadTablesIfNeeded,
+    loadColumnsForTable,
+    getTables: () => tablesRef.current,
+    getHistory: () => historyRef.current,
+    suggestionsEnabled: () => suggestionsEnabledRef.current,
+  });
+
+  useEffect(() => {
+    // Re-register after a StrictMode remount (the editor itself stays).
+    if (monacoRef.current && modelUriRef.current) {
+      completionContexts(monacoRef.current).set(modelUriRef.current, completionContextRef.current);
+    }
+    return () => {
+      const monaco = monacoRef.current;
+      if (monaco && modelUriRef.current) completionContexts(monaco).delete(modelUriRef.current);
+    };
+  }, []);
+
+  const handleEditorMount: OnMount = useCallback((editor, monaco) => {
     editorRef.current = editor;
+    const uri = editor.getModel()?.uri?.toString();
+    if (uri) {
+      modelUriRef.current = uri;
+      completionContexts(monaco).set(uri, completionContextRef.current);
+    }
     editor.addAction({
       id: "execute-query",
       label: "Execute Query",
@@ -469,15 +549,31 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     return sql.trim();
   }, [sql]);
 
+  const beginRequest = useCallback((): number | null => {
+    if (executingRef.current) return null;
+    executingRef.current = true;
+    setExecuting(true);
+    return ++requestSeqRef.current;
+  }, []);
+
+  const endRequest = useCallback((reqId: number) => {
+    if (reqId !== requestSeqRef.current) return;
+    executingRef.current = false;
+    setExecuting(false);
+  }, []);
+
   const executeCurrentStatement = useCallback(async () => {
     const queryToRun = getQueryText();
     if (!queryToRun) return;
-    setExecuting(true);
+    const reqId = beginRequest();
+    if (reqId === null) return;
+    const isCurrent = () => reqId === requestSeqRef.current;
     setError(null);
     setResultMode("results");
     lastQueryRef.current = queryToRun;
     try {
       const res = await api.executeQuery({ connection_id: connectionId, database, sql: queryToRun });
+      if (!isCurrent()) return;
       setResult(res);
       setExplainResult(null);
       if (res.is_select) {
@@ -506,6 +602,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       });
       setPinnedQueries(new Set());
     } catch (e) {
+      if (!isCurrent()) return;
       const errMsg = String(e);
       setError(errMsg);
       setResult(null);
@@ -520,24 +617,25 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       });
       setPinnedQueries(new Set());
     } finally {
-      setExecuting(false);
+      endRequest(reqId);
     }
-  }, [connectionId, database, getQueryText]);
+  }, [connectionId, database, getQueryText, beginRequest, endRequest]);
 
   const handleReExecute = useCallback(async () => {
     const queryToRun = lastQueryRef.current;
     if (!queryToRun) return;
-    setExecuting(true);
+    const reqId = beginRequest();
+    if (reqId === null) return;
     setError(null);
     try {
       const res = await api.executeQuery({ connection_id: connectionId, database, sql: queryToRun });
-      setResult(res);
+      if (reqId === requestSeqRef.current) setResult(res);
     } catch (e) {
-      setError(String(e));
+      if (reqId === requestSeqRef.current) setError(String(e));
     } finally {
-      setExecuting(false);
+      endRequest(reqId);
     }
-  }, [connectionId, database]);
+  }, [connectionId, database, beginRequest, endRequest]);
 
   useEffect(() => { executeRef.current = executeCurrentStatement; }, [executeCurrentStatement]);
 
@@ -548,20 +646,23 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
   const explainCurrentStatement = useCallback(async () => {
     const queryToRun = getQueryText();
     if (!queryToRun) return;
-    setExecuting(true);
+    const reqId = beginRequest();
+    if (reqId === null) return;
     setError(null);
     setResultMode("explain");
     try {
       const res = await api.explainQuery({ connection_id: connectionId, database, sql: queryToRun });
+      if (reqId !== requestSeqRef.current) return;
       setExplainResult(res);
       setResult(null);
     } catch (e) {
+      if (reqId !== requestSeqRef.current) return;
       setError(String(e));
       setExplainResult(null);
     } finally {
-      setExecuting(false);
+      endRequest(reqId);
     }
-  }, [connectionId, database, getQueryText]);
+  }, [connectionId, database, getQueryText, beginRequest, endRequest]);
 
   // ── Toolbar actions ──
 
@@ -605,6 +706,22 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     () => loadedSavedQuery !== null && sql !== loadedSavedQuery.sql,
     [loadedSavedQuery, sql],
   );
+
+  useReportTabDirty(tabId, "query", isDirty);
+
+  // Session persistence of the editor text, keyed by tab.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try { sessionStorage.setItem(SQL_STORAGE_PREFIX + tabId, sql); } catch {}
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [sql, tabId]);
+  useEffect(() => {
+    // Tabs stay mounted until closed, so unmount means the tab is gone.
+    return () => {
+      try { sessionStorage.removeItem(SQL_STORAGE_PREFIX + tabId); } catch {}
+    };
+  }, [tabId]);
 
   const handleSaveQuery = useCallback(() => {
     setSaveQueryName("");
@@ -901,6 +1018,8 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
                   database={database}
                   sourceTable={sourceTable}
                   onReExecute={handleReExecute}
+                  tabId={tabId}
+                  isActive={isActiveTab}
                 />
               )
             )}

@@ -5,6 +5,8 @@ import {
   parseSshHostKeyMismatch,
   type SshHostKeyMismatchInfo,
 } from "../lib/tauri";
+import { useTabStore } from "./tabStore";
+import { useAlterTableDraftStore } from "./alterTableDraftStore";
 
 /**
  * In-flight request for the user to enter an SSH key passphrase. The
@@ -133,12 +135,32 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   removeConnection: async (id) => {
     try {
       await api.deleteConnection(id);
-      set((s) => ({
-        connections: s.connections.filter((c) => c.id !== id),
-      }));
     } catch (e) {
       set({ error: String(e) });
+      return;
     }
+    // Close the live pool too. Best effort: the saved config is already
+    // gone, and a backend that never opened this pool may reject it.
+    try {
+      await api.disconnect(id);
+    } catch {
+      // ignore
+    }
+    set((s) => {
+      const active = new Set(s.activeConnections);
+      active.delete(id);
+      const { [id]: _removed, ...schemaVersions } = s.schemaVersions;
+      return {
+        connections: s.connections.filter((c) => c.id !== id),
+        activeConnections: active,
+        schemaVersions,
+      };
+    });
+    // Tabs and Alter Table drafts of a deleted connection can't be used
+    // any more; drop them so they stop polling / erroring.
+    const valid = new Set(get().connections.map((c) => c.id));
+    useTabStore.getState().pruneStaleConnections(valid);
+    useAlterTableDraftStore.getState().pruneStaleConnections(valid);
   },
 
   connectTo: async (config) => {

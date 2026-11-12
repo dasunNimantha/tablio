@@ -150,6 +150,24 @@
   margin-left: 6px;
 }
 
+.json-set-null-btn {
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  line-height: 18px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.json-set-null-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
 .json-row-pk {
   opacity: 0.7;
 }

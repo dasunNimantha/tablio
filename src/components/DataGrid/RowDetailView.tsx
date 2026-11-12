@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { X, ChevronDown, ChevronRight, Copy, Check, CheckCheck, Lock } from "lucide-react";
 import type { ColumnInfo } from "../../lib/tauri";
+import { isNumericLike, isNumericType, isTextLike, parseCellInput, valueCategory } from "../../lib/cellValues";
 import "./RowDetailView.css";
 
 interface Props {
@@ -71,86 +72,61 @@ function parseMaxLength(dataType: string): number | null {
   return m ? parseInt(m[1], 10) : null;
 }
 
-function validateValue(value: string, dataType: string, isNullable: boolean): string | null {
-  const trimmed = value.trim();
+export type EditResult = { ok: true; value: unknown } | { ok: false; error: string };
 
-  if (trimmed === "" || trimmed.toLowerCase() === "null") {
-    return isNullable ? null : "This field is NOT NULL — value required";
+/**
+ * Validate and convert the inline editor's text into the value to store.
+ *
+ * Text is stored exactly as typed: no trimming, and "" or "null" stay
+ * strings (use the NULL button for SQL NULL). For non-text types an
+ * empty value (or the word NULL) can't be a valid value, so it means
+ * NULL when the column allows it. Numbers keep exact precision.
+ */
+export function prepareEditValue(value: string, col: ColumnInfo): EditResult {
+  const dataType = col.data_type;
+  const trimmed = value.trim();
+  if (!isTextLike(dataType)) {
+    if (trimmed === "" || trimmed.toLowerCase() === "null") {
+      return col.is_nullable
+        ? { ok: true, value: null }
+        : { ok: false, error: "This field is NOT NULL — value required" };
+    }
   }
 
   const category = getTypeCategory(dataType);
-
   switch (category) {
-    case "integer": {
-      if (!/^-?\d+$/.test(trimmed)) return `Expected integer, got "${trimmed}"`;
-      try {
-        const n = BigInt(trimmed);
-        const dt = dataType.toLowerCase();
-        if (/^(smallint|int2)/.test(dt) && (n < -32768n || n > 32767n))
-          return "smallint range: -32768 to 32767";
-        if (/^(integer|int4|serial)/.test(dt) && (n < -2147483648n || n > 2147483647n))
-          return "integer range: -2147483648 to 2147483647";
-      } catch {
-        return `Invalid integer: "${trimmed}"`;
-      }
-      break;
-    }
-    case "number": {
-      if (isNaN(Number(trimmed))) return `Expected number, got "${trimmed}"`;
-      break;
-    }
-    case "boolean":
-      if (!["true", "false", "t", "f", "1", "0", "yes", "no"].includes(trimmed.toLowerCase()))
-        return "Expected boolean (true/false/t/f/1/0)";
-      break;
     case "json":
-      try { JSON.parse(trimmed); } catch { return "Invalid JSON syntax"; }
-      break;
+      try { return { ok: true, value: JSON.parse(trimmed) }; } catch { return { ok: false, error: "Invalid JSON syntax" }; }
     case "uuid":
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed))
-        return "Invalid UUID (expected xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)";
-      break;
+        return { ok: false, error: "Invalid UUID (expected xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)" };
+      return { ok: true, value: trimmed };
     case "date":
-      if (isNaN(Date.parse(trimmed))) return "Invalid date format";
-      break;
+      if (isNaN(Date.parse(trimmed))) return { ok: false, error: "Invalid date format" };
+      return { ok: true, value: trimmed };
     case "timestamp":
-      if (isNaN(Date.parse(trimmed))) return "Invalid timestamp format";
-      break;
+      if (isNaN(Date.parse(trimmed))) return { ok: false, error: "Invalid timestamp format" };
+      return { ok: true, value: trimmed };
     case "varchar":
     case "char": {
       const maxLen = parseMaxLength(dataType);
-      if (maxLen !== null && trimmed.length > maxLen)
-        return `Max length is ${maxLen}, got ${trimmed.length}`;
-      break;
+      if (maxLen !== null && value.length > maxLen)
+        return { ok: false, error: `Max length is ${maxLen}, got ${value.length}` };
+      return { ok: true, value };
     }
   }
 
-  return null;
-}
-
-function coerceForSave(value: string, col: ColumnInfo): unknown {
-  const trimmed = value.trim();
-  if ((trimmed === "" || trimmed.toLowerCase() === "null") && col.is_nullable) return null;
-
-  const cat = getTypeCategory(col.data_type);
-  switch (cat) {
-    case "integer": {
-      const n = parseInt(trimmed, 10);
-      return isNaN(n) ? trimmed : n;
-    }
-    case "number": {
-      const n = parseFloat(trimmed);
-      return isNaN(n) ? trimmed : n;
-    }
-    case "boolean": {
-      const lower = trimmed.toLowerCase();
-      return ["true", "t", "1", "yes"].includes(lower);
-    }
-    case "json":
-      try { return JSON.parse(trimmed); } catch { return trimmed; }
-    default:
-      return trimmed;
+  const parsed = parseCellInput(value, dataType);
+  if (!parsed.ok) return parsed;
+  if (valueCategory(dataType) === "integer" && !/unsigned/i.test(dataType)) {
+    const n = BigInt(String(parsed.value));
+    const dt = dataType.toLowerCase();
+    if (/^(smallint|int2)\b/.test(dt) && (n < -32768n || n > 32767n))
+      return { ok: false, error: "smallint range: -32768 to 32767" };
+    if (/^(integer|int4|int|serial)\b/.test(dt) && (n < -2147483648n || n > 2147483647n))
+      return { ok: false, error: "integer range: -2147483648 to 2147483647" };
   }
+  return parsed;
 }
 
 function JsonValue({ value, depth, filterQ }: { value: unknown; depth: number; filterQ: string }) {
@@ -281,6 +257,7 @@ export function RowDetailView({
   const editRef = useRef<HTMLTextAreaElement>(null);
   const resizeRef = useRef<{ startX: number; startW: number } | null>(null);
   const blurCommitRef = useRef(true);
+  const editStartValueRef = useRef("");
   const copyTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const blurTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -374,6 +351,7 @@ export function RowDetailView({
       : typeof value === "object"
         ? JSON.stringify(value, null, 2)
         : String(value);
+    editStartValueRef.current = str;
     setEditingKey(key);
     setEditingColIndex(colIndex);
     setEditValue(str);
@@ -381,44 +359,53 @@ export function RowDetailView({
     blurCommitRef.current = true;
   };
 
+  const closeEditor = () => {
+    setEditingKey(null);
+    setEditingColIndex(-1);
+    setEditError(null);
+  };
+
+  const recordValue = useCallback((colIndex: number, value: unknown) => {
+    const origVal = row[colIndex];
+    const isSame = (value === null && (origVal === null || origVal === undefined))
+      || (value !== null && JSON.stringify(value) === JSON.stringify(origVal));
+    setPendingEdits((prev) => {
+      if (isSame && !prev.has(colIndex)) return prev;
+      const next = new Map(prev);
+      if (isSame) next.delete(colIndex);
+      else next.set(colIndex, value);
+      return next;
+    });
+  }, [row]);
+
   const commitField = useCallback(() => {
     if (editingColIndex < 0) return;
     const col = columns[editingColIndex];
-    const v = editValue.trim();
 
-    const error = validateValue(v, col.data_type, col.is_nullable);
-    if (error) {
-      setEditError(error);
+    // Nothing typed: leave the value (including NULL) as it was.
+    if (editValue === editStartValueRef.current) {
+      closeEditor();
+      return;
+    }
+
+    const result = prepareEditValue(editValue, col);
+    if (!result.ok) {
+      setEditError(result.error);
       blurCommitRef.current = false;
       return;
     }
 
-    const coerced = coerceForSave(editValue, col);
-    const origVal = row[editingColIndex];
+    recordValue(editingColIndex, result.value);
+    closeEditor();
+  }, [editValue, editingColIndex, columns, recordValue]);
 
-    const isSame = coerced === null && origVal === null
-      || coerced === null && origVal === undefined
-      || JSON.stringify(coerced) === JSON.stringify(origVal);
-
-    if (!isSame) {
-      setPendingEdits((prev) => {
-        const next = new Map(prev);
-        next.set(editingColIndex, coerced);
-        return next;
-      });
-    } else {
-      setPendingEdits((prev) => {
-        if (!prev.has(editingColIndex)) return prev;
-        const next = new Map(prev);
-        next.delete(editingColIndex);
-        return next;
-      });
-    }
-
-    setEditingKey(null);
-    setEditingColIndex(-1);
-    setEditError(null);
-  }, [editValue, editingColIndex, columns, row]);
+  const handleSetNull = useCallback(() => {
+    if (editingColIndex < 0) return;
+    blurCommitRef.current = false;
+    clearTimeout(blurTimerRef.current);
+    recordValue(editingColIndex, null);
+    closeEditor();
+  }, [editingColIndex, recordValue]);
 
   const handleCancel = () => {
     blurCommitRef.current = false;
@@ -522,11 +509,26 @@ export function RowDetailView({
                     onChange={(e) => { setEditValue(e.target.value); setEditError(null); blurCommitRef.current = true; resizeTextarea(); }}
                     onKeyDown={(e) => {
                       if (e.key === "Escape") { handleCancel(); }
+                      if (col.is_nullable && e.key.toLowerCase() === "n" && (e.ctrlKey || e.metaKey) && e.shiftKey) {
+                        e.preventDefault();
+                        handleSetNull();
+                      }
                       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); blurCommitRef.current = false; commitField(); }
                     }}
                     onBlur={handleBlur}
                   />
                   {showQuotes && <span className={editColorClass}>"</span>}
+                  {col.is_nullable && (
+                    <button
+                      type="button"
+                      className="json-set-null-btn"
+                      title="Set to NULL (Ctrl+Shift+N)"
+                      // Fire before the textarea's blur commits the text.
+                      onMouseDown={(e) => { e.preventDefault(); handleSetNull(); }}
+                    >
+                      NULL
+                    </button>
+                  )}
                   {editError && <span className="json-inline-error">{editError}</span>}
                   {!isLast && <span className="json-comma">,</span>}
                 </div>
@@ -552,7 +554,13 @@ export function RowDetailView({
                   title={isPk ? "Primary key — not editable" : "Double-click to edit"}
                 >
                   {isPk && <Lock size={10} className="json-pk-icon" />}
-                  <JsonValue value={displayValue} depth={1} filterQ={filterText} />
+                  {typeof displayValue === "string" && isNumericType(col.data_type) && isNumericLike(displayValue) ? (
+                    // Exact big integers / decimals arrive as strings;
+                    // show them as numbers, not quoted text.
+                    <span className="json-number">{displayValue}</span>
+                  ) : (
+                    <JsonValue value={displayValue} depth={1} filterQ={filterText} />
+                  )}
                 </span>
                 {!isLast && <span className="json-comma">,</span>}
               </div>
