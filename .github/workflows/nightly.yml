@@ -62,17 +62,14 @@ jobs:
         # ourselves right now. Re-evaluate every release:
         #   * RUSTSEC-2023-0071 — `rsa` Marvin timing sidechannel.
         #     No patch upstream; pulled by sqlx-mysql.
-        #   * RUSTSEC-2026-0098 / 0099 / 0104 — `rustls-webpki 0.101.7`
-        #     vulnerabilities. Patched in 0.103.x; we still pull 0.101
-        #     transitively via tauri's HTTP plugin. Bumping rustls is
-        #     a separate, targeted dep update.
+        #   * RUSTSEC-2026-0459 — bundled SQLite in `libsqlite3-sys
+        #     0.35`. Patched in 0.39, but sqlx-sqlite 0.9.0 caps it at
+        #     <0.38. Drop this once a sqlx release allows 0.39+.
         working-directory: src-tauri
         run: |
           cargo audit \
             --ignore RUSTSEC-2023-0071 \
-            --ignore RUSTSEC-2026-0098 \
-            --ignore RUSTSEC-2026-0099 \
-            --ignore RUSTSEC-2026-0104
+            --ignore RUSTSEC-2026-0459
 
       - uses: actions/setup-node@v7
         with:
