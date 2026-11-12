@@ -3,121 +3,144 @@ use sqlx::{Column, PgPool, Row, TypeInfo};
 use std::time::Instant;
 
 use crate::models::*;
-use crate::util::sql::{split_sql_statements_for, statement_is_select_like, SqlDialect};
+use crate::util::sql::{
+    ensure_row_matched, script_transaction_state, split_sql_statements_for,
+    statement_is_select_like, ScriptTxn, SqlDialect,
+};
 
+/// Convert a Postgres row into JSON cells.
+///
+/// Never panics on a column-count mismatch: cells past the row's own
+/// width are padded with `null`. A non-NULL value is never rendered as
+/// `null`: types without a dedicated decoder (enums, arrays, interval,
+/// inet/cidr/macaddr, money, bit, xml, tsvector, geometric types,
+/// timetz, ranges, ...) fall back to the server's text representation.
+/// That fallback is exact when the row was fetched with the simple
+/// query protocol (`sqlx::raw_sql`), which returns every value in text
+/// format; this is why the grid and console paths use it.
 pub fn pg_row_to_json_values(
     row: &sqlx::postgres::PgRow,
     col_count: usize,
 ) -> Vec<serde_json::Value> {
-    let mut values = Vec::with_capacity(col_count);
-    for i in 0..col_count {
-        let col = row.column(i);
-        let type_name = col.type_info().name();
-        let val: serde_json::Value = match type_name {
-            "BOOL" => row
-                .try_get::<bool, _>(i)
+    let width = row.len();
+    (0..col_count)
+        .map(|i| {
+            if i < width {
+                pg_cell_to_json(row, i)
+            } else {
+                serde_json::Value::Null
+            }
+        })
+        .collect()
+}
+
+fn pg_float_to_json(v: f64) -> serde_json::Value {
+    if v.is_finite() {
+        serde_json::Number::from_f64(v)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::String(v.to_string()))
+    } else {
+        serde_json::Value::String(v.to_string())
+    }
+}
+
+fn pg_cell_to_json(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
+    use crate::util::sql::{exact_numeric_text_to_json, i64_to_json};
+    use serde_json::Value;
+    use sqlx::postgres::PgValueFormat;
+    use sqlx::ValueRef;
+
+    let raw = match row.try_get_raw(i) {
+        Ok(raw) => raw,
+        Err(_) => return Value::Null,
+    };
+    if raw.is_null() {
+        return Value::Null;
+    }
+    let is_text = raw.format() == PgValueFormat::Text;
+    let type_name = raw.type_info().name().to_string();
+    // Server text representation (text-format values only).
+    let raw_text = || -> Option<String> {
+        if is_text {
+            raw.as_bytes()
                 .ok()
-                .map(serde_json::Value::Bool)
-                .unwrap_or(serde_json::Value::Null),
-            "INT2" => row
-                .try_get::<i16, _>(i)
-                .ok()
-                .map(|v| serde_json::Value::Number(v.into()))
-                .unwrap_or(serde_json::Value::Null),
-            "INT4" => row
-                .try_get::<i32, _>(i)
-                .ok()
-                .map(|v| serde_json::Value::Number(v.into()))
-                .unwrap_or(serde_json::Value::Null),
-            "INT8" => row
-                .try_get::<i64, _>(i)
-                .ok()
-                .map(|v| serde_json::Value::Number(v.into()))
-                .unwrap_or(serde_json::Value::Null),
-            "FLOAT4" => row
-                .try_get::<f32, _>(i)
-                .ok()
-                .map(|v| {
-                    let f = v as f64;
-                    if f.is_finite() {
-                        serde_json::Number::from_f64(f)
-                            .map(serde_json::Value::Number)
-                            .unwrap_or(serde_json::Value::String(v.to_string()))
-                    } else {
-                        serde_json::Value::String(v.to_string())
-                    }
-                })
-                .unwrap_or(serde_json::Value::Null),
-            "FLOAT8" => row
-                .try_get::<f64, _>(i)
-                .ok()
-                .map(|v| {
-                    if v.is_finite() {
-                        serde_json::Number::from_f64(v)
-                            .map(serde_json::Value::Number)
-                            .unwrap_or(serde_json::Value::String(v.to_string()))
-                    } else {
-                        serde_json::Value::String(v.to_string())
-                    }
-                })
-                .unwrap_or(serde_json::Value::Null),
-            "NUMERIC" => row
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+        } else {
+            None
+        }
+    };
+
+    let decoded: Option<Value> = match type_name.as_str() {
+        "BOOL" => row.try_get::<bool, _>(i).ok().map(Value::Bool),
+        "INT2" => row
+            .try_get::<i16, _>(i)
+            .ok()
+            .map(|v| Value::Number(v.into())),
+        "INT4" => row
+            .try_get::<i32, _>(i)
+            .ok()
+            .map(|v| Value::Number(v.into())),
+        "INT8" => row.try_get::<i64, _>(i).ok().map(i64_to_json),
+        "FLOAT4" => row
+            .try_get::<f32, _>(i)
+            .ok()
+            .map(|v| pg_float_to_json(v as f64)),
+        "FLOAT8" => row.try_get::<f64, _>(i).ok().map(pg_float_to_json),
+        "NUMERIC" => match raw_text() {
+            // Exact text, including values beyond rust_decimal's 28
+            // digits and NaN / Infinity.
+            Some(t) => Some(exact_numeric_text_to_json(&t)),
+            None => row
                 .try_get::<rust_decimal::Decimal, _>(i)
                 .ok()
-                .map(|d| {
-                    use rust_decimal::prelude::ToPrimitive;
-                    // to_f64() can lose precision for large or high-scale decimals; string fallback preserves exact value.
-                    d.to_f64()
-                        .and_then(serde_json::Number::from_f64)
-                        .map(serde_json::Value::Number)
-                        .unwrap_or(serde_json::Value::String(d.to_string()))
-                })
-                .unwrap_or(serde_json::Value::Null),
-            "JSON" | "JSONB" => row
-                .try_get::<serde_json::Value, _>(i)
-                .unwrap_or(serde_json::Value::Null),
-            "TIMESTAMP" | "TIMESTAMPTZ" => row
-                .try_get::<chrono::NaiveDateTime, _>(i)
-                .ok()
-                .map(|dt| serde_json::Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string()))
-                .or_else(|| {
-                    row.try_get::<chrono::DateTime<chrono::Utc>, _>(i)
-                        .ok()
-                        .map(|dt| serde_json::Value::String(dt.to_rfc3339()))
-                })
-                .unwrap_or(serde_json::Value::Null),
-            "DATE" => row
-                .try_get::<chrono::NaiveDate, _>(i)
-                .ok()
-                .map(|d| serde_json::Value::String(d.format("%Y-%m-%d").to_string()))
-                .unwrap_or(serde_json::Value::Null),
-            "TIME" | "TIMETZ" => row
-                .try_get::<chrono::NaiveTime, _>(i)
-                .ok()
-                .map(|t| serde_json::Value::String(t.format("%H:%M:%S").to_string()))
-                .unwrap_or(serde_json::Value::Null),
-            "UUID" => row
-                .try_get::<uuid::Uuid, _>(i)
-                .ok()
-                .map(|u| serde_json::Value::String(u.to_string()))
-                .unwrap_or(serde_json::Value::Null),
-            "BYTEA" => row
-                .try_get::<Vec<u8>, _>(i)
-                .ok()
-                .map(|b| {
-                    let hex_str: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
-                    serde_json::Value::String(format!("\\x{}", hex_str))
-                })
-                .unwrap_or(serde_json::Value::Null),
-            _ => row
-                .try_get::<String, _>(i)
-                .ok()
-                .map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null),
-        };
-        values.push(val);
+                .map(|d| exact_numeric_text_to_json(&d.to_string())),
+        },
+        "JSON" | "JSONB" => row.try_get::<serde_json::Value, _>(i).ok(),
+        "TIMESTAMP" => row
+            .try_get::<chrono::NaiveDateTime, _>(i)
+            .ok()
+            .map(|dt| Value::String(dt.format("%Y-%m-%d %H:%M:%S%.f").to_string())),
+        "TIMESTAMPTZ" => row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>(i)
+            .ok()
+            .map(|dt| Value::String(dt.to_rfc3339())),
+        "DATE" => row
+            .try_get::<chrono::NaiveDate, _>(i)
+            .ok()
+            .map(|d| Value::String(d.format("%Y-%m-%d").to_string())),
+        "TIME" => row
+            .try_get::<chrono::NaiveTime, _>(i)
+            .ok()
+            .map(|t| Value::String(t.format("%H:%M:%S%.f").to_string())),
+        "UUID" => row
+            .try_get::<uuid::Uuid, _>(i)
+            .ok()
+            .map(|u| Value::String(u.to_string())),
+        "BYTEA" => row.try_get::<Vec<u8>, _>(i).ok().map(|b| {
+            let hex_str: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
+            Value::String(format!("\\x{}", hex_str))
+        }),
+        _ => None,
+    };
+    if let Some(v) = decoded {
+        return v;
     }
-    values
+
+    // Fallback for every other type, and for values a typed decoder
+    // rejected (e.g. `infinity` timestamps, BC dates).
+    if let Some(t) = raw_text() {
+        return Value::String(t);
+    }
+    if let Ok(s) = row.try_get_unchecked::<String, _>(i) {
+        return Value::String(s);
+    }
+    match raw.as_bytes() {
+        Ok(b) => {
+            let hex_str: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
+            Value::String(format!("\\x{}", hex_str))
+        }
+        Err(_) => Value::String(format!("<{} value>", type_name)),
+    }
 }
 
 pub fn quote_ident(name: &str) -> String {
@@ -959,7 +982,9 @@ pub async fn pg_fetch_rows_impl(
         offset
     );
 
-    let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+    // Simple query protocol so every value arrives in text format and
+    // types without a dedicated decoder still render exactly.
+    let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
         .fetch_all(pool)
         .await?;
     let col_count = columns.len();
@@ -996,34 +1021,63 @@ pub async fn pg_execute_query(pool: &PgPool, _database: &str, sql: &str) -> Resu
     }
 
     let mut conn = pool.acquire().await?;
+    let outcome = pg_run_statements(&mut conn, &statements, start).await;
+
+    // A pooled connection must never go back to the pool inside a
+    // transaction (sqlx does not roll back a user-issued BEGIN), or
+    // the next borrower inherits an open / aborted transaction.
+    let txn = script_transaction_state(&statements);
+    let left_open = outcome.is_ok() && txn == ScriptTxn::LeftOpen;
+    if txn != ScriptTxn::Untouched && (outcome.is_err() || left_open) {
+        // Outside a transaction this only raises a warning.
+        if sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.is_err() {
+            conn.close_on_drop();
+        }
+    }
+    if left_open {
+        anyhow::bail!(
+            "The script left a transaction open; it was rolled back. \
+             Include COMMIT (or ROLLBACK) in the same run."
+        );
+    }
+    outcome
+}
+
+async fn pg_run_statements(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    statements: &[String],
+    start: Instant,
+) -> Result<QueryResult> {
+    let Some((last, leading)) = statements.split_last() else {
+        return Err(anyhow::anyhow!("Query is empty"));
+    };
 
     // Execute all but the last statement as plain exec — we don't
     // care about rows from earlier statements, just side effects.
-    for stmt in &statements[..statements.len() - 1] {
+    for stmt in leading {
         sqlx::query(sqlx::AssertSqlSafe(stmt.as_str()))
-            .execute(&mut *conn)
+            .execute(&mut **conn)
             .await?;
     }
 
-    let last = statements.last().unwrap().as_str();
-    let last_is_select =
-        statement_is_select_like(last, &["SELECT", "WITH", "SHOW", "EXPLAIN", "VALUES"]);
+    let last = last.as_str();
+    let last_is_select = statement_is_select_like(
+        last,
+        &["SELECT", "WITH", "SHOW", "EXPLAIN", "VALUES", "TABLE"],
+    );
 
     if last_is_select {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(last))
-            .fetch_all(&mut *conn)
+        // Simple query protocol: every value arrives in text format, so
+        // types without a dedicated decoder still render exactly.
+        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(last))
+            .fetch_all(&mut **conn)
             .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
-        let columns: Vec<String> = if rows.is_empty() {
-            vec![]
-        } else {
-            rows[0]
-                .columns()
-                .iter()
-                .map(|c| c.name().to_string())
-                .collect()
-        };
+        let columns: Vec<String> = rows
+            .first()
+            .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
+            .unwrap_or_default();
 
         let col_count = columns.len();
         let data_rows: Vec<Vec<serde_json::Value>> = rows
@@ -1040,7 +1094,7 @@ pub async fn pg_execute_query(pool: &PgPool, _database: &str, sql: &str) -> Resu
         })
     } else {
         let result = sqlx::query(sqlx::AssertSqlSafe(last))
-            .execute(&mut *conn)
+            .execute(&mut **conn)
             .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -1517,9 +1571,10 @@ pub async fn pg_apply_changes(pool: &PgPool, changes: &DataChanges) -> Result<()
             set_clause,
             where_clause.join(" AND ")
         );
-        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        let result = sqlx::query(sqlx::AssertSqlSafe(&*sql))
             .execute(&mut *tx)
             .await?;
+        ensure_row_matched(result.rows_affected(), "update", &update.primary_key_values)?;
     }
 
     for insert in &changes.inserts {
@@ -1554,9 +1609,10 @@ pub async fn pg_apply_changes(pool: &PgPool, changes: &DataChanges) -> Result<()
             fq_table,
             where_clause.join(" AND ")
         );
-        sqlx::query(sqlx::AssertSqlSafe(&*sql))
+        let result = sqlx::query(sqlx::AssertSqlSafe(&*sql))
             .execute(&mut *tx)
             .await?;
+        ensure_row_matched(result.rows_affected(), "delete", &delete.primary_key_values)?;
     }
 
     tx.commit().await?;

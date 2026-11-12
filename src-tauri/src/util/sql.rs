@@ -565,6 +565,79 @@ pub fn filter_unsafe_reason_for(filter: &str, dialect: SqlDialect) -> Option<&'s
     None
 }
 
+/// Error for a primary-key keyed UPDATE / DELETE that matched no row.
+/// Returning an error makes `apply_changes` roll back the whole batch
+/// instead of reporting a silent no-op as success.
+pub fn ensure_row_matched(
+    rows_affected: u64,
+    action: &str,
+    pk: &[(String, serde_json::Value)],
+) -> anyhow::Result<()> {
+    if rows_affected > 0 {
+        return Ok(());
+    }
+    let key = pk
+        .iter()
+        .map(|(c, v)| format!("{} = {}", c, v))
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::bail!(
+        "Cannot {} row ({}): no matching row was found. It may have been changed or deleted \
+         concurrently; refresh and try again. No changes were saved.",
+        action,
+        key
+    )
+}
+
+/// What a console script does to transaction state, judged from its
+/// statements' leading keywords.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptTxn {
+    /// No transaction-control statements at all.
+    Untouched,
+    /// Transactions were opened but the last one was closed again.
+    Balanced,
+    /// The last transaction-control statement opened a transaction
+    /// that the script never committed or rolled back.
+    LeftOpen,
+}
+
+/// Classify `statements` (already split) by their transaction-control
+/// statements. Pooled console connections use this to decide whether
+/// they must be cleaned up (rolled back) before going back to the pool.
+pub fn script_transaction_state(statements: &[String]) -> ScriptTxn {
+    let mut state = ScriptTxn::Untouched;
+    for stmt in statements {
+        let body = strip_leading_comments(stmt.trim_start());
+        let upper = body
+            .to_ascii_uppercase()
+            .split_whitespace()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let first = upper.split(' ').next().unwrap_or("");
+        let opens = match first {
+            "BEGIN" => !upper.starts_with("BEGIN ATOMIC"),
+            "START" => upper.starts_with("START TRANSACTION"),
+            _ => false,
+        };
+        let closes = match first {
+            "COMMIT" | "END" | "ABORT" => true,
+            // `ROLLBACK TO [SAVEPOINT] x` keeps the transaction open.
+            "ROLLBACK" => !upper.starts_with("ROLLBACK TO"),
+            "PREPARE" => upper.starts_with("PREPARE TRANSACTION"),
+            _ => false,
+        };
+        let chains = closes && upper.contains("AND CHAIN");
+        if opens || chains {
+            state = ScriptTxn::LeftOpen;
+        } else if closes {
+            state = ScriptTxn::Balanced;
+        }
+    }
+    state
+}
+
 /// Largest integer magnitude a JavaScript `number` represents exactly
 /// (`Number.MAX_SAFE_INTEGER`).
 pub const JS_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
@@ -1160,6 +1233,35 @@ mod tests {
         // A standard string keeps a literal backslash and ends at the quote.
         let out = split_sql_statements_for(r"SELECT 'a\'; SELECT 1", SqlDialect::Postgres);
         assert_eq!(out, vec![r"SELECT 'a\'", "SELECT 1"]);
+    }
+
+    #[test]
+    fn script_transaction_state_classification() {
+        let s = |v: &[&str]| -> Vec<String> { v.iter().map(|x| x.to_string()).collect() };
+        assert_eq!(
+            script_transaction_state(&s(&["SELECT 1"])),
+            ScriptTxn::Untouched
+        );
+        assert_eq!(
+            script_transaction_state(&s(&["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"])),
+            ScriptTxn::Balanced
+        );
+        assert_eq!(
+            script_transaction_state(&s(&["begin", "SELECT 1"])),
+            ScriptTxn::LeftOpen
+        );
+        assert_eq!(
+            script_transaction_state(&s(&["START TRANSACTION", "ROLLBACK TO SAVEPOINT a"])),
+            ScriptTxn::LeftOpen
+        );
+        assert_eq!(
+            script_transaction_state(&s(&["BEGIN", "COMMIT AND CHAIN"])),
+            ScriptTxn::LeftOpen
+        );
+        assert_eq!(
+            script_transaction_state(&s(&["-- c\nBEGIN", "END"])),
+            ScriptTxn::Balanced
+        );
     }
 
     #[test]
