@@ -11,6 +11,7 @@ import { useConnectionStore } from "../../stores/connectionStore";
 import { useUserSettingsStore } from "../../stores/userSettingsStore";
 import { boolLiteral, quoteIdent, quoteQualified, stringLiteral } from "../../lib/sqlDialect";
 import { readZoomFactor } from "../../lib/zoom";
+import type { SourceTable } from "./simpleSelect";
 import "../DataGrid/ag-grid-theme.css";
 import "./QueryConsole.css";
 
@@ -89,59 +90,8 @@ function buildResultTableTheme(editorFontSize: number) {
   });
 }
 
-export interface SourceTable {
-  schema: string;
-  table: string;
-}
-
-/**
- * Best-effort extraction of schema.table from a simple SELECT query.
- * Returns null for JOINs, UNIONs, subqueries, CTEs, or non-SELECT statements.
- */
-export function parseSimpleSelect(sql: string): SourceTable | null {
-  const trimmed = sql.trim();
-  const upper = trimmed.toUpperCase();
-
-  if (!upper.startsWith("SELECT") && !upper.startsWith("WITH")) return null;
-  if (upper.startsWith("WITH")) return null;
-  if (/\bJOIN\b/i.test(trimmed)) return null;
-  if (/\bUNION\b/i.test(trimmed)) return null;
-  if (/\bINTERSECT\b/i.test(trimmed)) return null;
-  if (/\bEXCEPT\b/i.test(trimmed)) return null;
-
-  // Match FROM clause — support: FROM "schema"."table", FROM schema.table, FROM "table", FROM table
-  const fromMatch = trimmed.match(
-    /\bFROM\s+(?:"([^"]+)"\s*\.\s*"([^"]+)"|"([^"]+)"\s*\.\s*(\w+)|(\w+)\s*\.\s*"([^"]+)"|(\w+)\s*\.\s*(\w+)|"([^"]+)"|(\w+))/i
-  );
-  if (!fromMatch) return null;
-
-  let schema: string;
-  let table: string;
-
-  if (fromMatch[1] && fromMatch[2]) {
-    schema = fromMatch[1]; table = fromMatch[2]; // "schema"."table"
-  } else if (fromMatch[3] && fromMatch[4]) {
-    schema = fromMatch[3]; table = fromMatch[4]; // "schema".table
-  } else if (fromMatch[5] && fromMatch[6]) {
-    schema = fromMatch[5]; table = fromMatch[6]; // schema."table"
-  } else if (fromMatch[7] && fromMatch[8]) {
-    schema = fromMatch[7]; table = fromMatch[8]; // schema.table
-  } else if (fromMatch[9]) {
-    schema = ""; table = fromMatch[9]; // "table" — schema unknown, caller resolves
-  } else if (fromMatch[10]) {
-    schema = ""; table = fromMatch[10]; // table — schema unknown, caller resolves
-  } else {
-    return null;
-  }
-
-  // Reject if there's a comma after the table name (multiple tables)
-  const afterFrom = trimmed.slice((fromMatch.index ?? 0) + fromMatch[0].length).trimStart();
-  if (afterFrom.startsWith(",")) return null;
-  // Reject subqueries in FROM
-  if (afterFrom.startsWith("(")) return null;
-
-  return { schema, table };
-}
+export { parseSimpleSelect } from "./simpleSelect";
+export type { SourceTable } from "./simpleSelect";
 
 interface Props {
   result: QueryResult;
@@ -278,7 +228,19 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
     return tableColumns.filter((c) => c.is_primary_key);
   }, [tableColumns]);
 
+  // Editing writes each result column back into the same-named column
+  // of `sourceTable`, so every result column must be a real column of
+  // that table (no computed / aliased / duplicated names) and the
+  // primary key must be present to address rows.
+  const resultColumnsMapToTable = useMemo(() => {
+    if (!tableColumns) return false;
+    const names = new Set(tableColumns.map((c) => c.name));
+    return new Set(result.columns).size === result.columns.length &&
+      result.columns.every((c) => names.has(c));
+  }, [tableColumns, result.columns]);
+
   const isUpdatable = sourceTable !== null && pkColumns.length > 0 &&
+    resultColumnsMapToTable &&
     pkColumns.every((pk) => result.columns.includes(pk.name));
 
   const columnInfos = useMemo((): ColumnInfo[] => {
@@ -853,6 +815,8 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
         <span className={`result-updatable-badge ${isUpdatable ? "updatable" : "readonly"}`} title={
           isUpdatable
             ? `Editable: ${sourceTable!.schema}.${sourceTable!.table} (PK: ${pkColumns.map(c => c.name).join(", ")})`
+            : sourceTable && pkColumns.length > 0 && !resultColumnsMapToTable
+              ? "Read-only: result has columns that aren't plain columns of the table"
             : sourceTable && pkColumns.length > 0
               ? `Read-only: primary key column${pkColumns.length > 1 ? "s" : ""} (${pkColumns.map(c => c.name).join(", ")}) not in result`
               : sourceTable
