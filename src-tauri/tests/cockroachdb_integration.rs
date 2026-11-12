@@ -1854,3 +1854,121 @@ async fn crdb_alter_table_add_duplicate_column_errors() {
         .await
         .ok();
 }
+
+// ---------------------------------------------------------------------------
+// Driver correctness regressions
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn crdb_fetch_rows_table_without_primary_key() {
+    let (driver, db) = crdb_driver!();
+    let tbl = unique_table("crdb_nopk");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE {} (name STRING, qty INT); INSERT INTO {} VALUES ('a', 1), ('b', 2)",
+                tbl, tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let cols = driver.list_columns(&db, SCHEMA, &tbl).await.unwrap();
+    assert!(
+        !cols.iter().any(|c| c.name == "rowid"),
+        "hidden rowid must not be listed: {cols:?}"
+    );
+    let data = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 50, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.columns.len(), 2);
+    assert_eq!(data.rows.len(), 2);
+    for row in &data.rows {
+        assert_eq!(row.len(), 2);
+    }
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE {}", tbl))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn crdb_big_integer_ids_round_trip_through_apply_changes() {
+    let (driver, db) = crdb_driver!();
+    let tbl = unique_table("crdb_bigid");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE {} (id INT8 PRIMARY KEY, note STRING); \
+                 INSERT INTO {} VALUES (1234567890123456789, 'a'), (1234567890123456790, 'b')",
+                tbl, tbl
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0][0], serde_json::json!("1234567890123456789"));
+
+    let changes = DataChanges {
+        connection_id: "test".into(),
+        database: db.clone(),
+        schema: SCHEMA.into(),
+        table: tbl.clone(),
+        updates: vec![CellChange {
+            row_index: 0,
+            column_name: "note".into(),
+            old_value: serde_json::json!("a"),
+            new_value: serde_json::json!("edited"),
+            primary_key_values: vec![("id".into(), data.rows[0][0].clone())],
+        }],
+        inserts: vec![],
+        deletes: vec![DeleteRow {
+            primary_key_values: vec![("id".into(), data.rows[1][0].clone())],
+        }],
+    };
+    driver.apply_changes(&changes).await.unwrap();
+    let after = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(after.rows.len(), 1);
+    assert_eq!(after.rows[0][1], serde_json::json!("edited"));
+
+    let missing = DataChanges {
+        connection_id: "test".into(),
+        database: db.clone(),
+        schema: SCHEMA.into(),
+        table: tbl.clone(),
+        updates: vec![],
+        inserts: vec![],
+        deletes: vec![DeleteRow {
+            primary_key_values: vec![("id".into(), serde_json::json!(42))],
+        }],
+    };
+    assert!(driver.apply_changes(&missing).await.is_err());
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE {}", tbl))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn crdb_console_aborted_transaction_does_not_poison_pool() {
+    let (driver, db) = crdb_driver!();
+    assert!(driver
+        .execute_query(&db, "BEGIN; SELECT 1; SELEC broken")
+        .await
+        .is_err());
+    for _ in 0..8 {
+        let r = driver.execute_query(&db, "SELECT 1 AS one").await.unwrap();
+        assert_eq!(r.rows[0][0], serde_json::json!(1));
+    }
+}

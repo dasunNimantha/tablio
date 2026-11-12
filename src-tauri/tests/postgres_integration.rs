@@ -3406,3 +3406,340 @@ async fn pg_alter_table_toggle_nullable_both_directions_one_call() {
 
     driver.drop_object(DB, SCHEMA, &tbl, "TABLE").await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Driver correctness regressions
+// ---------------------------------------------------------------------------
+
+fn pg_changes(tbl: &str, updates: Vec<CellChange>, deletes: Vec<DeleteRow>) -> DataChanges {
+    DataChanges {
+        connection_id: "test".into(),
+        database: DB.into(),
+        schema: SCHEMA.into(),
+        table: tbl.into(),
+        updates,
+        inserts: vec![],
+        deletes,
+    }
+}
+
+#[tokio::test]
+async fn pg_console_aborted_transaction_does_not_poison_pool() {
+    let driver = pg_driver!();
+    let res = driver
+        .execute_query(DB, "BEGIN; SELECT 1; SELEC broken syntax")
+        .await;
+    assert!(res.is_err());
+    // More runs than the pool has connections, so every pooled
+    // connection is exercised at least once.
+    for _ in 0..8 {
+        let r = driver.execute_query(DB, "SELECT 1 AS one").await.unwrap();
+        assert_eq!(r.rows[0][0], serde_json::json!(1));
+    }
+}
+
+#[tokio::test]
+async fn pg_console_open_transaction_is_rolled_back_and_reported() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_txn_open");
+    driver
+        .execute_query(DB, &format!("CREATE TABLE {} (id int)", tbl))
+        .await
+        .unwrap();
+    let res = driver
+        .execute_query(DB, &format!("BEGIN; INSERT INTO {} VALUES (1)", tbl))
+        .await;
+    assert!(res.is_err(), "open transaction must be reported");
+    for _ in 0..8 {
+        let r = driver
+            .execute_query(DB, &format!("SELECT count(*) AS c FROM {}", tbl))
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], serde_json::json!(0));
+    }
+    // A balanced script still works and commits.
+    driver
+        .execute_query(
+            DB,
+            &format!("BEGIN; INSERT INTO {} VALUES (2); COMMIT; SELECT 1", tbl),
+        )
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(DB, &format!("SELECT count(*) AS c FROM {}", tbl))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!(1));
+    driver
+        .execute_query(DB, &format!("DROP TABLE {}", tbl))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pg_types_render_text_instead_of_null() {
+    let driver = pg_driver!();
+    let enum_name = unique_table("pg_mood");
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TYPE {} AS ENUM ('happy', 'sad')", enum_name),
+        )
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(
+            DB,
+            &format!(
+                "SELECT 'happy'::{} AS e, ARRAY[1,2,3] AS arr, interval '1 day 2 hours' AS iv, \
+                 inet '10.0.0.1/8' AS ip, cidr '10.0.0.0/8' AS net, macaddr '08:00:2b:01:02:03' AS mac, \
+                 B'1010' AS bits, '<a>x</a>'::xml AS x, 'a fat cat'::tsvector AS ts, point(1,2) AS pt, \
+                 '12:34:56.789+05:30'::timetz AS ttz, 12.5::money AS m, \
+                 'NaN'::numeric AS nan, \
+                 1234567890123456789012345678901234567890.123456789::numeric AS hugenum, \
+                 9007199254740993::int8 AS big, 42::int8 AS small, \
+                 '2024-01-02 03:04:05.123456'::timestamp AS tsf, '2024-01-02 03:04:05'::timestamp AS ts0, \
+                 '10:11:12.5'::time AS tm, NULL::int4 AS n",
+                enum_name
+            ),
+        )
+        .await
+        .unwrap();
+    let get = |name: &str| -> serde_json::Value {
+        let idx = r.columns.iter().position(|c| c == name).unwrap();
+        r.rows[0][idx].clone()
+    };
+    use serde_json::json;
+    assert_eq!(get("e"), json!("happy"));
+    assert_eq!(get("arr"), json!("{1,2,3}"));
+    assert_eq!(get("iv"), json!("1 day 02:00:00"));
+    assert_eq!(get("ip"), json!("10.0.0.1/8"));
+    assert_eq!(get("net"), json!("10.0.0.0/8"));
+    assert_eq!(get("mac"), json!("08:00:2b:01:02:03"));
+    assert_eq!(get("bits"), json!("1010"));
+    assert_eq!(get("x"), json!("<a>x</a>"));
+    assert_eq!(get("ts"), json!("'a' 'cat' 'fat'"));
+    assert_eq!(get("pt"), json!("(1,2)"));
+    assert_eq!(get("ttz"), json!("12:34:56.789+05:30"));
+    assert!(get("m").is_string());
+    assert_eq!(get("nan"), json!("NaN"));
+    assert_eq!(
+        get("hugenum"),
+        json!("1234567890123456789012345678901234567890.123456789")
+    );
+    assert_eq!(get("big"), json!("9007199254740993"));
+    assert_eq!(get("small"), json!(42));
+    assert_eq!(get("tsf"), json!("2024-01-02 03:04:05.123456"));
+    assert_eq!(get("ts0"), json!("2024-01-02 03:04:05"));
+    assert_eq!(get("tm"), json!("10:11:12.500"));
+    assert_eq!(get("n"), serde_json::Value::Null);
+
+    driver
+        .execute_query(DB, &format!("DROP TYPE {}", enum_name))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pg_big_integer_ids_round_trip_through_apply_changes() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_bigid");
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {} (id bigint PRIMARY KEY, amount numeric(30,10), note text); \
+                 INSERT INTO {} VALUES (1234567890123456789, 12345678901234567890.0123456789, 'a'), \
+                                       (1234567890123456790, 1.5, 'b')",
+                tbl, tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    let data = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0][0], serde_json::json!("1234567890123456789"));
+    assert_eq!(
+        data.rows[0][1],
+        serde_json::json!("12345678901234567890.0123456789")
+    );
+    assert_eq!(data.rows[1][1], serde_json::json!(1.5));
+
+    let changes = pg_changes(
+        &tbl,
+        vec![CellChange {
+            row_index: 0,
+            column_name: "note".into(),
+            old_value: serde_json::json!("a"),
+            new_value: serde_json::json!("edited"),
+            primary_key_values: vec![("id".into(), data.rows[0][0].clone())],
+        }],
+        vec![DeleteRow {
+            primary_key_values: vec![("id".into(), data.rows[1][0].clone())],
+        }],
+    );
+    driver.apply_changes(&changes).await.unwrap();
+
+    let after = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(after.rows.len(), 1);
+    assert_eq!(after.rows[0][0], serde_json::json!("1234567890123456789"));
+    assert_eq!(after.rows[0][2], serde_json::json!("edited"));
+
+    driver
+        .execute_query(DB, &format!("DROP TABLE {}", tbl))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pg_apply_changes_errors_when_no_row_matches() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_nomatch");
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {} (id int PRIMARY KEY, v text); INSERT INTO {} VALUES (1, 'a')",
+                tbl, tbl
+            ),
+        )
+        .await
+        .unwrap();
+
+    // The first update matches, the second does not: the whole batch
+    // must fail and roll back.
+    let changes = pg_changes(
+        &tbl,
+        vec![
+            CellChange {
+                row_index: 0,
+                column_name: "v".into(),
+                old_value: serde_json::json!("a"),
+                new_value: serde_json::json!("b"),
+                primary_key_values: vec![("id".into(), serde_json::json!(1))],
+            },
+            CellChange {
+                row_index: 1,
+                column_name: "v".into(),
+                old_value: serde_json::json!("x"),
+                new_value: serde_json::json!("y"),
+                primary_key_values: vec![("id".into(), serde_json::json!(999))],
+            },
+        ],
+        vec![],
+    );
+    let err = driver.apply_changes(&changes).await.unwrap_err();
+    assert!(err.to_string().contains("no matching row"), "{err}");
+    let r = driver
+        .execute_query(DB, &format!("SELECT v FROM {} WHERE id = 1", tbl))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!("a"));
+
+    let del = pg_changes(
+        &tbl,
+        vec![],
+        vec![DeleteRow {
+            primary_key_values: vec![("id".into(), serde_json::json!(999))],
+        }],
+    );
+    assert!(driver.apply_changes(&del).await.is_err());
+
+    driver
+        .execute_query(DB, &format!("DROP TABLE {}", tbl))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pg_fractional_timestamp_pk_round_trips() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_tspk");
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {} (ts timestamp(6) PRIMARY KEY, v text); \
+                 INSERT INTO {} VALUES ('2024-05-06 07:08:09.123456', 'a')",
+                tbl, tbl
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        data.rows[0][0],
+        serde_json::json!("2024-05-06 07:08:09.123456")
+    );
+    let changes = pg_changes(
+        &tbl,
+        vec![CellChange {
+            row_index: 0,
+            column_name: "v".into(),
+            old_value: serde_json::json!("a"),
+            new_value: serde_json::json!("b"),
+            primary_key_values: vec![("ts".into(), data.rows[0][0].clone())],
+        }],
+        vec![],
+    );
+    driver.apply_changes(&changes).await.unwrap();
+    driver
+        .execute_query(DB, &format!("DROP TABLE {}", tbl))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pg_filter_accepts_semicolon_inside_string_literal() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_fsemi");
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {} (id int PRIMARY KEY, v text); \
+                 INSERT INTO {} VALUES (1, 'a;b'), (2, 'c--d')",
+                tbl, tbl
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(
+            DB,
+            SCHEMA,
+            &tbl,
+            0,
+            10,
+            Vec::new(),
+            Some("\"v\" = 'a;b' OR \"v\" = 'c--d'".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(data.rows.len(), 2);
+    assert!(driver
+        .fetch_rows(
+            DB,
+            SCHEMA,
+            &tbl,
+            0,
+            10,
+            Vec::new(),
+            Some("1=1; DROP TABLE x".into())
+        )
+        .await
+        .is_err());
+    driver
+        .execute_query(DB, &format!("DROP TABLE {}", tbl))
+        .await
+        .unwrap();
+}

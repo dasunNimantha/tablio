@@ -67,6 +67,29 @@
 /// Blank fragments between semicolons are dropped so callers can
 /// `.last()` on the result without surprises.
 pub fn split_sql_statements(sql: &str) -> Vec<String> {
+    split_sql_statements_for(sql, SqlDialect::Generic)
+}
+
+/// Which engine's string-literal rules to apply while scanning SQL.
+///
+/// The structural rules (comments, identifiers, compound blocks) are
+/// shared, but backslash handling inside string literals is not:
+///
+/// * `MySql` — MySQL / MariaDB / TiDB treat `\` as an escape inside
+///   both `'...'` and `"..."` by default (unless the server runs with
+///   `NO_BACKSLASH_ESCAPES`), so `'it\'s'` is one literal.
+/// * `Postgres` — standard strings have no backslash escapes, but
+///   `E'...'` escape strings do.
+/// * `Generic` — SQL-standard rules only (`''` escape, no backslash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlDialect {
+    Generic,
+    Postgres,
+    MySql,
+}
+
+/// Dialect-aware variant of [`split_sql_statements`].
+pub fn split_sql_statements_for(sql: &str, dialect: SqlDialect) -> Vec<String> {
     let mut statements: Vec<String> = Vec::new();
     let mut current = String::new();
     let chars: Vec<char> = sql.chars().collect();
@@ -106,18 +129,71 @@ pub fn split_sql_statements(sql: &str) -> Vec<String> {
 
             // Block opener/closer tracking inside compound mode.
             if compound_keyword_seen {
-                if let Some(consumed) = consume_keyword(&chars, i, "BEGIN")
-                    .or_else(|| consume_keyword(&chars, i, "CASE"))
-                {
+                if let Some(consumed) = consume_keyword(&chars, i, "BEGIN") {
+                    // `BEGIN TRAN` / `BEGIN TRANSACTION` / `BEGIN
+                    // DISTRIBUTED TRANSACTION` inside a T-SQL body
+                    // start a transaction, not a block: they are
+                    // closed by COMMIT/ROLLBACK, never by END.
+                    let next = skip_ws(&chars, i + consumed);
+                    let is_txn = ["TRAN", "TRANSACTION", "DISTRIBUTED"]
+                        .iter()
+                        .any(|kw| consume_keyword(&chars, next, kw).is_some());
+                    if !is_txn {
+                        block_depth = block_depth.saturating_add(1);
+                    }
+                    push_slice(&mut current, &chars, i, consumed);
+                    i += consumed;
+                    continue;
+                }
+                if let Some(consumed) = consume_keyword(&chars, i, "CASE") {
                     block_depth = block_depth.saturating_add(1);
                     push_slice(&mut current, &chars, i, consumed);
                     i += consumed;
                     continue;
                 }
                 if let Some(consumed) = consume_keyword(&chars, i, "END") {
+                    // `END IF` / `END LOOP` / `END WHILE` / `END
+                    // REPEAT` close constructs whose openers are not
+                    // counted (an `IF` keyword is ambiguous with the
+                    // `IF()` function and `IF EXISTS`), so they must
+                    // not decrement either. `END CASE` closes a CASE
+                    // statement, whose `CASE` *was* counted, so it
+                    // decrements exactly once and the trailing `CASE`
+                    // is consumed here so it is not counted as a new
+                    // opener.
+                    //
+                    // T-SQL has no `END IF` but does allow a new `IF` /
+                    // `WHILE` statement right after a block's `END`
+                    // without a separating `;`, so outside the MySQL
+                    // dialect the suffix only counts when it is
+                    // immediately terminated (`END IF;`).
+                    let next = skip_ws(&chars, i + consumed);
+                    let suffix_counts = |len: usize| {
+                        if dialect == SqlDialect::MySql {
+                            return true;
+                        }
+                        let after = skip_ws(&chars, next + len);
+                        after >= chars.len() || chars[after] == ';'
+                    };
+                    if let Some(kw_len) = ["IF", "LOOP", "WHILE", "REPEAT"]
+                        .iter()
+                        .find_map(|kw| consume_keyword(&chars, next, kw))
+                        .filter(|len| suffix_counts(*len))
+                    {
+                        let total = next + kw_len - i;
+                        push_slice(&mut current, &chars, i, total);
+                        i += total;
+                        continue;
+                    }
+                    let mut total = consumed;
+                    if let Some(kw_len) =
+                        consume_keyword(&chars, next, "CASE").filter(|len| suffix_counts(*len))
+                    {
+                        total = next + kw_len - i;
+                    }
                     block_depth = block_depth.saturating_sub(1);
-                    push_slice(&mut current, &chars, i, consumed);
-                    i += consumed;
+                    push_slice(&mut current, &chars, i, total);
+                    i += total;
                     continue;
                 }
             }
@@ -210,14 +286,29 @@ pub fn split_sql_statements(sql: &str) -> Vec<String> {
             // Else: fall through and treat `$` as a regular character.
         }
 
-        // Single-quoted string. `''` is the SQL-standard escape.
+        // Single-quoted string. `''` is the SQL-standard escape;
+        // backslash escapes apply on MySQL and in Postgres `E'...'`.
         if c == '\'' {
+            let backslash = match dialect {
+                SqlDialect::MySql => true,
+                SqlDialect::Postgres => {
+                    i > 0 && matches!(chars[i - 1], 'E' | 'e') && is_word_start(&chars, i - 1)
+                }
+                SqlDialect::Generic => false,
+            };
             current.push(c);
             i += 1;
             while i < chars.len() {
                 let q = chars[i];
                 current.push(q);
                 i += 1;
+                if backslash && q == '\\' {
+                    if i < chars.len() {
+                        current.push(chars[i]);
+                        i += 1;
+                    }
+                    continue;
+                }
                 if q == '\'' {
                     if i < chars.len() && chars[i] == '\'' {
                         current.push(chars[i]);
@@ -230,14 +321,23 @@ pub fn split_sql_statements(sql: &str) -> Vec<String> {
             continue;
         }
 
-        // Double-quoted identifier. `""` escape.
+        // Double-quoted identifier (a string on MySQL). `""` escape,
+        // plus backslash escapes on MySQL.
         if c == '"' {
+            let backslash = dialect == SqlDialect::MySql;
             current.push(c);
             i += 1;
             while i < chars.len() {
                 let q = chars[i];
                 current.push(q);
                 i += 1;
+                if backslash && q == '\\' {
+                    if i < chars.len() {
+                        current.push(chars[i]);
+                        i += 1;
+                    }
+                    continue;
+                }
                 if q == '"' {
                     if i < chars.len() && chars[i] == '"' {
                         current.push(chars[i]);
@@ -348,10 +448,369 @@ fn consume_keyword(chars: &[char], pos: usize, kw: &str) -> Option<usize> {
     Some(kw_chars.len())
 }
 
+/// Index of the first non-whitespace char at or after `pos`.
+fn skip_ws(chars: &[char], mut pos: usize) -> usize {
+    while pos < chars.len() && chars[pos].is_whitespace() {
+        pos += 1;
+    }
+    pos
+}
+
 fn push_slice(dst: &mut String, chars: &[char], start: usize, len: usize) {
     for c in chars.iter().skip(start).take(len) {
         dst.push(*c);
     }
+}
+
+/// Replace the *contents* of every quoted literal / identifier in
+/// `s` with spaces, leaving the quote characters themselves (and
+/// everything outside quotes) in place. Used by the filter safety
+/// check so that `name = 'a;b'` or `note LIKE '%--%'` are not
+/// mistaken for statement separators or comments.
+///
+/// Returns `None` when a quote is left unterminated, because then
+/// the server would see everything after it as one literal and the
+/// masked view would no longer describe what actually runs.
+pub fn mask_quoted_contents(s: &str, dialect: SqlDialect) -> Option<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let close = match c {
+            '\'' | '"' | '`' => c,
+            '[' if dialect == SqlDialect::Generic => ']',
+            _ => {
+                out.push(c);
+                i += 1;
+                continue;
+            }
+        };
+        let backslash = match (dialect, c) {
+            (SqlDialect::MySql, '\'' | '"') => true,
+            (SqlDialect::Postgres, '\'') => {
+                i > 0 && matches!(chars[i - 1], 'E' | 'e') && is_word_start(&chars, i - 1)
+            }
+            _ => false,
+        };
+        out.push(c);
+        i += 1;
+        let mut closed = false;
+        while i < chars.len() {
+            let q = chars[i];
+            if backslash && q == '\\' {
+                out.push(' ');
+                if i + 1 < chars.len() {
+                    out.push(' ');
+                }
+                i += 2;
+                continue;
+            }
+            if q == close {
+                // Doubled closing quote is an escaped quote (not for `]`).
+                if close != ']' && i + 1 < chars.len() && chars[i + 1] == close {
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                    continue;
+                }
+                out.push(q);
+                i += 1;
+                closed = true;
+                break;
+            }
+            out.push(' ');
+            i += 1;
+        }
+        if !closed {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// Shared filter-fragment safety check (see
+/// `pg_common::filter_is_unsafe` for the threat model). Characters
+/// inside properly terminated quoted literals are ignored, so values
+/// such as `'a;b'` or `'x--y'` are accepted while real statement
+/// separators, comments, subqueries and `UNION SELECT` outside quotes
+/// are still rejected. Returns a human-readable reason, or `None`
+/// when the fragment is acceptable.
+pub fn filter_unsafe_reason_for(filter: &str, dialect: SqlDialect) -> Option<&'static str> {
+    let Some(s) = mask_quoted_contents(filter.trim(), dialect) else {
+        return Some("unterminated quoted string");
+    };
+    if s.contains(';') {
+        return Some("statement terminator (`;`)");
+    }
+    if s.contains("--") || s.contains("/*") || s.contains("*/") {
+        return Some("SQL comment markers (`--` / `/* */`)");
+    }
+    // Collapse whitespace so `( SELECT` / `UNION\nSELECT` are caught too.
+    let u = s
+        .to_uppercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if u.contains("(SELECT") || u.contains("( SELECT") {
+        return Some("nested `(SELECT ...)` subquery");
+    }
+    let padded = format!(" {}", u);
+    if padded.contains(" UNION SELECT")
+        || padded.contains(" UNION ALL SELECT")
+        || padded.contains(" UNION DISTINCT SELECT")
+    {
+        return Some("`UNION SELECT` clause");
+    }
+    None
+}
+
+/// Error for a primary-key keyed UPDATE / DELETE that matched no row.
+/// Returning an error makes `apply_changes` roll back the whole batch
+/// instead of reporting a silent no-op as success.
+pub fn ensure_row_matched(
+    rows_affected: u64,
+    action: &str,
+    pk: &[(String, serde_json::Value)],
+) -> anyhow::Result<()> {
+    if rows_affected > 0 {
+        return Ok(());
+    }
+    let key = pk
+        .iter()
+        .map(|(c, v)| format!("{} = {}", c, v))
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::bail!(
+        "Cannot {} row ({}): no matching row was found. It may have been changed or deleted \
+         concurrently; refresh and try again. No changes were saved.",
+        action,
+        key
+    )
+}
+
+/// What a console script does to transaction state, judged from its
+/// statements' leading keywords.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptTxn {
+    /// No transaction-control statements at all.
+    Untouched,
+    /// Transactions were opened but the last one was closed again.
+    Balanced,
+    /// The last transaction-control statement opened a transaction
+    /// that the script never committed or rolled back.
+    LeftOpen,
+}
+
+/// Classify `statements` (already split) by their transaction-control
+/// statements. Pooled console connections use this to decide whether
+/// they must be cleaned up (rolled back) before going back to the pool.
+pub fn script_transaction_state(statements: &[String]) -> ScriptTxn {
+    let mut state = ScriptTxn::Untouched;
+    for stmt in statements {
+        let body = strip_leading_comments(stmt.trim_start());
+        let upper = body
+            .to_ascii_uppercase()
+            .split_whitespace()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let first = upper.split(' ').next().unwrap_or("");
+        let opens = match first {
+            "BEGIN" => !upper.starts_with("BEGIN ATOMIC"),
+            "START" => upper.starts_with("START TRANSACTION"),
+            _ => false,
+        };
+        let closes = match first {
+            "COMMIT" | "END" | "ABORT" => true,
+            // `ROLLBACK TO [SAVEPOINT] x` keeps the transaction open.
+            "ROLLBACK" => !upper.starts_with("ROLLBACK TO"),
+            "PREPARE" => upper.starts_with("PREPARE TRANSACTION"),
+            _ => false,
+        };
+        let chains = closes && upper.contains("AND CHAIN");
+        if opens || chains {
+            state = ScriptTxn::LeftOpen;
+        } else if closes {
+            state = ScriptTxn::Balanced;
+        }
+    }
+    state
+}
+
+/// Largest integer magnitude a JavaScript `number` represents exactly
+/// (`Number.MAX_SAFE_INTEGER`).
+pub const JS_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+/// JSON for an integer cell. Values the frontend's `number` cannot hold
+/// exactly are sent as the exact decimal string instead, so primary-key
+/// based edits never target a rounded (wrong) row.
+pub fn i64_to_json(v: i64) -> serde_json::Value {
+    if (-JS_MAX_SAFE_INTEGER..=JS_MAX_SAFE_INTEGER).contains(&v) {
+        serde_json::Value::Number(v.into())
+    } else {
+        serde_json::Value::String(v.to_string())
+    }
+}
+
+/// Unsigned counterpart of [`i64_to_json`].
+pub fn u64_to_json(v: u64) -> serde_json::Value {
+    if v <= JS_MAX_SAFE_INTEGER as u64 {
+        serde_json::Value::Number(v.into())
+    } else {
+        serde_json::Value::String(v.to_string())
+    }
+}
+
+/// Normalised `(negative, significant digits, exponent)` form of a
+/// plain decimal literal, used to compare two spellings of the same
+/// value. `None` when `s` is not a decimal literal.
+fn normalize_decimal(s: &str) -> Option<(bool, String, i64)> {
+    let lit = numeric_literal(s)?;
+    let (neg, body) = match lit.as_bytes()[0] {
+        b'-' => (true, &lit[1..]),
+        b'+' => (false, &lit[1..]),
+        _ => (false, lit),
+    };
+    let (mantissa, exp) = match body.find(['e', 'E']) {
+        Some(idx) => (&body[..idx], body[idx + 1..].parse::<i64>().ok()?),
+        None => (body, 0),
+    };
+    let (int_part, frac_part) = match mantissa.find('.') {
+        Some(idx) => (&mantissa[..idx], &mantissa[idx + 1..]),
+        None => (mantissa, ""),
+    };
+    let mut digits = format!("{}{}", int_part, frac_part);
+    let mut exp = exp - frac_part.len() as i64;
+    let trimmed_lead = digits.trim_start_matches('0').to_string();
+    digits = trimmed_lead;
+    while digits.ends_with('0') {
+        digits.pop();
+        exp += 1;
+    }
+    if digits.is_empty() {
+        return Some((false, String::new(), 0));
+    }
+    Some((neg, digits, exp))
+}
+
+/// JSON for a NUMERIC / DECIMAL value given its exact decimal text.
+///
+/// The value stays a JSON number only when that number denotes exactly
+/// the same decimal value (and, for integers, is within the JS safe
+/// range); otherwise the exact text is sent as a string. Non-numeric
+/// text such as `NaN` / `Infinity` is passed through as a string.
+pub fn exact_numeric_text_to_json(text: &str) -> serde_json::Value {
+    let text = text.trim();
+    let Some(norm) = normalize_decimal(text) else {
+        return serde_json::Value::String(text.to_string());
+    };
+    if let Ok(i) = text.trim_start_matches('+').parse::<i64>() {
+        return i64_to_json(i);
+    }
+    let as_number = text
+        .parse::<f64>()
+        .ok()
+        .filter(|f| f.is_finite())
+        .and_then(serde_json::Number::from_f64);
+    if let Some(n) = as_number {
+        let integral_too_big = norm.2 >= 0
+            && n.as_f64()
+                .map(|f| f.abs() > JS_MAX_SAFE_INTEGER as f64)
+                .unwrap_or(true);
+        if !integral_too_big && normalize_decimal(&n.to_string()) == Some(norm) {
+            return serde_json::Value::Number(n);
+        }
+    }
+    serde_json::Value::String(text.to_string())
+}
+
+/// Returns the trimmed input when it is a plain decimal numeric
+/// literal (`-12`, `3.50`, `.5`, `1e10`), otherwise `None`. Used to
+/// validate string values before splicing them unquoted into SQL.
+pub fn numeric_literal(s: &str) -> Option<&str> {
+    let t = s.trim();
+    let b = t.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let int_start = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    let mut digits = i - int_start;
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        let frac_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        digits += i - frac_start;
+    }
+    if digits == 0 {
+        return None;
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        let exp_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == exp_start {
+            return None;
+        }
+    }
+    if i == b.len() {
+        Some(t)
+    } else {
+        None
+    }
+}
+
+/// True for integer / exact-numeric / floating column types whose
+/// values are written as bare numeric literals (`BIGINT UNSIGNED`,
+/// `decimal(20,4)`, `int8`, `varint`, ...). Deliberately excludes
+/// types that merely contain "int" (`point`, `interval`) and money.
+pub fn is_numeric_type_name(data_type: &str) -> bool {
+    let lower = data_type.to_ascii_lowercase();
+    let base = lower.split('(').next().unwrap_or("").trim();
+    let base = base
+        .trim_end_matches(" zerofill")
+        .trim_end_matches(" unsigned")
+        .trim_end_matches(" signed")
+        .trim();
+    matches!(
+        base,
+        "tinyint"
+            | "smallint"
+            | "mediumint"
+            | "int"
+            | "integer"
+            | "bigint"
+            | "int2"
+            | "int4"
+            | "int8"
+            | "serial"
+            | "smallserial"
+            | "bigserial"
+            | "decimal"
+            | "numeric"
+            | "dec"
+            | "fixed"
+            | "float"
+            | "float4"
+            | "float8"
+            | "double"
+            | "double precision"
+            | "real"
+            | "varint"
+            | "counter"
+            | "number"
+    )
 }
 
 /// Returns true when the SQL statement's leading keyword indicates
@@ -698,5 +1157,232 @@ mod tests {
         assert!(statement_is_select_like("select 1", keywords));
         assert!(statement_is_select_like("SeLeCt 1", keywords));
         assert!(statement_is_select_like("with cte as ...", keywords));
+    }
+
+    #[test]
+    fn split_mysql_procedure_with_if_block() {
+        let input =
+            "CREATE PROCEDURE p() BEGIN IF x THEN SELECT 1; END IF; SELECT 2; END; SELECT 3";
+        for d in [SqlDialect::MySql, SqlDialect::Generic, SqlDialect::Postgres] {
+            let out = split_sql_statements_for(input, d);
+            assert_eq!(out.len(), 2, "{d:?} got: {out:?}");
+            assert!(out[0].ends_with("SELECT 2; END"));
+            assert_eq!(out[1], "SELECT 3");
+        }
+    }
+
+    #[test]
+    fn split_mysql_procedure_with_loops_and_case_statement() {
+        let input = "CREATE PROCEDURE p() BEGIN \
+            lbl: LOOP SELECT 1; LEAVE lbl; END LOOP lbl; \
+            WHILE a DO SET a = a - 1; END WHILE; \
+            REPEAT SET a = a + 1; UNTIL a > 3 END REPEAT; \
+            CASE a WHEN 1 THEN SELECT 1; ELSE SELECT 2; END CASE; \
+            SELECT CASE WHEN a THEN 1 ELSE 0 END; \
+            END; SELECT 9";
+        let out = split_sql_statements_for(input, SqlDialect::MySql);
+        assert_eq!(out.len(), 2, "got: {out:?}");
+        assert_eq!(out[1], "SELECT 9");
+    }
+
+    #[test]
+    fn split_plain_case_expression_still_splits() {
+        let input = "SELECT CASE WHEN 1 THEN 2 END; SELECT 3";
+        for d in [SqlDialect::MySql, SqlDialect::Generic, SqlDialect::Postgres] {
+            assert_eq!(
+                split_sql_statements_for(input, d),
+                vec!["SELECT CASE WHEN 1 THEN 2 END", "SELECT 3"]
+            );
+        }
+    }
+
+    #[test]
+    fn split_tsql_end_followed_by_new_if_statement() {
+        let input = "CREATE PROCEDURE p AS BEGIN IF 1 = 1 BEGIN SELECT 1; END \
+                     IF 2 = 2 BEGIN SELECT 2; END END; SELECT 3";
+        let out = split_sql_statements(input);
+        assert_eq!(out.len(), 2, "got: {out:?}");
+        assert_eq!(out[1], "SELECT 3");
+    }
+
+    #[test]
+    fn split_tsql_begin_tran_inside_procedure() {
+        let input =
+            "CREATE PROCEDURE p AS BEGIN BEGIN TRAN; UPDATE t SET a = 1; COMMIT; END; SELECT 1";
+        let out = split_sql_statements(input);
+        assert_eq!(out.len(), 2, "got: {out:?}");
+        assert_eq!(out[1], "SELECT 1");
+    }
+
+    #[test]
+    fn split_mysql_backslash_escaped_quote() {
+        let out = split_sql_statements_for(r"SELECT 'it\'s; here'; SELECT 1", SqlDialect::MySql);
+        assert_eq!(out, vec![r"SELECT 'it\'s; here'", "SELECT 1"]);
+        let out = split_sql_statements_for(r#"SELECT "a\"; b"; SELECT 1"#, SqlDialect::MySql);
+        assert_eq!(out, vec![r#"SELECT "a\"; b""#, "SELECT 1"]);
+        // An escaped backslash does not escape the closing quote.
+        let out = split_sql_statements_for(r"SELECT 'a\\'; SELECT 1", SqlDialect::MySql);
+        assert_eq!(out, vec![r"SELECT 'a\\'", "SELECT 1"]);
+    }
+
+    #[test]
+    fn split_postgres_escape_string() {
+        let out =
+            split_sql_statements_for(r"SELECT E'it\'s; here'; SELECT 1", SqlDialect::Postgres);
+        assert_eq!(out, vec![r"SELECT E'it\'s; here'", "SELECT 1"]);
+        // A standard string keeps a literal backslash and ends at the quote.
+        let out = split_sql_statements_for(r"SELECT 'a\'; SELECT 1", SqlDialect::Postgres);
+        assert_eq!(out, vec![r"SELECT 'a\'", "SELECT 1"]);
+    }
+
+    #[test]
+    fn script_transaction_state_classification() {
+        let s = |v: &[&str]| -> Vec<String> { v.iter().map(|x| x.to_string()).collect() };
+        assert_eq!(
+            script_transaction_state(&s(&["SELECT 1"])),
+            ScriptTxn::Untouched
+        );
+        assert_eq!(
+            script_transaction_state(&s(&["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"])),
+            ScriptTxn::Balanced
+        );
+        assert_eq!(
+            script_transaction_state(&s(&["begin", "SELECT 1"])),
+            ScriptTxn::LeftOpen
+        );
+        assert_eq!(
+            script_transaction_state(&s(&["START TRANSACTION", "ROLLBACK TO SAVEPOINT a"])),
+            ScriptTxn::LeftOpen
+        );
+        assert_eq!(
+            script_transaction_state(&s(&["BEGIN", "COMMIT AND CHAIN"])),
+            ScriptTxn::LeftOpen
+        );
+        assert_eq!(
+            script_transaction_state(&s(&["-- c\nBEGIN", "END"])),
+            ScriptTxn::Balanced
+        );
+    }
+
+    #[test]
+    fn integers_beyond_js_safe_range_become_strings() {
+        use serde_json::json;
+        assert_eq!(i64_to_json(42), json!(42));
+        assert_eq!(
+            i64_to_json(9_007_199_254_740_991),
+            json!(9_007_199_254_740_991i64)
+        );
+        assert_eq!(
+            i64_to_json(9_007_199_254_740_992),
+            json!("9007199254740992")
+        );
+        assert_eq!(
+            i64_to_json(-1234567890123456789),
+            json!("-1234567890123456789")
+        );
+        assert_eq!(u64_to_json(u64::MAX), json!("18446744073709551615"));
+        assert_eq!(u64_to_json(7), json!(7));
+    }
+
+    #[test]
+    fn exact_numeric_text_keeps_numbers_only_when_lossless() {
+        use serde_json::json;
+        assert_eq!(exact_numeric_text_to_json("12.5"), json!(12.5));
+        assert_eq!(exact_numeric_text_to_json("-5"), json!(-5));
+        assert_eq!(exact_numeric_text_to_json("0.10"), json!(0.1));
+        assert_eq!(exact_numeric_text_to_json("0"), json!(0));
+        assert_eq!(
+            exact_numeric_text_to_json("1234567890123456789"),
+            json!("1234567890123456789")
+        );
+        assert_eq!(
+            exact_numeric_text_to_json("0.12345678901234567890"),
+            json!("0.12345678901234567890")
+        );
+        assert_eq!(
+            exact_numeric_text_to_json("123456789012345678901234567890.5"),
+            json!("123456789012345678901234567890.5")
+        );
+        assert_eq!(exact_numeric_text_to_json("NaN"), json!("NaN"));
+        assert_eq!(exact_numeric_text_to_json("Infinity"), json!("Infinity"));
+    }
+
+    #[test]
+    fn numeric_literal_validation() {
+        for ok in [
+            "1", "-1", "+1", "1.5", ".5", "5.", "1e10", "-1.5E-3", " 42 ",
+        ] {
+            assert!(numeric_literal(ok).is_some(), "{ok}");
+        }
+        for bad in [
+            "", "-", ".", "1e", "1 OR 1=1", "0x10", "1;", "abc", "1.2.3", "NaN",
+        ] {
+            assert!(numeric_literal(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn numeric_type_names() {
+        for t in [
+            "bigint",
+            "BIGINT UNSIGNED",
+            "bigint(20) unsigned zerofill",
+            "decimal(20,4)",
+            "numeric",
+            "int8",
+            "varint",
+            "double precision",
+        ] {
+            assert!(is_numeric_type_name(t), "{t}");
+        }
+        for t in ["point", "interval", "varchar(20)", "money", "text", "uuid"] {
+            assert!(!is_numeric_type_name(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn filter_check_ignores_quoted_contents() {
+        for d in [SqlDialect::MySql, SqlDialect::Generic, SqlDialect::Postgres] {
+            assert_eq!(filter_unsafe_reason_for("name = 'a;b'", d), None);
+            assert_eq!(filter_unsafe_reason_for("note LIKE '%--%'", d), None);
+            assert_eq!(filter_unsafe_reason_for("note = '/* x */'", d), None);
+            assert_eq!(
+                filter_unsafe_reason_for("note = 'x UNION SELECT y'", d),
+                None
+            );
+            assert_eq!(filter_unsafe_reason_for("note = 'it''s; ok'", d), None);
+            assert_eq!(filter_unsafe_reason_for(r#""we;ird" = 1"#, d), None);
+        }
+        assert_eq!(
+            filter_unsafe_reason_for(r"note = 'it\'s; ok'", SqlDialect::MySql),
+            None
+        );
+        assert_eq!(
+            filter_unsafe_reason_for(r"note = E'it\'s; ok'", SqlDialect::Postgres),
+            None
+        );
+        assert_eq!(
+            filter_unsafe_reason_for("[we;ird] = 1", SqlDialect::Generic),
+            None
+        );
+    }
+
+    #[test]
+    fn filter_check_still_rejects_outside_quotes() {
+        for d in [SqlDialect::MySql, SqlDialect::Generic, SqlDialect::Postgres] {
+            assert!(filter_unsafe_reason_for("a = 'x'; DROP TABLE t", d).is_some());
+            assert!(filter_unsafe_reason_for("a = 'x' -- c", d).is_some());
+            assert!(filter_unsafe_reason_for("a = 1 /* c */", d).is_some());
+            assert!(filter_unsafe_reason_for("a IN (SELECT 1)", d).is_some());
+            assert!(filter_unsafe_reason_for("a = 1 UNION SELECT 2", d).is_some());
+            assert!(filter_unsafe_reason_for("a = 'unterminated; x", d).is_some());
+        }
+        // In a standard Postgres string the backslash is literal, so the
+        // quote after it closes the string and the `;` is outside.
+        assert!(
+            filter_unsafe_reason_for(r"a = 'x\'; DROP TABLE t", SqlDialect::Postgres).is_some()
+        );
+        // On MySQL the same input is one unterminated literal.
+        assert!(filter_unsafe_reason_for(r"a = 'x\'; DROP TABLE t", SqlDialect::MySql).is_some());
     }
 }

@@ -2566,3 +2566,464 @@ async fn mysql_alter_table_toggle_nullable_both_directions_one_call() {
 
     driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Driver correctness regressions
+// ---------------------------------------------------------------------------
+
+fn mysql_changes(
+    db: &str,
+    tbl: &str,
+    updates: Vec<CellChange>,
+    deletes: Vec<DeleteRow>,
+) -> DataChanges {
+    DataChanges {
+        connection_id: "test".into(),
+        database: db.into(),
+        schema: db.into(),
+        table: tbl.into(),
+        updates,
+        inserts: vec![],
+        deletes,
+    }
+}
+
+#[tokio::test]
+async fn mysql_console_open_transaction_does_not_leak_into_pool() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("mysql_txleak");
+    driver
+        .execute_query(&db, &format!("CREATE TABLE `{tbl}` (id INT)"))
+        .await
+        .unwrap();
+    let res = driver
+        .execute_query(
+            &db,
+            &format!("START TRANSACTION; INSERT INTO `{tbl}` VALUES (1); SELEC broken"),
+        )
+        .await;
+    assert!(res.is_err());
+    // A connection still inside that transaction would see its own
+    // uncommitted row.
+    for _ in 0..8 {
+        let r = driver
+            .execute_query(&db, &format!("SELECT COUNT(*) AS c FROM `{tbl}`"))
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], serde_json::json!(0));
+    }
+    // Open at the end of a successful run: rolled back and reported.
+    let res = driver
+        .execute_query(&db, &format!("BEGIN; INSERT INTO `{tbl}` VALUES (2)"))
+        .await;
+    assert!(res.is_err());
+    // A balanced script commits normally.
+    driver
+        .execute_query(
+            &db,
+            &format!("BEGIN; INSERT INTO `{tbl}` VALUES (3); COMMIT; SELECT 1"),
+        )
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        let r = driver
+            .execute_query(&db, &format!("SELECT COUNT(*) AS c FROM `{tbl}`"))
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], serde_json::json!(1));
+    }
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_console_runs_in_selected_database() {
+    let (driver, db) = mysql_driver!();
+    let other = unique_table("mysql_ctxdb");
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE DATABASE `{other}`; CREATE TABLE `{other}`.only_here (x INT); INSERT INTO `{other}`.only_here VALUES (7)"),
+        )
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(&other, "SELECT x FROM only_here")
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!(7));
+    let r = driver
+        .execute_query(&other, "SELECT DATABASE() AS d")
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!(other.clone()));
+    // The pool's default database is restored for everyone else.
+    for _ in 0..8 {
+        let r = driver
+            .execute_query(&db, "SELECT DATABASE() AS d")
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], serde_json::json!(db.clone()));
+    }
+    driver
+        .execute_query(&db, &format!("DROP DATABASE `{other}`"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mysql_big_integer_ids_round_trip_through_apply_changes() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("mysql_bigid");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{tbl}` (id BIGINT PRIMARY KEY, u BIGINT UNSIGNED, amount DECIMAL(40,20), note VARCHAR(20)); \
+                 INSERT INTO `{tbl}` VALUES \
+                 (1234567890123456789, 18446744073709551615, 12345678901234567890.12345678901234567890, 'a'), \
+                 (1234567890123456790, 5, 1.5, 'b')"
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0][0], serde_json::json!("1234567890123456789"));
+    assert_eq!(data.rows[0][1], serde_json::json!("18446744073709551615"));
+    assert_eq!(
+        data.rows[0][2],
+        serde_json::json!("12345678901234567890.12345678901234567890")
+    );
+    assert_eq!(data.rows[1][1], serde_json::json!(5));
+
+    // The two ids differ only beyond double precision: a quoted
+    // comparison would match both rows.
+    let changes = mysql_changes(
+        &db,
+        &tbl,
+        vec![CellChange {
+            row_index: 0,
+            column_name: "note".into(),
+            old_value: serde_json::json!("a"),
+            new_value: serde_json::json!("edited"),
+            primary_key_values: vec![("id".into(), data.rows[0][0].clone())],
+        }],
+        vec![DeleteRow {
+            primary_key_values: vec![("id".into(), data.rows[1][0].clone())],
+        }],
+    );
+    driver.apply_changes(&changes).await.unwrap();
+    let after = driver
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(after.rows.len(), 1);
+    assert_eq!(after.rows[0][0], serde_json::json!("1234567890123456789"));
+    assert_eq!(after.rows[0][3], serde_json::json!("edited"));
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_apply_changes_no_match_errors_but_identical_update_succeeds() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("mysql_nomatch");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{tbl}` (id INT PRIMARY KEY, v VARCHAR(10)); INSERT INTO `{tbl}` VALUES (1, 'a')"
+            ),
+        )
+        .await
+        .unwrap();
+    // Writing the value the row already has matches (but changes) 0 rows
+    // without CLIENT_FOUND_ROWS; it must not be reported as missing.
+    let same = mysql_changes(
+        &db,
+        &tbl,
+        vec![CellChange {
+            row_index: 0,
+            column_name: "v".into(),
+            old_value: serde_json::json!("a"),
+            new_value: serde_json::json!("a"),
+            primary_key_values: vec![("id".into(), serde_json::json!(1))],
+        }],
+        vec![],
+    );
+    driver.apply_changes(&same).await.unwrap();
+
+    let missing = mysql_changes(
+        &db,
+        &tbl,
+        vec![
+            CellChange {
+                row_index: 0,
+                column_name: "v".into(),
+                old_value: serde_json::json!("a"),
+                new_value: serde_json::json!("b"),
+                primary_key_values: vec![("id".into(), serde_json::json!(1))],
+            },
+            CellChange {
+                row_index: 1,
+                column_name: "v".into(),
+                old_value: serde_json::json!("x"),
+                new_value: serde_json::json!("y"),
+                primary_key_values: vec![("id".into(), serde_json::json!(999))],
+            },
+        ],
+        vec![],
+    );
+    let err = driver.apply_changes(&missing).await.unwrap_err();
+    assert!(err.to_string().contains("no matching row"), "{err}");
+    let r = driver
+        .execute_query(&db, &format!("SELECT v FROM `{tbl}` WHERE id = 1"))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!("a"));
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_modify_column_preserves_attributes() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("mysql_modify");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{tbl}` ( \
+                   id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, \
+                   status VARCHAR(20) NOT NULL DEFAULT 'pending' COMMENT 'state of it', \
+                   updated TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, \
+                   note VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL, \
+                   qty INT NOT NULL DEFAULT 3)"
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .alter_table(
+            &db,
+            &db,
+            &tbl,
+            &[
+                AlterTableOperation::ChangeColumnType {
+                    column_name: "id".into(),
+                    new_type: "BIGINT".into(),
+                },
+                AlterTableOperation::SetNullable {
+                    column_name: "status".into(),
+                    nullable: true,
+                },
+                AlterTableOperation::SetNullable {
+                    column_name: "updated".into(),
+                    nullable: false,
+                },
+                AlterTableOperation::ChangeColumnType {
+                    column_name: "note".into(),
+                    new_type: "VARCHAR(50)".into(),
+                },
+                AlterTableOperation::ChangeColumnType {
+                    column_name: "qty".into(),
+                    new_type: "BIGINT".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let r = driver
+        .execute_query(
+            &db,
+            &format!(
+                "SELECT CAST(COLUMN_NAME AS CHAR) AS n, CAST(COLUMN_TYPE AS CHAR) AS t, \
+                 CAST(IS_NULLABLE AS CHAR) AS nl, CAST(COLUMN_DEFAULT AS CHAR) AS d, \
+                 CAST(EXTRA AS CHAR) AS e, CAST(COLUMN_COMMENT AS CHAR) AS c, \
+                 CAST(COLLATION_NAME AS CHAR) AS co \
+                 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{db}' AND TABLE_NAME = '{tbl}'"
+            ),
+        )
+        .await
+        .unwrap();
+    let col = |name: &str| -> Vec<String> {
+        let row = r
+            .rows
+            .iter()
+            .find(|row| row[0] == serde_json::json!(name))
+            .unwrap_or_else(|| panic!("{name} missing"));
+        row.iter()
+            .map(|v| v.as_str().map(str::to_string).unwrap_or_default())
+            .collect()
+    };
+    let id = col("id");
+    assert!(id[1].to_lowercase().starts_with("bigint"), "{id:?}");
+    assert!(id[4].to_lowercase().contains("auto_increment"), "{id:?}");
+
+    let status = col("status");
+    assert_eq!(status[2], "YES");
+    assert!(status[3].trim_matches('\'') == "pending", "{status:?}");
+    assert_eq!(status[5], "state of it");
+
+    let updated = col("updated");
+    assert_eq!(updated[2], "NO");
+    assert!(
+        updated[4].to_lowercase().contains("on update"),
+        "{updated:?}"
+    );
+    assert!(
+        updated[3].to_lowercase().starts_with("current_timestamp"),
+        "{updated:?}"
+    );
+
+    let note = col("note");
+    assert_eq!(note[1].to_lowercase(), "varchar(50)");
+    assert_eq!(note[6], "utf8mb4_bin");
+
+    let qty = col("qty");
+    assert_eq!(qty[2], "NO");
+    assert_eq!(qty[3].trim_matches('\''), "3");
+
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_special_values_render_instead_of_null() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("mysql_vals");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{tbl}` (id INT PRIMARY KEY, t TIME, y YEAR, b BIT(8), dt DATETIME(6), d DECIMAL(40,20)); \
+                 INSERT INTO `{tbl}` VALUES (1, '-838:59:59', 2024, b'101', '2024-01-02 03:04:05.123456', 0.1), \
+                                            (2, '100:00:00', 1999, b'11111111', '2024-01-02 03:04:05', 12.5)"
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    use serde_json::json;
+    assert_eq!(data.rows[0][1], json!("-838:59:59"));
+    assert_eq!(data.rows[1][1], json!("100:00:00"));
+    assert_eq!(data.rows[0][2], json!(2024));
+    assert_eq!(data.rows[0][3], json!(5));
+    assert_eq!(data.rows[1][3], json!(255));
+    assert_eq!(data.rows[0][4], json!("2024-01-02 03:04:05.123456"));
+    assert_eq!(data.rows[1][4], json!("2024-01-02 03:04:05"));
+    assert_eq!(data.rows[0][5], json!(0.1));
+    assert_eq!(data.rows[1][5], json!(12.5));
+
+    // Console path renders the same way.
+    let r = driver
+        .execute_query(&db, &format!("SELECT t, y, b FROM `{tbl}` ORDER BY id"))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], json!("-838:59:59"));
+    assert_eq!(r.rows[0][1], json!(2024));
+    assert_eq!(r.rows[0][2], json!(5));
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_fractional_datetime_pk_round_trips() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("mysql_dtpk");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{tbl}` (ts DATETIME(6) PRIMARY KEY, v VARCHAR(10)); \
+                 INSERT INTO `{tbl}` VALUES ('2024-05-06 07:08:09.123456', 'a')"
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        data.rows[0][0],
+        serde_json::json!("2024-05-06 07:08:09.123456")
+    );
+    let changes = mysql_changes(
+        &db,
+        &tbl,
+        vec![CellChange {
+            row_index: 0,
+            column_name: "v".into(),
+            old_value: serde_json::json!("a"),
+            new_value: serde_json::json!("b"),
+            primary_key_values: vec![("ts".into(), data.rows[0][0].clone())],
+        }],
+        vec![],
+    );
+    driver.apply_changes(&changes).await.unwrap();
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_filter_and_console_handle_quoted_separators() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("mysql_fsemi");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE `{tbl}` (id INT PRIMARY KEY, v VARCHAR(20)); \
+                 INSERT INTO `{tbl}` VALUES (1, 'a;b'), (2, 'it\\'s; here')"
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(
+            &db,
+            &db,
+            &tbl,
+            0,
+            10,
+            Vec::new(),
+            Some("`v` = 'a;b' OR `v` = 'it\\'s; here'".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(data.rows.len(), 2);
+    assert!(driver
+        .fetch_rows(
+            &db,
+            &db,
+            &tbl,
+            0,
+            10,
+            Vec::new(),
+            Some("1=1; DROP TABLE x".into())
+        )
+        .await
+        .is_err());
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_console_procedure_with_if_block() {
+    let (driver, db) = mysql_driver!();
+    let proc_name = unique_table("mysql_proc");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE PROCEDURE `{proc_name}`(IN x INT) BEGIN IF x > 0 THEN SELECT 1; END IF; SELECT 2; END; SELECT 3 AS three"
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("DROP PROCEDURE `{proc_name}`"))
+        .await
+        .unwrap();
+}
