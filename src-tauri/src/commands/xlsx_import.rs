@@ -25,6 +25,10 @@ const MAX_BYTES: usize = 100 * 1024 * 1024;
 
 const PREVIEW_ROWS: usize = 50;
 
+/// How many error-cell locations are listed individually; the total is
+/// always reported in `error_cell_count`.
+const MAX_LISTED_ERROR_CELLS: usize = 20;
+
 #[derive(Debug, Serialize)]
 pub struct XlsxWorkbookPreview {
     pub sheet_names: Vec<String>,
@@ -39,6 +43,10 @@ pub struct XlsxSheetPreview {
     pub preview_rows: Vec<Vec<Value>>,
     pub total_data_rows: usize,
     pub inferred_types: Vec<&'static str>,
+    /// Data cells holding an Excel error (`#N/A`, `#DIV/0!`, ...). They are
+    /// imported as NULL; this lists the first few as `"B5: #N/A"`.
+    pub error_cells: Vec<String>,
+    pub error_cell_count: usize,
 }
 
 /// Full payload for a single sheet — returned to the dialog after the
@@ -51,6 +59,9 @@ pub struct XlsxSheetPayload {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<Value>>,
     pub inferred_types: Vec<&'static str>,
+    /// See [`XlsxSheetPreview::error_cells`].
+    pub error_cells: Vec<String>,
+    pub error_cell_count: usize,
 }
 
 #[tauri::command]
@@ -74,8 +85,7 @@ pub fn parse_workbook_impl(bytes: &[u8]) -> anyhow::Result<XlsxWorkbookPreview> 
             MAX_BYTES / 1024 / 1024
         );
     }
-    let cursor = Cursor::new(bytes.to_vec());
-    let mut wb = calamine::open_workbook_auto_from_rs(cursor)
+    let mut wb = calamine::open_workbook_auto_from_rs(Cursor::new(bytes))
         .map_err(|e| anyhow::anyhow!("Could not open workbook: {e}"))?;
 
     let sheet_names: Vec<String> = wb.sheet_names();
@@ -100,15 +110,16 @@ pub fn parse_sheet_impl(bytes: &[u8], sheet_name: &str) -> anyhow::Result<XlsxSh
             MAX_BYTES / 1024 / 1024
         );
     }
-    let cursor = Cursor::new(bytes.to_vec());
-    let mut wb = calamine::open_workbook_auto_from_rs(cursor)
+    let mut wb = calamine::open_workbook_auto_from_rs(Cursor::new(bytes))
         .map_err(|e| anyhow::anyhow!("Could not open workbook: {e}"))?;
-    let (headers, rows, inferred_types) = read_sheet(&mut wb, sheet_name)?;
+    let sheet = read_sheet(&mut wb, sheet_name)?;
     Ok(XlsxSheetPayload {
         name: sheet_name.to_string(),
-        headers,
-        rows,
-        inferred_types,
+        headers: sheet.headers,
+        rows: sheet.body,
+        inferred_types: sheet.inferred_types,
+        error_cells: sheet.error_cells,
+        error_cell_count: sheet.error_cell_count,
     })
 }
 
@@ -117,43 +128,84 @@ pub fn parse_sheet_impl(bytes: &[u8], sheet_name: &str) -> anyhow::Result<XlsxSh
 /// for the UI. The full body is intentionally not returned here —
 /// the caller can fetch it via `parse_xlsx_sheet` once the user picks
 /// a sheet.
-fn build_sheet_preview<R>(wb: &mut R, sheet_name: &str) -> anyhow::Result<XlsxSheetPreview>
+fn build_sheet_preview<RS, R>(wb: &mut R, sheet_name: &str) -> anyhow::Result<XlsxSheetPreview>
 where
-    R: Reader<Cursor<Vec<u8>>>,
+    RS: std::io::Read + std::io::Seek,
+    R: Reader<RS>,
     R::Error: std::fmt::Display,
 {
-    let (headers, body, types) = read_sheet(wb, sheet_name)?;
-    let total = body.len();
-    let preview = body.into_iter().take(PREVIEW_ROWS).collect();
+    let sheet = read_sheet(wb, sheet_name)?;
+    let total = sheet.body.len();
+    let preview = sheet.body.into_iter().take(PREVIEW_ROWS).collect();
     Ok(XlsxSheetPreview {
         name: sheet_name.to_string(),
-        headers,
+        headers: sheet.headers,
         preview_rows: preview,
         total_data_rows: total,
-        inferred_types: types,
+        inferred_types: sheet.inferred_types,
+        error_cells: sheet.error_cells,
+        error_cell_count: sheet.error_cell_count,
     })
 }
 
-type SheetTuple = (Vec<String>, Vec<Vec<Value>>, Vec<&'static str>);
+struct Sheet {
+    headers: Vec<String>,
+    body: Vec<Vec<Value>>,
+    inferred_types: Vec<&'static str>,
+    error_cells: Vec<String>,
+    error_cell_count: usize,
+}
 
-/// Read a sheet from the workbook and return `(headers, body_rows,
-/// inferred_column_types)`.
+impl Sheet {
+    fn empty() -> Self {
+        Sheet {
+            headers: Vec::new(),
+            body: Vec::new(),
+            inferred_types: Vec::new(),
+            error_cells: Vec::new(),
+            error_cell_count: 0,
+        }
+    }
+}
+
+/// Spreadsheet-style column letters: 0 -> A, 25 -> Z, 26 -> AA.
+fn column_letters(mut col: usize) -> String {
+    let mut out = Vec::new();
+    loop {
+        out.push(b'A' + (col % 26) as u8);
+        if col < 26 {
+            break;
+        }
+        col = col / 26 - 1;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Read a sheet from the workbook.
 ///
 /// Trailing empty rows / columns are trimmed so blank padding at the
 /// end of an analyst's spreadsheet doesn't get re-imported as NULLs.
-fn read_sheet<R>(wb: &mut R, sheet_name: &str) -> anyhow::Result<SheetTuple>
+fn read_sheet<RS, R>(wb: &mut R, sheet_name: &str) -> anyhow::Result<Sheet>
 where
-    R: Reader<Cursor<Vec<u8>>>,
+    RS: std::io::Read + std::io::Seek,
+    R: Reader<RS>,
     R::Error: std::fmt::Display,
 {
     let range = wb
         .worksheet_range(sheet_name)
         .map_err(|e| anyhow::anyhow!("Sheet '{sheet_name}' not found: {e}"))?;
+    Ok(sheet_from_range(&range))
+}
 
+fn sheet_from_range(range: &calamine::Range<Data>) -> Sheet {
     let raw_rows: Vec<Vec<&Data>> = range.rows().map(|r| r.iter().collect()).collect();
     if raw_rows.is_empty() {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
+        return Sheet::empty();
     }
+    // Absolute (0-based) position of the range's top-left cell, used to
+    // report error cells with the addresses Excel shows.
+    let (first_row, first_col) = range.start().unwrap_or((0, 0));
 
     // Compute the rightmost non-empty column across all rows so we can
     // truncate trailing-empty padding without losing real data in
@@ -170,7 +222,7 @@ where
         .unwrap_or(0);
 
     if last_used_col == 0 {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
+        return Sheet::empty();
     }
 
     let header_row = &raw_rows[0];
@@ -183,11 +235,31 @@ where
         })
         .collect();
 
+    let mut error_cells = Vec::new();
+    let mut error_cell_count = 0usize;
     let body_raw: Vec<Vec<Value>> = raw_rows[1..]
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(r, row)| {
             (0..last_used_col)
-                .map(|i| row.get(i).map(|c| cell_to_value(c)).unwrap_or(Value::Null))
+                .map(|i| match row.get(i) {
+                    Some(Data::Error(err)) => {
+                        // Excel error values have no SQL equivalent; they
+                        // import as NULL but are reported to the caller.
+                        error_cell_count += 1;
+                        if error_cells.len() < MAX_LISTED_ERROR_CELLS {
+                            error_cells.push(format!(
+                                "{}{}: {}",
+                                column_letters(first_col as usize + i),
+                                first_row as usize + r + 2,
+                                err
+                            ));
+                        }
+                        Value::Null
+                    }
+                    Some(c) => cell_to_value(c),
+                    None => Value::Null,
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -201,7 +273,13 @@ where
 
     let body: Vec<Vec<Value>> = body_raw.into_iter().take(last_used_row).collect();
     let inferred_types = infer_column_types(&body, last_used_col);
-    Ok((headers, body, inferred_types))
+    Sheet {
+        headers,
+        body,
+        inferred_types,
+        error_cells,
+        error_cell_count,
+    }
 }
 
 fn header_to_string(cell: &Data, col_idx: usize) -> String {
@@ -254,6 +332,7 @@ fn cell_to_value(cell: &Data) -> Value {
             }
         }
         Data::DateTimeIso(s) | Data::DurationIso(s) => Value::String(s.clone()),
+        // Reported separately by `sheet_from_range`.
         Data::Error(_) => Value::Null,
     }
 }
@@ -382,6 +461,34 @@ mod tests {
             err.contains("Nope"),
             "expected sheet name in error, got: {err}"
         );
+    }
+
+    #[test]
+    fn error_cells_are_reported_with_addresses() {
+        use calamine::{CellErrorType, Range};
+        let mut range: Range<Data> = Range::new((0, 0), (3, 1));
+        range.set_value((0, 0), Data::String("a".into()));
+        range.set_value((0, 1), Data::String("b".into()));
+        range.set_value((1, 0), Data::Int(1));
+        range.set_value((1, 1), Data::Error(CellErrorType::NA));
+        range.set_value((2, 0), Data::Error(CellErrorType::Div0));
+        range.set_value((2, 1), Data::String("ok".into()));
+        range.set_value((3, 0), Data::Int(3));
+        let sheet = sheet_from_range(&range);
+        assert_eq!(sheet.body.len(), 3);
+        assert_eq!(sheet.body[0][1], Value::Null);
+        assert_eq!(sheet.error_cell_count, 2);
+        assert_eq!(sheet.error_cells, vec!["B2: #N/A", "A3: #DIV/0!"]);
+    }
+
+    #[test]
+    fn column_letters_cover_multi_letter_columns() {
+        assert_eq!(column_letters(0), "A");
+        assert_eq!(column_letters(25), "Z");
+        assert_eq!(column_letters(26), "AA");
+        assert_eq!(column_letters(27), "AB");
+        assert_eq!(column_letters(701), "ZZ");
+        assert_eq!(column_letters(702), "AAA");
     }
 
     #[test]
