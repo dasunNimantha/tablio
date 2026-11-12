@@ -18,7 +18,6 @@
     "@monaco-editor/react": "^4.7.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.6.0",
-    "@tauri-apps/plugin-fs": "^2.0.0",
     "ag-grid-community": "^36.0.0",
     "ag-grid-react": "^36.0.0",
     "chart.js": "^4.5.1",
