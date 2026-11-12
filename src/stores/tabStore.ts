@@ -62,6 +62,24 @@ interface TabState {
   setTabTitle: (id: string, title: string) => void;
   reorderTabs: (fromIndex: number, toIndex: number) => void;
   pruneStaleConnections: (validConnectionIds: Set<string>) => void;
+  /**
+   * Unsaved-work registry (not persisted). Components inside a tab
+   * report each source of unsaved work (e.g. "grid", "query") so the
+   * tab bar can confirm before closing. Keyed by tab id.
+   */
+  dirtyTabs: Record<string, string[]>;
+  setTabDirty: (id: string, source: string, dirty: boolean) => void;
+  isTabDirty: (id: string) => boolean;
+}
+
+function withoutDirty(dirty: Record<string, string[]>, keep: (id: string) => boolean) {
+  let changed = false;
+  const next: Record<string, string[]> = {};
+  for (const [id, sources] of Object.entries(dirty)) {
+    if (keep(id)) next[id] = sources;
+    else changed = true;
+  }
+  return changed ? next : dirty;
 }
 
 const initial = loadPersistedTabs();
@@ -69,6 +87,22 @@ const initial = loadPersistedTabs();
 export const useTabStore = create<TabState>((set, get) => ({
   tabs: initial.tabs,
   activeTabId: initial.activeTabId,
+  dirtyTabs: {},
+
+  setTabDirty: (id, source, dirty) => {
+    set((s) => {
+      const current = s.dirtyTabs[id] ?? [];
+      const has = current.includes(source);
+      if (dirty === has) return s;
+      const nextSources = dirty ? [...current, source] : current.filter((x) => x !== source);
+      const dirtyTabs = { ...s.dirtyTabs };
+      if (nextSources.length > 0) dirtyTabs[id] = nextSources;
+      else delete dirtyTabs[id];
+      return { dirtyTabs };
+    });
+  },
+
+  isTabDirty: (id) => (get().dirtyTabs[id]?.length ?? 0) > 0,
 
   openTab: (tab) => {
     const existing = get().tabs.find((t) => t.id === tab.id);
@@ -108,18 +142,26 @@ export const useTabStore = create<TabState>((set, get) => ({
         }
       }
       persistTabs(newTabs, newActive);
-      return { tabs: newTabs, activeTabId: newActive };
+      return {
+        tabs: newTabs,
+        activeTabId: newActive,
+        dirtyTabs: withoutDirty(s.dirtyTabs, (t) => t !== id),
+      };
     });
   },
 
   closeOtherTabs: (id) => {
     const newTabs = get().tabs.filter((t) => t.id === id);
-    set({ tabs: newTabs, activeTabId: id });
+    set((s) => ({
+      tabs: newTabs,
+      activeTabId: id,
+      dirtyTabs: withoutDirty(s.dirtyTabs, (t) => t === id),
+    }));
     persistTabs(newTabs, id);
   },
 
   closeAllTabs: () => {
-    set({ tabs: [], activeTabId: null });
+    set({ tabs: [], activeTabId: null, dirtyTabs: {} });
     persistTabs([], null);
   },
 
@@ -173,7 +215,12 @@ export const useTabStore = create<TabState>((set, get) => ({
           ? newTabs[0].id
           : null;
       persistTabs(newTabs, newActive);
-      return { tabs: newTabs, activeTabId: newActive };
+      const remaining = new Set(newTabs.map((t) => t.id));
+      return {
+        tabs: newTabs,
+        activeTabId: newActive,
+        dirtyTabs: withoutDirty(s.dirtyTabs, (t) => remaining.has(t)),
+      };
     });
   },
 }));

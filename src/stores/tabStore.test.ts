@@ -232,4 +232,45 @@ describe("tabStore", () => {
       expect(tab?.table).toBe("table_t1");
     });
   });
+
+  describe("dirty tabs", () => {
+    beforeEach(() => {
+      useTabStore.setState({ tabs: [], activeTabId: null, dirtyTabs: {} });
+    });
+
+    it("tracks dirty sources per tab", () => {
+      const st = useTabStore.getState();
+      st.openTab(makeTab("t1"));
+      st.setTabDirty("t1", "grid", true);
+      expect(useTabStore.getState().isTabDirty("t1")).toBe(true);
+      st.setTabDirty("t1", "query", true);
+      st.setTabDirty("t1", "grid", false);
+      expect(useTabStore.getState().isTabDirty("t1")).toBe(true);
+      st.setTabDirty("t1", "query", false);
+      expect(useTabStore.getState().isTabDirty("t1")).toBe(false);
+    });
+
+    it("clears dirty state when tabs close", () => {
+      const st = useTabStore.getState();
+      st.openTab(makeTab("t1"));
+      st.openTab(makeTab("t2"));
+      st.openTab(makeTab("t3"));
+      st.setTabDirty("t1", "grid", true);
+      st.setTabDirty("t2", "grid", true);
+      st.closeTab("t1");
+      expect(useTabStore.getState().isTabDirty("t1")).toBe(false);
+      st.closeOtherTabs("t3");
+      expect(useTabStore.getState().dirtyTabs).toEqual({});
+    });
+
+    it("clears dirty state for tabs removed by pruneStaleConnections", () => {
+      const st = useTabStore.getState();
+      st.openTab(makeTab("t1", "gone"));
+      st.openTab(makeTab("t2", "kept"));
+      st.setTabDirty("t1", "grid", true);
+      st.pruneStaleConnections(new Set(["kept"]));
+      expect(useTabStore.getState().tabs.map((t) => t.id)).toEqual(["t2"]);
+      expect(useTabStore.getState().isTabDirty("t1")).toBe(false);
+    });
+  });
 });

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { usePolling } from "../../hooks/usePolling";
+import { useReportTabDirty } from "../../hooks/useTabDirty";
 import {
   api,
   ColumnInfo,
@@ -336,6 +337,7 @@ export function DataGrid({
     changes.deletedKeys.size > 0;
   const hasChangesLatestRef = useRef(hasChanges);
   hasChangesLatestRef.current = hasChanges;
+  useReportTabDirty(tabId, "grid", hasChanges);
 
   const fetchGenRef = useRef(0);
 
