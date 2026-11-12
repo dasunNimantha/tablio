@@ -99,8 +99,12 @@ fn host_line_matches(patterns: &[&str], target: &str) -> bool {
 /// `Host *` block), values from the more specific block win — OpenSSH
 /// uses "first match wins per directive", which is what we implement by
 /// walking blocks top-down and only filling fields that are still empty.
+///
+/// Directives before the first `Host` / `Match` line apply to every host,
+/// as in OpenSSH, so they participate in the same first-match-wins fill.
 pub fn resolve_target(content: &str, target: &str) -> Option<ResolvedSshHost> {
-    let mut active_match = false;
+    // OpenSSH treats everything before the first `Host`/`Match` as global.
+    let mut active_match = true;
     let mut resolved = ResolvedSshHost::default();
     let mut matched_any = false;
 
@@ -168,7 +172,15 @@ pub fn resolve_target(content: &str, target: &str) -> Option<ResolvedSshHost> {
         }
     }
 
-    if matched_any {
+    let global_applied = resolved.host_name.is_some()
+        || resolved.port.is_some()
+        || resolved.user.is_some()
+        || resolved.identity_file.is_some()
+        || resolved.has_unsupported_directives;
+    if matched_any || global_applied {
+        if resolved.alias.is_empty() {
+            resolved.alias = target.to_string();
+        }
         Some(resolved)
     } else {
         None
@@ -332,6 +344,63 @@ Host prod-* !prod-secret
 ";
         assert!(resolve_target(cfg, "prod-web").is_some());
         assert!(resolve_target(cfg, "prod-secret").is_none());
+    }
+
+    #[test]
+    fn top_level_include_is_flagged() {
+        let cfg = "\
+Include ~/.ssh/config.d/*
+
+Host bastion
+  HostName 10.0.0.1
+";
+        let r = resolve_target(cfg, "bastion").expect("must match");
+        assert!(r.has_unsupported_directives);
+        assert_eq!(r.host_name.as_deref(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn include_inside_non_matching_block_is_not_flagged() {
+        let cfg = "\
+Host other
+  Include other.conf
+
+Host bastion
+  HostName 10.0.0.1
+";
+        let r = resolve_target(cfg, "bastion").expect("must match");
+        assert!(!r.has_unsupported_directives);
+    }
+
+    #[test]
+    fn pre_host_directives_apply_globally_with_first_match_wins() {
+        let cfg = "\
+User globaluser
+Port 2200
+
+Host bastion
+  User blockuser
+  HostName 10.0.0.1
+";
+        let r = resolve_target(cfg, "bastion").expect("must match");
+        // The global section comes first, so it wins per directive.
+        assert_eq!(r.user.as_deref(), Some("globaluser"));
+        assert_eq!(r.port, Some(2200));
+        assert_eq!(r.host_name.as_deref(), Some("10.0.0.1"));
+        assert_eq!(r.alias, "bastion");
+
+        // Global directives apply even to hosts without a block.
+        let r = resolve_target(cfg, "elsewhere").expect("global applies");
+        assert_eq!(r.user.as_deref(), Some("globaluser"));
+        assert_eq!(r.host_name, None);
+        assert_eq!(r.alias, "elsewhere");
+    }
+
+    #[test]
+    fn top_level_proxyjump_is_flagged() {
+        let cfg = "ProxyJump jump\nHost db\n  HostName db.internal\n";
+        let r = resolve_target(cfg, "db").expect("must match");
+        assert!(r.has_unsupported_directives);
     }
 }
 
