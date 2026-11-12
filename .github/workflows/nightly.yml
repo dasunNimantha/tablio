@@ -510,23 +510,27 @@ jobs:
         with:
           tool: cargo-fuzz
 
-      - name: Validate fuzz Cargo.lock is fresh
+      - name: Seed fuzz Cargo.lock from the app's lockfile
         # The fuzz crate is intentionally outside the parent workspace,
-        # so it has its own resolver. Without a committed lockfile, CI
-        # re-resolves the tauri family on every run and can drift
-        # across the codegen/runtime boundary (`ResolvedCommand` field
-        # churn breaks `tauri::generate_handler!` expansion).
-        # `cargo fetch --locked` errors loudly if the lockfile is
-        # missing or out of date, which fails the job before the much
-        # slower `cargo fuzz run` build kicks off. `cargo fuzz run`
-        # itself does not accept `--locked`, so this is the only place
-        # where reproducibility is enforced.
-        run: cargo +nightly fetch --locked --manifest-path src-tauri/fuzz/Cargo.toml
+        # so it has its own resolver. Resolving it from scratch can
+        # drift the tauri family across the codegen/runtime boundary
+        # (`ResolvedCommand` field churn breaks
+        # `tauri::generate_handler!` expansion), but a separately
+        # committed lockfile went stale on every Renovate bump.
+        # Copying the app's Cargo.lock pins every shared crate to the
+        # exact versions the app ships; `cargo fetch` then only adds
+        # the fuzz-only crates (libfuzzer-sys and friends).
+        run: |
+          cp src-tauri/Cargo.lock src-tauri/fuzz/Cargo.lock
+          cargo +nightly fetch --manifest-path src-tauri/fuzz/Cargo.toml
 
       - name: Fuzz ${{ matrix.target }} for 5 minutes
         # `-max_total_time=300` caps each target at 300s of mutation;
         # libFuzzer exits 0 on time-out (no crashes found) and non-zero
         # on a discovered crash, which is exactly the gate we want.
+        # `-timeout=10` reports any single input running over 10s as a
+        # hang with a saved reproducer. The default (1200s) let a hang
+        # run into the job timeout with no artifact.
         #
         # `--target x86_64-unknown-linux-gnu` is required because the
         # cargo-fuzz binary distributed via cargo-binstall is itself
@@ -541,7 +545,7 @@ jobs:
           cargo +nightly fuzz run ${{ matrix.target }} \
             --fuzz-dir src-tauri/fuzz \
             --target x86_64-unknown-linux-gnu \
-            -- -max_total_time=300
+            -- -max_total_time=300 -timeout=10
 
       - name: Upload crash artifacts
         if: failure()
