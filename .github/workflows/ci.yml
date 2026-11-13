@@ -1038,7 +1038,10 @@ jobs:
 
       - name: Build Tauri app
         if: needs.changes.outputs.backend == 'true'
-        run: npx tauri build
+        # Compile check only. Installers (deb/rpm/AppImage, plus macOS and
+        # Windows) are built nightly by `build-rehearsal` and again by the
+        # release workflow, so PRs skip the optimized build and bundling.
+        run: npx tauri build --debug --no-bundle
 
   # Aggregator job exposed to branch protection / rulesets as the single
   # required status check. It runs unconditionally (`if: always()`) so a
