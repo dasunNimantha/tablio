@@ -3027,3 +3027,117 @@ async fn mysql_console_procedure_with_if_block() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Console cancel
+// ---------------------------------------------------------------------------
+
+/// A token that fires after `ms` milliseconds, like a user pressing Stop.
+fn cancel_after(ms: u64) -> tablio_lib::db::cancel::CancellationToken {
+    let token = tablio_lib::db::cancel::CancellationToken::new();
+    let t = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        t.cancel();
+    });
+    token
+}
+
+fn marker() -> String {
+    format!("cancel_{}", uuid::Uuid::new_v4().simple())
+}
+
+#[tokio::test]
+async fn mysql_console_cancel_stops_running_query() {
+    let (driver, db) = mysql_driver!();
+    let m = marker();
+    let start = std::time::Instant::now();
+    let err = driver
+        .execute_query_cancellable(
+            &db,
+            &format!("SELECT SLEEP(30), '{m}'", m = m),
+            cancel_after(300),
+        )
+        .await
+        .expect_err("cancelled run must fail");
+    let elapsed = start.elapsed();
+    assert!(
+        tablio_lib::db::cancel::is_cancelled_error(&err),
+        "expected cancelled error, got: {err:#}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(2500),
+        "cancel took {elapsed:?}"
+    );
+    // The server really stopped the statement (not just the client).
+    let r = driver
+        .execute_query(&db, &format!("SELECT COUNT(*) FROM information_schema.processlist WHERE info LIKE '%SLEEP(30), ''{m}''%' AND id <> CONNECTION_ID()", m = m))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.rows[0][0]
+            .as_i64()
+            .or_else(|| r.rows[0][0].as_str().and_then(|s| s.parse().ok())),
+        Some(0),
+        "statement still running on the server"
+    );
+    // The connection(s) are usable afterwards: run more queries than the
+    // pool holds so a poisoned connection would be handed out.
+    for _ in 0..8 {
+        let r = driver.execute_query(&db, "SELECT 1").await.unwrap();
+        assert_eq!(r.rows.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn mysql_console_cancel_rolls_back_script_transaction() {
+    let (driver, db) = mysql_driver!();
+    let t = unique_table("cancel_txn");
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE {t} (id INT) ENGINE=InnoDB", t = t),
+        )
+        .await
+        .unwrap();
+    let m = marker();
+    let script = format!(
+        "BEGIN; INSERT INTO {t} VALUES (1); SELECT SLEEP(30), '{m}'",
+        t = t,
+        m = m
+    );
+    let err = driver
+        .execute_query_cancellable(&db, &script, cancel_after(300))
+        .await
+        .expect_err("cancelled run must fail");
+    assert!(tablio_lib::db::cancel::is_cancelled_error(&err), "{err:#}");
+    for _ in 0..8 {
+        let r = driver
+            .execute_query(&db, &format!("SELECT COUNT(*) FROM {t}", t = t))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.rows[0][0]
+                .as_i64()
+                .or_else(|| r.rows[0][0].as_str().and_then(|s| s.parse().ok())),
+            Some(0),
+            "insert from the cancelled script must be rolled back"
+        );
+    }
+    let _ = driver
+        .execute_query(&db, &format!("DROP TABLE {t}", t = t))
+        .await;
+}
+
+#[tokio::test]
+async fn mysql_console_cancel_before_start_is_reported() {
+    let (driver, db) = mysql_driver!();
+    let token = tablio_lib::db::cancel::CancellationToken::new();
+    token.cancel();
+    let err = driver
+        .execute_query_cancellable(&db, "SELECT 1", token)
+        .await
+        .expect_err("pre-cancelled run must fail");
+    assert!(tablio_lib::db::cancel::is_cancelled_error(&err));
+    driver.execute_query(&db, "SELECT 1").await.unwrap();
+}

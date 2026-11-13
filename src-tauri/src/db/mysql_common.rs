@@ -2,6 +2,9 @@ use anyhow::{anyhow, Result};
 use sqlx::{Column, MySqlPool, Row, TypeInfo};
 use std::time::Instant;
 
+use crate::db::cancel::{
+    cancelled_error, run_interruptible, unless_cancelled, CancellationToken, Interruptible,
+};
 use crate::models::*;
 use crate::util::sql::{
     ensure_row_matched, is_numeric_type_name, numeric_literal, script_transaction_state,
@@ -640,6 +643,30 @@ pub async fn my_fetch_rows_impl(
 }
 
 pub async fn my_execute_query(pool: &MySqlPool, database: &str, sql: &str) -> Result<QueryResult> {
+    my_execute_query_cancellable(pool, database, sql, false, CancellationToken::new()).await
+}
+
+/// Ask the server to stop the statement running on connection `id`.
+/// `KILL QUERY` leaves the connection itself open (unlike `KILL`), so
+/// the pinned connection can still run its cleanup. Runs on another
+/// pooled connection; errors are ignored because the caller retries and
+/// finally discards the connection anyway.
+async fn my_interrupt(pool: MySqlPool, id: u64) {
+    let sql = format!("KILL QUERY {}", id);
+    let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
+        .execute(&pool)
+        .await;
+}
+
+/// `cancellable` fetches the connection id up front (one extra round
+/// trip) so `token` can interrupt the statement server-side.
+pub async fn my_execute_query_cancellable(
+    pool: &MySqlPool,
+    database: &str,
+    sql: &str,
+    cancellable: bool,
+    token: CancellationToken,
+) -> Result<QueryResult> {
     let start = Instant::now();
 
     // Multi-statement support: see the matching comment in
@@ -657,7 +684,15 @@ pub async fn my_execute_query(pool: &MySqlPool, database: &str, sql: &str) -> Re
         return Err(anyhow::anyhow!("Query is empty"));
     }
 
-    let mut conn = pool.acquire().await?;
+    let mut conn = unless_cancelled(pool.acquire(), &token).await?;
+    let connection_id: Option<u64> = if cancellable {
+        let row = sqlx::raw_sql("SELECT CONNECTION_ID()")
+            .fetch_one(&mut *conn)
+            .await?;
+        Some(row.try_get::<u64, _>(0)?)
+    } else {
+        None
+    };
 
     // Run against the database selected in the console. The pooled
     // connection's default database is restored afterwards so other
@@ -687,7 +722,24 @@ pub async fn my_execute_query(pool: &MySqlPool, database: &str, sql: &str) -> Re
         }
     }
 
-    let outcome = my_run_statements(&mut conn, &statements, start).await;
+    let run = my_run_statements(&mut conn, &statements, start, &token);
+    let interrupt = || {
+        let pool = pool.clone();
+        async move {
+            if let Some(id) = connection_id {
+                my_interrupt(pool, id).await;
+            }
+        }
+    };
+    let outcome = match run_interruptible(run, &token, interrupt).await {
+        Interruptible::Done(r) | Interruptible::Interrupted(r) => r,
+        Interruptible::Abandoned => {
+            // Dropped mid-protocol: the connection cannot be trusted.
+            conn.close_on_drop();
+            return Err(cancelled_error());
+        }
+    };
+    let cancelled = token.is_cancelled();
 
     // Never hand a connection back to the pool inside a transaction
     // (sqlx does not roll back a user-issued BEGIN / START TRANSACTION)
@@ -695,7 +747,7 @@ pub async fn my_execute_query(pool: &MySqlPool, database: &str, sql: &str) -> Re
     let txn = script_transaction_state(&statements);
     let left_open = outcome.is_ok() && txn == ScriptTxn::LeftOpen;
     if txn != ScriptTxn::Untouched
-        && (outcome.is_err() || left_open)
+        && (outcome.is_err() || left_open || cancelled)
         && sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.is_err()
     {
         conn.close_on_drop();
@@ -714,6 +766,13 @@ pub async fn my_execute_query(pool: &MySqlPool, database: &str, sql: &str) -> Re
     });
     if dirty_session {
         conn.close_on_drop();
+    }
+    if cancelled {
+        // A `KILL QUERY` that lands late would interrupt whatever the
+        // next borrower runs on this connection: retire it. Closing also
+        // makes restoring the default database below unnecessary.
+        conn.close_on_drop();
+        return Err(cancelled_error());
     }
     if switched || script_uses_db {
         match original_db.flatten() {
@@ -745,15 +804,23 @@ async fn my_run_statements(
     conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>,
     statements: &[String],
     start: Instant,
+    token: &CancellationToken,
 ) -> Result<QueryResult> {
     let Some((last, leading)) = statements.split_last() else {
         return Err(anyhow::anyhow!("Query is empty"));
     };
 
+    // A cancel between statements stops before the next one starts.
     for stmt in leading {
+        if token.is_cancelled() {
+            return Err(cancelled_error());
+        }
         sqlx::raw_sql(sqlx::AssertSqlSafe(stmt.as_str()))
             .execute(&mut **conn)
             .await?;
+    }
+    if token.is_cancelled() {
+        return Err(cancelled_error());
     }
 
     let last = last.as_str();

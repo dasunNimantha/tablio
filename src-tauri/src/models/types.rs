@@ -243,6 +243,10 @@ pub struct ExecuteQueryRequest {
     pub connection_id: String,
     pub database: String,
     pub sql: String,
+    /// Console-chosen id that `cancel_execution` can target while the
+    /// query runs. `None` runs it without cancellation support.
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

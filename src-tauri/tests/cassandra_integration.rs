@@ -1109,3 +1109,46 @@ async fn cassandra_filter_allows_semicolon_inside_quotes() {
 
     teardown_keyspace(&driver, &ks).await;
 }
+
+// ---------------------------------------------------------------------------
+// Console cancel
+// ---------------------------------------------------------------------------
+
+/// Cassandra has no server-side cancel; the driver drops the in-flight
+/// request. The session must keep working afterwards.
+#[tokio::test]
+async fn cassandra_console_cancel_aborts_and_session_recovers() {
+    let driver = create_driver().await;
+    let token = tablio_lib::db::cancel::CancellationToken::new();
+    let t = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        t.cancel();
+    });
+    let start = std::time::Instant::now();
+    // Large enough that it is usually still in flight after 1 ms; if it
+    // finishes first the result is simply returned.
+    let res = driver
+        .execute_query_cancellable("", "SELECT * FROM system_schema.columns", token)
+        .await;
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    if let Err(e) = &res {
+        assert!(tablio_lib::db::cancel::is_cancelled_error(e), "{e:#}");
+    }
+
+    let pre = tablio_lib::db::cancel::CancellationToken::new();
+    pre.cancel();
+    let err = driver
+        .execute_query_cancellable("", "SELECT release_version FROM system.local", pre)
+        .await
+        .expect_err("pre-cancelled run must fail");
+    assert!(tablio_lib::db::cancel::is_cancelled_error(&err));
+
+    for _ in 0..4 {
+        let r = driver
+            .execute_query("", "SELECT release_version FROM system.local")
+            .await
+            .unwrap();
+        assert_eq!(r.rows.len(), 1);
+    }
+}
