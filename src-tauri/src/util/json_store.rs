@@ -1,7 +1,8 @@
 //! Safe persistence for the small JSON files under `~/.tablio`.
 //!
-//! `connections.json` holds database and SSH passwords, so every write
-//! here is:
+//! `connections.json` can hold database and SSH passwords (secrets
+//! normally live in the OS keychain, see `util::secrets`, but stay in the
+//! file when it is unavailable), so every write here is:
 //!
 //! - **Serialized** through one process-wide async mutex so two concurrent
 //!   read-modify-write cycles (e.g. saving two connections at once) cannot
