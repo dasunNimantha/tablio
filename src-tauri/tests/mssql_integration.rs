@@ -3146,6 +3146,98 @@ async fn mssql_console_shows_rows_of_any_statement() {
 }
 
 #[tokio::test]
+async fn mssql_grid_save_ignored_by_instead_of_trigger_fails() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_iot");
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE [dbo].[{tbl}] (id INT PRIMARY KEY, v INT)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO [dbo].[{tbl}] VALUES (1, 1)"))
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TRIGGER [dbo].[{tbl}_noop] ON [dbo].[{tbl}] INSTEAD OF UPDATE, DELETE \
+                 AS BEGIN SET NOCOUNT ON; END"
+            ),
+        )
+        .await
+        .unwrap();
+    let changes = |updates: Vec<CellChange>, deletes: Vec<DeleteRow>| DataChanges {
+        connection_id: "test".into(),
+        database: db.clone(),
+        schema: SCHEMA.into(),
+        table: tbl.clone(),
+        updates,
+        inserts: vec![],
+        deletes,
+    };
+    let key = vec![("id".to_string(), serde_json::json!(1))];
+    let err = driver
+        .apply_changes(&changes(
+            vec![CellChange {
+                row_index: 0,
+                column_name: "v".into(),
+                old_value: serde_json::json!(1),
+                new_value: serde_json::json!(9),
+                primary_key_values: key.clone(),
+            }],
+            vec![],
+        ))
+        .await
+        .expect_err("an update the trigger ignored must not report success");
+    assert!(err.to_string().contains("INSTEAD OF UPDATE"), "{err}");
+    let err = driver
+        .apply_changes(&changes(
+            vec![],
+            vec![DeleteRow {
+                primary_key_values: key.clone(),
+            }],
+        ))
+        .await
+        .expect_err("a delete the trigger ignored must not report success");
+    assert!(err.to_string().contains("INSTEAD OF DELETE"), "{err}");
+
+    // A trigger that does apply the change passes.
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "ALTER TRIGGER [dbo].[{tbl}_noop] ON [dbo].[{tbl}] INSTEAD OF UPDATE, DELETE \
+                 AS BEGIN SET NOCOUNT ON; UPDATE t SET v = i.v FROM [dbo].[{tbl}] t \
+                 JOIN inserted i ON i.id = t.id; END"
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .apply_changes(&changes(
+            vec![CellChange {
+                row_index: 0,
+                column_name: "v".into(),
+                old_value: serde_json::json!(1),
+                new_value: serde_json::json!(9),
+                primary_key_values: key,
+            }],
+            vec![],
+        ))
+        .await
+        .unwrap();
+
+    driver
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn mssql_sorting_lob_columns_works_or_explains() {
     let (driver, db) = mssql_driver!();
     let tbl = unique_table("ms_lobsort");

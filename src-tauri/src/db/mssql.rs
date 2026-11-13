@@ -424,6 +424,33 @@ fn mssql_sort_expr(column: &str, data_type: &str) -> Result<String> {
     })
 }
 
+/// Column types the INSTEAD OF trigger check can't compare with `=`.
+fn mssql_type_is_comparable(data_type: &str) -> bool {
+    let base = data_type
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    !matches!(
+        base.as_str(),
+        "text" | "ntext" | "image" | "xml" | "geography" | "geometry" | "timestamp" | "rowversion"
+    )
+}
+
+fn describe_pk(pk: &[(String, serde_json::Value)]) -> String {
+    pk.iter()
+        .map(|(c, v)| format!("{} = {}", c, v))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `THROW` statement with a message (limited to 2048 characters).
+fn throw_stmt(msg: &str) -> String {
+    let msg: String = msg.chars().take(2000).collect();
+    format!("THROW 50000, N'{}', 1;", msg.replace('\'', "''"))
+}
+
 /// `IF @@ROWCOUNT = 0 THROW ...` placed right after a keyed UPDATE /
 /// DELETE so an edit that matches no row fails the batch instead of
 /// silently succeeding.
@@ -800,6 +827,34 @@ impl MssqlDriver {
             return sql.to_string();
         }
         format!("USE {}; {}", bracket(database), sql)
+    }
+
+    /// DML events (`UPDATE`, `DELETE`, `INSERT`) that an enabled INSTEAD
+    /// OF trigger on `schema.table` (a table or a view) handles.
+    async fn instead_of_trigger_events(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<HashSet<String>> {
+        let db = bracket(database);
+        let sql = format!(
+            "SELECT DISTINCT te.type_desc
+             FROM {db}.sys.triggers tr
+             INNER JOIN {db}.sys.trigger_events te ON te.object_id = tr.object_id
+             INNER JOIN {db}.sys.objects o ON o.object_id = tr.parent_id
+             INNER JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id
+             WHERE tr.is_instead_of_trigger = 1 AND tr.is_disabled = 0
+               AND o.name = N'{}' AND s.name = N'{}'",
+            table.replace('\'', "''"),
+            schema.replace('\'', "''"),
+        );
+        let (_, rows) = self.run_select(&sql).await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| r.into_iter().next())
+            .filter_map(|v| v.as_str().map(|s| s.to_ascii_uppercase()))
+            .collect())
     }
 
     async fn primary_key_set(
@@ -1632,6 +1687,23 @@ impl DatabaseDriver for MssqlDriver {
         let lit = |col: &str, val: &serde_json::Value| -> String {
             typed_mssql_literal(col_types.get(col).map(String::as_str), val)
         };
+        // An enabled INSTEAD OF trigger replaces the UPDATE / DELETE: the
+        // statement then reports the rows as affected even when the
+        // trigger ignored them, so `@@ROWCOUNT` can't tell. For such
+        // tables (and views) the row itself is checked afterwards.
+        let instead_of = if changes.updates.is_empty() && changes.deletes.is_empty() {
+            HashSet::new()
+        } else {
+            self.instead_of_trigger_events(&changes.database, &changes.schema, &changes.table)
+                .await
+                .unwrap_or_default()
+        };
+        let pk_where = |pk: &[(String, serde_json::Value)]| -> String {
+            pk.iter()
+                .map(|(col, val)| format!("{} = {}", bracket(col), lit(col, val)))
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        };
         let mut stmts = Vec::new();
         stmts.push("SET XACT_ABORT ON; BEGIN TRAN;".to_string());
         for update in &changes.updates {
@@ -1656,6 +1728,33 @@ impl DatabaseDriver for MssqlDriver {
             ));
             // XACT_ABORT makes THROW roll back the whole batch.
             stmts.push(no_row_matched_guard("update", &update.primary_key_values));
+            let comparable = col_types
+                .get(&update.column_name)
+                .is_none_or(|t| mssql_type_is_comparable(t));
+            if instead_of.contains("UPDATE") && comparable && update.old_value != update.new_value {
+                // Still holding the old value: the trigger dropped the edit.
+                let old_match = if update.old_value.is_null() {
+                    format!("{} IS NULL", bracket(&update.column_name))
+                } else {
+                    format!(
+                        "{} = {}",
+                        bracket(&update.column_name),
+                        lit(&update.column_name, &update.old_value)
+                    )
+                };
+                stmts.push(format!(
+                    "IF EXISTS (SELECT 1 FROM {} WHERE {} AND {}) {}",
+                    fq,
+                    pk_where(&update.primary_key_values),
+                    old_match,
+                    throw_stmt(&format!(
+                        "Cannot update row ({}): the change was not applied. An INSTEAD OF \
+                         UPDATE trigger on this table left the row unchanged. No changes \
+                         were saved.",
+                        describe_pk(&update.primary_key_values)
+                    ))
+                ));
+            }
         }
         for insert in &changes.inserts {
             let cols: Vec<String> = insert.values.iter().map(|(n, _)| bracket(n)).collect();
@@ -1682,6 +1781,18 @@ impl DatabaseDriver for MssqlDriver {
                 where_clause.join(" AND ")
             ));
             stmts.push(no_row_matched_guard("delete", &delete.primary_key_values));
+            if instead_of.contains("DELETE") {
+                stmts.push(format!(
+                    "IF EXISTS (SELECT 1 FROM {} WHERE {}) {}",
+                    fq,
+                    pk_where(&delete.primary_key_values),
+                    throw_stmt(&format!(
+                        "Cannot delete row ({}): the row still exists. An INSTEAD OF DELETE \
+                         trigger on this table kept it. No changes were saved.",
+                        describe_pk(&delete.primary_key_values)
+                    ))
+                ));
+            }
         }
         stmts.push("COMMIT TRAN;".to_string());
 
