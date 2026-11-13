@@ -123,6 +123,7 @@ export function DashboardLocks({ connectionId, paused }: Props) {
           <Search size={14} />
           <input
             type="text"
+            aria-label="Filter locks"
             placeholder="Filter locks..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}

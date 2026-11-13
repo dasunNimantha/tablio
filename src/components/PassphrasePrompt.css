@@ -9,7 +9,7 @@
 }
 
 .passphrase-prompt {
-  width: min(420px, calc(100vw - 48px));
+  width: min(420px, calc(100 * var(--vw) - 48px));
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);

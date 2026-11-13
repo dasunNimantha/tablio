@@ -185,6 +185,91 @@ async fn mssql_create_table_and_list_tables() {
         .unwrap();
 }
 
+/// The Create Table dialog's MSSQL defaults (`INT IDENTITY(1,1)` key,
+/// string default) must produce DDL SQL Server accepts, and the identity
+/// column must auto-number inserted rows. Adding a column via
+/// alter_table must keep its DEFAULT (it used to be dropped).
+#[tokio::test]
+async fn mssql_create_table_dialog_defaults_and_add_column_default() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_dlg");
+    let cols = vec![
+        ColumnDefinition {
+            name: "id".into(),
+            data_type: "INT IDENTITY(1,1)".into(),
+            is_nullable: false,
+            is_primary_key: true,
+            default_value: None,
+        },
+        ColumnDefinition {
+            name: "status".into(),
+            data_type: "NVARCHAR(255)".into(),
+            is_nullable: true,
+            is_primary_key: false,
+            default_value: Some("'new'".into()),
+        },
+    ];
+    driver.create_table(&db, SCHEMA, &tbl, &cols).await.unwrap();
+
+    driver
+        .alter_table(
+            &db,
+            SCHEMA,
+            &tbl,
+            &[AlterTableOperation::AddColumn {
+                column: ColumnDefinition {
+                    name: "qty".into(),
+                    data_type: "INT".into(),
+                    is_nullable: false,
+                    is_primary_key: false,
+                    default_value: Some("0".into()),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+
+    driver
+        .execute_query(&db, &format!("INSERT INTO [dbo].[{}] DEFAULT VALUES", tbl))
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO [dbo].[{}] DEFAULT VALUES", tbl))
+        .await
+        .unwrap();
+    let res = driver
+        .execute_query(
+            &db,
+            &format!("SELECT id, status, qty FROM [dbo].[{}] ORDER BY id", tbl),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.rows.len(), 2);
+    assert_eq!(res.rows[0][0], serde_json::json!(1));
+    assert_eq!(res.rows[1][0], serde_json::json!(2));
+    assert_eq!(res.rows[0][1], serde_json::json!("new"));
+    assert_eq!(res.rows[0][2], serde_json::json!(0));
+
+    driver
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mssql_create_table_rejects_unsafe_type() {
+    let (driver, db) = mssql_driver!();
+    let cols = vec![ColumnDefinition {
+        name: "a".into(),
+        data_type: "INT); DROP TABLE x; --".into(),
+        is_nullable: true,
+        is_primary_key: false,
+        default_value: None,
+    }];
+    let result = driver.create_table(&db, SCHEMA, "should_fail", &cols).await;
+    assert!(result.is_err());
+}
+
 #[tokio::test]
 async fn mssql_create_table_no_columns_error() {
     let (driver, db) = mssql_driver!();

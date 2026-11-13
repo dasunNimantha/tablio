@@ -1,4 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  cloneElement,
+  isValidElement,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import {
   resolveSshPassphrase,
@@ -16,12 +27,13 @@ import {
   Loader2,
   Lock,
   Shield,
-  SlidersHorizontal,
   UserRound,
   X,
   XCircle,
 } from "lucide-react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { Modal } from "./Modal/Modal";
+import { formatConnectionError } from "../lib/connectionErrors";
 import "./ConnectionDialog.css";
 
 const MAX_FOLDER_NAME_LENGTH = 50;
@@ -67,8 +79,7 @@ type DialogSectionId =
   | "general"
   | "authentication"
   | "security"
-  | "ssh"
-  | "advanced";
+  | "ssh";
 
 interface DialogSection {
   id: DialogSectionId;
@@ -85,7 +96,6 @@ const SECTION_FIELDS: Record<DialogSectionId, ValidationField[]> = {
   authentication: ["user"],
   security: [],
   ssh: ["ssh_host", "ssh_port", "ssh_user", "ssh_password", "ssh_key_path"],
-  advanced: [],
 };
 
 function getConnectionDialogSections(
@@ -97,8 +107,8 @@ function getConnectionDialogSections(
       id: "general",
       label: "General",
       description: isSqlite
-        ? "Name, type, folder and database file"
-        : "Name, type and connection target",
+        ? "Name, type and database file"
+        : "Name, type and server",
       icon: <Database size={16} />,
     },
   ];
@@ -108,7 +118,7 @@ function getConnectionDialogSections(
       {
         id: "authentication",
         label: "Authentication",
-        description: "User credentials and future auth methods",
+        description: "Username and password",
         icon: <UserRound size={16} />,
       },
       {
@@ -125,13 +135,6 @@ function getConnectionDialogSections(
       },
     );
   }
-
-  sections.push({
-    id: "advanced",
-    label: "Advanced",
-    description: "Parameters and driver options",
-    icon: <SlidersHorizontal size={16} />,
-  });
 
   return sections;
 }
@@ -150,32 +153,6 @@ function getFirstInvalidSection(
   return sections.find((section) => getSectionErrorCount(section.id, errors) > 0)?.id ?? null;
 }
 
-function formatConnectionTestError(error: unknown, form: ConnectionConfig): string {
-  const raw = String(error).trim();
-  const dbInfo = DB_TYPES.find((d) => d.value === form.db_type);
-  const dbLabel = dbInfo?.label ?? "database";
-  const user = form.user?.trim();
-
-  const passwordFailure = raw.match(/password authentication failed for user "([^"]+)"/i);
-  if (passwordFailure) {
-    return `Database authentication failed for ${dbLabel} user "${passwordFailure[1]}". Check the username and password in Authentication.`;
-  }
-
-  if (/error returned from database:/i.test(raw)) {
-    return `Database connection failed: ${raw.replace(/error returned from database:\s*/i, "")}`;
-  }
-
-  if (/ssh|known host|host key|agent|identity file|bastion/i.test(raw)) {
-    return `SSH tunnel failed${form.ssh_host ? ` for ${form.ssh_host}` : ""}: ${raw}`;
-  }
-
-  if (user && /authentication|login/i.test(raw)) {
-    return `Connection failed for ${dbLabel} user "${user}": ${raw}`;
-  }
-
-  return raw || "Connection test failed.";
-}
-
 function looksLikeSshConfigAlias(value: string): boolean {
   const host = value.trim();
   if (!host) return false;
@@ -185,6 +162,14 @@ function looksLikeSshConfigAlias(value: string): boolean {
   return !host.includes(".");
 }
 
+const FORM_CONTROL_TAGS = new Set(["input", "select", "textarea"]);
+
+/** Label + control + description/error, wired together for assistive
+ *  tech: the label points at the control (`htmlFor`), and the control is
+ *  described by the description and error text. When the child isn't a
+ *  bare form control (e.g. a file picker wrapper), pass `inputId` and put
+ *  that id on the inner input yourself. Non-input groups (`group`) are
+ *  labelled with `aria-labelledby` instead. */
 function FormField({
   label,
   error,
@@ -192,6 +177,8 @@ function FormField({
   className = "",
   style,
   description,
+  inputId,
+  group = false,
 }: {
   label: string;
   error?: string;
@@ -199,17 +186,104 @@ function FormField({
   className?: string;
   style?: CSSProperties;
   description?: string;
+  inputId?: string;
+  group?: boolean;
 }) {
+  const autoId = useId();
+  const id = inputId ?? `field-${autoId}`;
+  const labelId = `${id}-label`;
+  const descId = description ? `${id}-desc` : undefined;
+  const errId = error ? `${id}-error` : undefined;
+  const describedBy = [descId, errId].filter(Boolean).join(" ") || undefined;
+
+  let control: ReactNode = children;
+  if (
+    !group &&
+    !inputId &&
+    isValidElement(children) &&
+    ((typeof children.type === "string" && FORM_CONTROL_TAGS.has(children.type)) ||
+      children.type === PortInput)
+  ) {
+    control = cloneElement(children as ReactElement<Record<string, unknown>>, {
+      id,
+      "aria-describedby": describedBy,
+      "aria-invalid": error ? true : undefined,
+    });
+  }
+
   return (
     <div
       className={`form-group${className ? ` ${className}` : ""}${error ? " form-group--error" : ""}`}
       style={style}
     >
-      <label>{label}</label>
-      {description && <div className="form-field-description">{description}</div>}
-      {children}
-      {error && <div className="field-error">{error}</div>}
+      {group ? <label id={labelId}>{label}</label> : <label id={labelId} htmlFor={id}>{label}</label>}
+      {description && (
+        <div className="form-field-description" id={descId}>
+          {description}
+        </div>
+      )}
+      {group ? (
+        <div role="group" aria-labelledby={labelId}>
+          {control}
+        </div>
+      ) : (
+        control
+      )}
+      {error && (
+        <div className="field-error" id={errId}>
+          {error}
+        </div>
+      )}
     </div>
+  );
+}
+
+/** Raw-text port input: the field can be cleared and retyped (no snapping
+ *  to 0), and non-integer / out-of-range text is reported by validation
+ *  instead of being silently coerced. `onChange` gets NaN while the text
+ *  isn't a plain integer. */
+export function parsePortText(text: string): number {
+  const t = text.trim();
+  return /^\d{1,5}$/.test(t) ? parseInt(t, 10) : NaN;
+}
+
+function PortInput({
+  value,
+  onChange,
+  onBlur,
+  ...rest
+}: {
+  value: number | undefined;
+  onChange: (port: number) => void;
+  onBlur?: () => void;
+  id?: string;
+  "aria-describedby"?: string;
+  "aria-invalid"?: boolean;
+}) {
+  const [text, setText] = useState(() =>
+    value != null && Number.isFinite(value) ? String(value) : "",
+  );
+  // External changes (e.g. switching DB type resets the default port)
+  // replace the text; our own NaN round-trips don't.
+  useEffect(() => {
+    if (value != null && Number.isFinite(value) && parsePortText(text) !== value) {
+      setText(String(value));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+  return (
+    <input
+      {...rest}
+      type="text"
+      inputMode="numeric"
+      autoComplete="off"
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value);
+        onChange(parsePortText(e.target.value));
+      }}
+      onBlur={onBlur}
+    />
   );
 }
 
@@ -311,8 +385,10 @@ function ColorPicker({
 export function normalizeConnectionForm(form: ConnectionConfig): ConnectionConfig {
   const sshEnabled = !!form.ssh_enabled;
   const sshAuth = form.ssh_auth_method ?? "password";
+  // "Ask when connecting" applies to identity-file passphrases and SSH
+  // passwords alike; ssh-agent never reads either.
   const promptPassphrase =
-    sshEnabled && sshAuth === "identityfile" && !!form.ssh_prompt_passphrase;
+    sshEnabled && sshAuth !== "agent" && !!form.ssh_prompt_passphrase;
 
   return {
     ...form,
@@ -334,6 +410,17 @@ export function normalizeConnectionForm(form: ConnectionConfig): ConnectionConfi
       sshEnabled && sshAuth !== "agent" && !promptPassphrase ? form.ssh_password ?? "" : "",
     ssh_prompt_passphrase: promptPassphrase,
   };
+}
+
+function validateHostAndPort(normalized: ConnectionConfig, errors: ValidationErrors) {
+  if (!normalized.host) {
+    errors.host = "Host is required.";
+  } else if (/\s/.test(normalized.host)) {
+    errors.host = "Host can't contain spaces.";
+  }
+  if (!Number.isInteger(normalized.port) || normalized.port < 1 || normalized.port > 65535) {
+    errors.port = "Port must be a whole number from 1 to 65535.";
+  }
 }
 
 export function validateConnectionForm(
@@ -364,12 +451,15 @@ export function validateConnectionForm(
     if (!normalized.ssh_host) {
       errors.ssh_host = "SSH host is required.";
     }
+    if (/\s/.test(normalized.ssh_host ?? "")) {
+      errors.ssh_host = "SSH host can't contain spaces.";
+    }
     if (
       !Number.isInteger(normalized.ssh_port ?? NaN) ||
       (normalized.ssh_port ?? 0) < 1 ||
       (normalized.ssh_port ?? 0) > 65535
     ) {
-      errors.ssh_port = "SSH port must be between 1 and 65535.";
+      errors.ssh_port = "SSH port must be a whole number from 1 to 65535.";
     }
     if (!normalized.ssh_user) {
       errors.ssh_user = "SSH username is required.";
@@ -382,7 +472,7 @@ export function validateConnectionForm(
       // ssh-agent supplies the credential at connect time; nothing to
       // validate here. The backend surfaces a clear error if SSH_AUTH_SOCK
       // is unset or the agent has no identities loaded.
-    } else if (!normalized.ssh_password) {
+    } else if (!normalized.ssh_password && !normalized.ssh_prompt_passphrase) {
       // Password auth: require a password (only when the user opted to
       // store it).
       errors.ssh_password = "SSH password is required.";
@@ -397,22 +487,11 @@ export function validateConnectionForm(
   }
 
   if (normalized.db_type === "cassandra") {
-    if (!normalized.host) {
-      errors.host = "Host is required.";
-    }
-    if (!Number.isInteger(normalized.port) || normalized.port < 1 || normalized.port > 65535) {
-      errors.port = "Port must be between 1 and 65535.";
-    }
+    validateHostAndPort(normalized, errors);
     return errors;
   }
 
-  if (!normalized.host) {
-    errors.host = "Host is required.";
-  }
-
-  if (!Number.isInteger(normalized.port) || normalized.port < 1 || normalized.port > 65535) {
-    errors.port = "Port must be between 1 and 65535.";
-  }
+  validateHostAndPort(normalized, errors);
 
   if (!normalized.user) {
     errors.user = "Username is required.";
@@ -433,6 +512,7 @@ function DbTypeDropdown({
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const selected = DB_TYPES.find((d) => d.value === value)!;
+  const baseId = useId();
 
   useEffect(() => {
     if (!open) return;
@@ -445,15 +525,30 @@ function DbTypeDropdown({
 
   return (
     <div className={`form-group${className ? ` ${className}` : ""}`}>
-      <label>Database Type</label>
-      <div className="db-dropdown" ref={ref}>
+      <label id={`${baseId}-label`} htmlFor={`${baseId}-trigger`}>Database Type</label>
+      <div
+        className="db-dropdown"
+        ref={ref}
+        onKeyDown={(e) => {
+          if (e.key === "Escape" && open) {
+            // Close the list, not the whole dialog.
+            e.preventDefault();
+            e.stopPropagation();
+            setOpen(false);
+            ref.current?.querySelector<HTMLButtonElement>(".db-dropdown-trigger")?.focus();
+          }
+        }}
+      >
         <button
+          id={`${baseId}-trigger`}
           type="button"
           className="db-dropdown-trigger"
           onClick={() => setOpen((o) => !o)}
           aria-expanded={open}
+          aria-haspopup="true"
+          aria-labelledby={`${baseId}-label ${baseId}-value`}
         >
-          <span className="db-dropdown-value">{selected.label}</span>
+          <span className="db-dropdown-value" id={`${baseId}-value`}>{selected.label}</span>
           <ChevronDown size={14} className={`db-dropdown-chevron ${open ? "open" : ""}`} />
         </button>
         {open && (
@@ -463,6 +558,7 @@ function DbTypeDropdown({
                 <button
                   type="button"
                   className={`db-dropdown-item ${dt.value === value ? "active" : ""}`}
+                  aria-current={dt.value === value ? "true" : undefined}
                   onClick={() => {
                     onChange(dt.value);
                     setOpen(false);
@@ -489,6 +585,7 @@ function GroupInput({
   connections: ConnectionConfig[];
 }) {
   const [open, setOpen] = useState(false);
+  const groupInputId = useId();
   const ref = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -563,9 +660,17 @@ function GroupInput({
 
   return (
     <div className="form-group group-input-wrapper" ref={ref}>
-      <label>Group (optional)</label>
+      <label htmlFor={groupInputId}>Folder (optional)</label>
       <input
+        id={groupInputId}
         ref={inputRef}
+        onKeyDown={(e) => {
+          if (e.key === "Escape" && open && filtered.length > 0) {
+            e.preventDefault();
+            e.stopPropagation();
+            setOpen(false);
+          }
+        }}
         value={value}
         onChange={(e) => {
           onChange(e.target.value.slice(0, MAX_FOLDER_NAME_LENGTH));
@@ -633,7 +738,14 @@ function SshTunnelSection({
   // The password / passphrase field is only relevant for password auth and
   // for identity-file auth where the user opted to persist the passphrase.
   // ssh-agent never reads either, so the field is hidden entirely.
-  const showPasswordField = !isAgent && !(isIdentity && promptPassphrase);
+  const showPasswordField = !isAgent && !promptPassphrase;
+  const ids = useId();
+  // The password field keeps its historical stable id (tests and docs
+  // target it); everything else is unique per dialog instance.
+  const fid = (name: string) => (name === "ssh_password" ? "ssh-password" : `ssh-${name}-${ids}`);
+  const describedBy = (field: ValidationField, extra?: string) =>
+    [getFieldError(field) ? `${fid(field)}-error` : undefined, extra].filter(Boolean).join(" ") ||
+    undefined;
 
   const browseForKey = async () => {
     try {
@@ -794,14 +906,17 @@ function SshTunnelSection({
             <div
               className={`form-group flex-1${getFieldError("ssh_host") ? " form-group--error" : ""}`}
             >
-              <label>Tunnel host</label>
+              <label htmlFor={fid("ssh_host")}>Tunnel host</label>
               <div className="file-picker">
                 <input
+                  id={fid("ssh_host")}
                   value={form.ssh_host ?? ""}
                   onChange={(e) => updateField("ssh_host", e.target.value)}
                   onBlur={() => touchField("ssh_host")}
-                  placeholder="bastion.example.com (or an alias from ~/.ssh/config)"
+                  placeholder="bastion.example.com or ssh alias"
+                  title="A host name, IP address, or a Host alias from ~/.ssh/config"
                   aria-invalid={!!getFieldError("ssh_host")}
+                  aria-describedby={describedBy("ssh_host")}
                 />
                 <button
                   type="button"
@@ -813,7 +928,7 @@ function SshTunnelSection({
                 </button>
               </div>
               {getFieldError("ssh_host") && (
-                <div className="field-error">{getFieldError("ssh_host")}</div>
+                <div className="field-error" id={`${fid("ssh_host")}-error`}>{getFieldError("ssh_host")}</div>
               )}
               {sshConfigStatus && (
                 <div
@@ -834,18 +949,17 @@ function SshTunnelSection({
               className={`form-group${getFieldError("ssh_port") ? " form-group--error" : ""}`}
               style={{ width: 112 }}
             >
-              <label>Port</label>
-              <input
-                type="number"
+              <label htmlFor={fid("ssh_port")}>Port</label>
+              <PortInput
+                id={fid("ssh_port")}
                 value={form.ssh_port ?? 22}
-                onChange={(e) => updateField("ssh_port", parseInt(e.target.value, 10) || 0)}
+                onChange={(port) => updateField("ssh_port", port)}
                 onBlur={() => touchField("ssh_port")}
-                min={1}
-                max={65535}
                 aria-invalid={!!getFieldError("ssh_port")}
+                aria-describedby={describedBy("ssh_port")}
               />
               {getFieldError("ssh_port") && (
-                <div className="field-error">{getFieldError("ssh_port")}</div>
+                <div className="field-error" id={`${fid("ssh_port")}-error`}>{getFieldError("ssh_port")}</div>
               )}
             </div>
           </div>
@@ -857,8 +971,10 @@ function SshTunnelSection({
             <div
               className={`form-group${getFieldError("ssh_user") ? " form-group--error" : ""}`}
             >
-              <label>SSH username</label>
+              <label htmlFor={fid("ssh_user")}>SSH username</label>
               <input
+                id={fid("ssh_user")}
+                aria-describedby={describedBy("ssh_user")}
                 value={form.ssh_user ?? ""}
                 onChange={(e) => updateField("ssh_user", e.target.value)}
                 onBlur={() => touchField("ssh_user")}
@@ -866,13 +982,13 @@ function SshTunnelSection({
                 aria-invalid={!!getFieldError("ssh_user")}
               />
               {getFieldError("ssh_user") && (
-                <div className="field-error">{getFieldError("ssh_user")}</div>
+                <div className="field-error" id={`${fid("ssh_user")}-error`}>{getFieldError("ssh_user")}</div>
               )}
             </div>
 
             <div className="form-group">
-              <label>Authentication</label>
-              <div className="ssh-auth-toggle" role="radiogroup" aria-label="SSH authentication">
+              <label id={fid("auth-label")}>Authentication</label>
+              <div className="ssh-auth-toggle" role="radiogroup" aria-labelledby={fid("auth-label")}>
                 <button
                   type="button"
                   role="radio"
@@ -920,9 +1036,11 @@ function SshTunnelSection({
               <div
                 className={`form-group flex-1${getFieldError("ssh_key_path") ? " form-group--error" : ""}`}
               >
-                <label>Identity file</label>
+                <label htmlFor={fid("ssh_key_path")}>Identity file</label>
                 <div className="file-picker">
                   <input
+                    id={fid("ssh_key_path")}
+                    aria-describedby={describedBy("ssh_key_path")}
                     value={form.ssh_key_path ?? ""}
                     onChange={(e) => updateField("ssh_key_path", e.target.value)}
                     onBlur={() => touchField("ssh_key_path")}
@@ -938,13 +1056,13 @@ function SshTunnelSection({
                   </button>
                 </div>
                 {getFieldError("ssh_key_path") && (
-                  <div className="field-error">{getFieldError("ssh_key_path")}</div>
+                  <div className="field-error" id={`${fid("ssh_key_path")}-error`}>{getFieldError("ssh_key_path")}</div>
                 )}
               </div>
             </div>
           )}
 
-          {(showPasswordField || isIdentity) && (
+          {!isAgent && (
             <div
               className={`form-group${getFieldError("ssh_password") ? " form-group--error" : ""}`}
             >
@@ -952,10 +1070,10 @@ function SshTunnelSection({
                  row with the "Ask when connecting" toggle so we don't
                  burn an extra row of vertical space on a single check. */}
               <div className="ssh-passphrase-header">
-                <label htmlFor="ssh-password">
+                <label htmlFor={showPasswordField ? fid("ssh_password") : undefined}>
                   {isIdentity ? "Key passphrase" : "Password"}
                 </label>
-                {isIdentity && (
+                {(
                   <label
                     className={`security-toggle security-toggle--inline${
                       promptPassphrase ? " security-toggle--active" : ""
@@ -965,6 +1083,7 @@ function SshTunnelSection({
                       <input
                         className="security-toggle__input"
                         type="checkbox"
+                        aria-label={isIdentity ? "Ask for the key passphrase when connecting" : "Ask for the SSH password when connecting"}
                         checked={promptPassphrase}
                         onChange={(e) => updateField("ssh_prompt_passphrase", e.target.checked)}
                       />
@@ -978,7 +1097,8 @@ function SshTunnelSection({
               </div>
               {showPasswordField && (
                 <input
-                  id="ssh-password"
+                  id={fid("ssh_password")}
+                  aria-describedby={describedBy("ssh_password")}
                   type="password"
                   value={form.ssh_password ?? ""}
                   onChange={(e) => updateField("ssh_password", e.target.value)}
@@ -988,7 +1108,7 @@ function SshTunnelSection({
                 />
               )}
               {showPasswordField && getFieldError("ssh_password") && (
-                <div className="field-error">{getFieldError("ssh_password")}</div>
+                <div className="field-error" id={`${fid("ssh_password")}-error`}>{getFieldError("ssh_password")}</div>
               )}
             </div>
           )}
@@ -1032,7 +1152,8 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
         id: crypto.randomUUID(),
         name: `${editConfig.name} (copy)`,
         trust_server_cert: editConfig.trust_server_cert ?? false,
-        group: null,
+        // The copy lands next to the original, in the same folder.
+        group: editConfig.group ?? null,
       };
     }
     if (editConfig) {
@@ -1071,6 +1192,10 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
   const [touched, setTouched] = useState<Partial<Record<ValidationField, boolean>>>({});
   const [activeSection, setActiveSection] = useState<DialogSectionId>("general");
   const testingRef = useRef(false);
+  const savingRef = useRef(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [focusInvalidTick, setFocusInvalidTick] = useState(0);
+  const titleId = useId();
 
   const isSqlite = form.db_type === "sqlite";
   const supportsTlsOptions = !isSqlite && form.db_type !== "cassandra";
@@ -1130,6 +1255,8 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
     if (Object.keys(nextErrors).length > 0) {
       const firstInvalidSection = getFirstInvalidSection(nextErrors, dialogSections);
       if (firstInvalidSection) setActiveSection(firstInvalidSection);
+      // Move focus to the first invalid field once that section renders.
+      setFocusInvalidTick((n) => n + 1);
       setTestResult(null);
       setTestError("Please fix the highlighted fields.");
       return null;
@@ -1137,6 +1264,12 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
     setTestError("");
     return normalized;
   };
+
+  useEffect(() => {
+    if (focusInvalidTick === 0) return;
+    const el = contentRef.current?.querySelector<HTMLElement>("[aria-invalid='true']");
+    el?.focus();
+  }, [focusInvalidTick]);
 
   const handleDbTypeChange = (dbType: ConnectionConfig["db_type"]) => {
     const info = DB_TYPES.find((d) => d.value === dbType)!;
@@ -1182,7 +1315,7 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
       setTestResult("success");
     } catch (e) {
       setTestResult("error");
-      setTestError(formatConnectionTestError(e, normalized));
+      setTestError(formatConnectionError(e, normalized));
     } finally {
       testingRef.current = false;
       setTesting(false);
@@ -1190,8 +1323,10 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
   };
 
   const handleSave = async () => {
+    if (savingRef.current) return;
     const normalized = validateBeforeSubmit();
     if (!normalized) return;
+    savingRef.current = true;
     setSaving(true);
     try {
       if (isEdit) {
@@ -1201,18 +1336,27 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
       }
       onClose();
     } catch (e) {
-      setTestError(String(e));
+      // The store rethrows save failures; keep the dialog (and the
+      // user's input) open and say why.
+      setTestError(`Couldn't save the connection: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
 
   return (
-    <div className="dialog-overlay">
-      <div className="dialog connection-dialog">
+    <Modal
+      onClose={onClose}
+      busy={saving}
+      // A stray click on the backdrop shouldn't throw away a half-filled form.
+      closeOnOverlayClick={false}
+      className="dialog connection-dialog"
+      labelledBy={titleId}
+    >
         <div className="dialog-header">
-          <h2>{isEdit ? "Edit Connection" : "New Connection"}</h2>
-          <button className="btn-icon" onClick={onClose}>
+          <h2 id={titleId}>{isEdit ? "Edit Connection" : duplicate ? "Duplicate Connection" : "New Connection"}</h2>
+          <button className="btn-icon" onClick={onClose} aria-label="Close" title="Close" disabled={saving}>
             <X size={18} />
           </button>
         </div>
@@ -1226,7 +1370,7 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
             onSelect={setActiveSection}
           />
 
-          <div className="connection-dialog-content">
+          <div className="connection-dialog-content" ref={contentRef}>
             <SectionCard
               title={activeSectionMeta.label}
               description={activeSectionMeta.description}
@@ -1241,6 +1385,7 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                       <input
                         className="security-toggle__input"
                         type="checkbox"
+                        aria-label="Use an SSH tunnel"
                         checked={!!form.ssh_enabled}
                         onChange={(e) => updateField("ssh_enabled", e.target.checked)}
                       />
@@ -1286,7 +1431,7 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                         connections={connections}
                       />
                     </div>
-                    <FormField label="Color" className="form-group--color">
+                    <FormField label="Color" className="form-group--color" group>
                       <ColorPicker
                         value={form.color}
                         onChange={(color) => setForm((f) => ({ ...f, color }))}
@@ -1298,10 +1443,12 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                     <FormField
                       label="Database File Path"
                       error={getFieldError("database")}
+                      inputId="conn-sqlite-path"
                       description="SQLite connections use a local database file instead of a network host. Tilde paths like ~/database.db are supported."
                     >
                       <div className="file-picker">
                         <input
+                          id="conn-sqlite-path"
                           value={form.database}
                           onChange={(e) => updateField("database", e.target.value)}
                           onBlur={() => touchField("database")}
@@ -1338,14 +1485,10 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                           error={getFieldError("port")}
                           style={{ width: 112 }}
                         >
-                          <input
-                            type="number"
+                          <PortInput
                             value={form.port}
-                            onChange={(e) => updateField("port", parseInt(e.target.value, 10) || 0)}
+                            onChange={(port) => updateField("port", port)}
                             onBlur={() => touchField("port")}
-                            min={1}
-                            max={65535}
-                            aria-invalid={!!getFieldError("port")}
                           />
                         </FormField>
                       </div>
@@ -1373,7 +1516,7 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                     <Lock size={16} />
                     <div>
                       <strong>Password</strong>
-                      <span>Built-in username/password authentication. More methods can be added here.</span>
+                      <span>Sign in with a database username and password.</span>
                     </div>
                   </div>
 
@@ -1447,8 +1590,8 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                   </div>
                 ) : (
                   <div className="connection-section-note">
-                    TLS options are not exposed for Cassandra / ScyllaDB yet. This section is reserved
-                    for future driver-specific transport settings.
+                    TLS settings aren't available for Cassandra / ScyllaDB connections yet; the driver's
+                    default transport is used.
                   </div>
                 )
               )}
@@ -1462,17 +1605,11 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
                 />
               )}
 
-              {activeSection === "advanced" && (
-                <div className="connection-section-note">
-                  Connection parameters and driver-specific options will live here. Keeping this section
-                  separate makes it easier to add future settings without crowding the basic connection flow.
-                </div>
-              )}
             </SectionCard>
 
             {testError && (
-              <div className="connection-form-error" role="alert" aria-live="polite">
-                <AlertCircle size={14} />
+              <div className="connection-form-error" role="alert">
+                <AlertCircle size={14} aria-hidden="true" />
                 <span>{testError}</span>
               </div>
             )}
@@ -1515,7 +1652,6 @@ export function ConnectionDialog({ onClose, editConfig, duplicate }: Props) {
             </button>
           </div>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

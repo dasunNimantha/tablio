@@ -18,6 +18,11 @@ export interface PendingPassphrasePrompt {
   connectionName: string;
   /** Identity-file path shown in the prompt UI. */
   keyPath: string;
+  /** What's being asked for: an identity-file passphrase or the SSH
+   *  account password (password auth with "Ask when connecting"). */
+  kind?: "passphrase" | "password";
+  /** SSH `user@host` shown for password prompts. */
+  sshTarget?: string;
   /** Caller resolves with the entered passphrase (empty string is allowed). */
   resolve: (passphrase: string) => void;
   /** Caller rejects to cancel the connect attempt. */
@@ -47,6 +52,9 @@ interface ConnectionState {
   pendingHostKeyMismatch: PendingHostKeyMismatchPrompt | null;
   /** Bumped per connection when its cached schema metadata should be re-read. */
   schemaVersions: Record<string, number>;
+  /** Bumped per table (see {@link tableDataKey}) when its rows changed
+   *  outside the grid, e.g. after an import, so open views re-fetch. */
+  tableDataVersions: Record<string, number>;
 
   loadConnections: () => Promise<void>;
   addConnection: (config: ConnectionConfig) => Promise<void>;
@@ -56,6 +64,11 @@ interface ConnectionState {
   disconnectFrom: (id: string) => Promise<void>;
   isConnected: (id: string) => boolean;
   invalidateSchema: (id: string) => void;
+  invalidateTableData: (connectionId: string, database: string, schema: string, table: string) => void;
+}
+
+export function tableDataKey(connectionId: string, database: string, schema: string, table: string): string {
+  return JSON.stringify([connectionId, database, schema, table]);
 }
 
 /** Fields that only affect how a connection is displayed; changing them
@@ -82,6 +95,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   pendingPassphrasePrompt: null,
   pendingHostKeyMismatch: null,
   schemaVersions: {},
+  tableDataVersions: {},
 
   loadConnections: async () => {
     set({ loading: true, error: null });
@@ -93,12 +107,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // Save / delete / disconnect failures are recorded *and* rethrown so the
+  // caller (dialog, tree action) can tell the user instead of carrying on
+  // as if it had worked.
   addConnection: async (config) => {
     try {
       await api.saveConnection(config);
       set((s) => ({ connections: [...s.connections, config] }));
     } catch (e) {
       set({ error: String(e) });
+      throw e;
     }
   },
 
@@ -111,7 +129,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }));
     } catch (e) {
       set({ error: String(e) });
-      return;
+      throw e;
     }
 
     if (!previous || !get().activeConnections.has(config.id)) return;
@@ -140,7 +158,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       await api.deleteConnection(id);
     } catch (e) {
       set({ error: String(e) });
-      return;
+      throw e;
     }
     // Close the live pool too. Best effort: the saved config is already
     // gone, and a backend that never opened this pool may reject it.
@@ -194,6 +212,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       });
     } catch (e) {
       set({ error: String(e) });
+      throw e;
     }
   },
 
@@ -203,6 +222,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set((s) => ({
       schemaVersions: { ...s.schemaVersions, [id]: (s.schemaVersions[id] ?? 0) + 1 },
     })),
+
+  invalidateTableData: (connectionId, database, schema, table) => {
+    const key = tableDataKey(connectionId, database, schema, table);
+    set((s) => ({
+      tableDataVersions: { ...s.tableDataVersions, [key]: (s.tableDataVersions[key] ?? 0) + 1 },
+    }));
+  },
 }));
 
 /**
@@ -220,18 +246,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 export async function resolveSshPassphrase(
   config: ConnectionConfig,
 ): Promise<ConnectionConfig> {
-  if (
-    !config.ssh_enabled ||
-    config.ssh_auth_method !== "identityfile" ||
-    !config.ssh_prompt_passphrase
-  ) {
+  const method = config.ssh_auth_method ?? "password";
+  if (!config.ssh_enabled || method === "agent" || !config.ssh_prompt_passphrase) {
     return config;
   }
+  const isPassword = method === "password";
   const passphrase = await new Promise<string>((resolve, reject) => {
     useConnectionStore.setState({
       pendingPassphrasePrompt: {
         connectionName: config.name,
-        keyPath: config.ssh_key_path ?? "",
+        keyPath: isPassword ? "" : config.ssh_key_path ?? "",
+        kind: isPassword ? "password" : "passphrase",
+        sshTarget: isPassword
+          ? `${config.ssh_user || "ssh"}@${config.ssh_host || "bastion"}`
+          : undefined,
         resolve: (p) => {
           useConnectionStore.setState({ pendingPassphrasePrompt: null });
           resolve(p);
@@ -265,6 +293,17 @@ export async function resolveSshPassphrase(
  * `connectionName` is shown to the user in the modal — keep it stable
  * (no IDs) so the message is meaningful.
  */
+/** Errors that reached the caller only because the user dismissed a
+ *  prompt (host key mismatch "Cancel"). Callers use
+ *  {@link wasCancelledByUser} to skip reporting them as failures. */
+const cancelledErrors = new Set<unknown>();
+
+export function wasCancelledByUser(err: unknown): boolean {
+  if (cancelledErrors.has(err)) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /prompt cancelled/i.test(msg);
+}
+
 export async function withHostKeyMismatchRetry<T>(
   connectionName: string,
   action: () => Promise<T>,
@@ -286,7 +325,10 @@ export async function withHostKeyMismatchRetry<T>(
         },
       });
     });
-    if (!forgetAndRetry) throw err;
+    if (!forgetAndRetry) {
+      cancelledErrors.add(err);
+      throw err;
+    }
     await api.forgetKnownHost(
       mismatch.host,
       mismatch.port,

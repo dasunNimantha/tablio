@@ -186,3 +186,29 @@ test.describe("Alter table — inline editor in Schema view", () => {
     ).toHaveCount(0);
   });
 });
+
+test.describe("Alter table dialog: accessibility", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/");
+    await openAlterTable(page, "users");
+  });
+
+  test("is a labelled modal and Escape closes it", async ({ page }) => {
+    const dialog = page.getByRole("dialog", { name: "Alter Table" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute("aria-modal", "true");
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".alter-table-dialog")).toHaveCount(0);
+  });
+
+  test("form controls and row buttons have accessible names", async ({ page }) => {
+    await page.locator(".alter-table-column-row").first().waitFor();
+    await expect(page.getByLabel("Schema")).toBeDisabled();
+    await expect(page.getByLabel("Table Name")).toHaveValue("users");
+    await expect(page.getByLabel("id nullable")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Drop column id" })).toBeVisible();
+    await page.locator(".alter-table-add-btn").click();
+    await expect(page.getByLabel("New column 1 name")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Remove new column 1" })).toBeVisible();
+  });
+});

@@ -1,10 +1,13 @@
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from "react";
-import { createPortal } from "react-dom";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { useShallow } from "zustand/react/shallow";
 import { api, DatabaseInfo, SchemaInfo, TableInfo, FunctionInfo } from "../../lib/tauri";
 import { readZoomFactor } from "../../lib/zoom";
+import { useToastStore } from "../../stores/toastStore";
+import { wasCancelledByUser } from "../../stores/connectionStore";
+import { errorText, formatConnectFailure } from "../../lib/connectionErrors";
+import { ContextMenu, type MenuEntry } from "../Menu/ContextMenu";
 import { SCHEMA_POLL_INTERVAL_MS, structureSignature } from "../../lib/schemaSync";
 import { usePolling } from "../../hooks/usePolling";
 import { ConfirmDialog } from "../ConfirmDialog";
@@ -31,6 +34,7 @@ import {
   X,
   Layers,
   AlertTriangle,
+  RotateCw,
   GitBranch,
   ShieldCheck,
 } from "lucide-react";
@@ -196,6 +200,25 @@ interface ContextMenuState {
   x: number;
   y: number;
   node: TreeNode;
+  /** Tree row to return focus to when the menu closes. */
+  returnFocusTo: HTMLElement | null;
+}
+
+/** What the keyboard handler needs to know about each rendered tree row. */
+interface TreeItemEntry {
+  expandable: boolean;
+  expanded: boolean;
+  toggle: () => void;
+  activate: () => void;
+  openMenu: (el: HTMLElement) => void;
+  rename?: () => void;
+}
+
+/** Context-menu position for a row opened from the keyboard. */
+function menuPointFor(el: HTMLElement): { x: number; y: number } {
+  const r = el.getBoundingClientRect();
+  const z = readZoomFactor();
+  return { x: (r.left + Math.min(r.width / 2, 120)) / z, y: r.bottom / z };
 }
 
 interface ObjectTreeProps {
@@ -220,13 +243,26 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   const [editingConn, setEditingConn] = useState<import("../../lib/tauri").ConnectionConfig | null>(null);
   const [duplicatingConn, setDuplicatingConn] = useState<import("../../lib/tauri").ConnectionConfig | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<import("../../lib/tauri").ConnectionConfig | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [renamingGroup, setRenamingGroup] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
-  const [groupContextMenu, setGroupContextMenu] = useState<{ x: number; y: number; group: string } | null>(null);
+  const [groupContextMenu, setGroupContextMenu] = useState<{
+    x: number;
+    y: number;
+    group: string;
+    returnFocusTo: HTMLElement | null;
+  } | null>(null);
+  const addToast = useToastStore((s) => s.addToast);
+  const [errorNodes, setErrorNodes] = useState<Record<string, string>>({});
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const treeRef = useRef<HTMLDivElement>(null);
+  const renamingBusyRef = useRef(false);
+  // Rebuilt on every render by renderNode / the folder rows; read by the
+  // tree's keyboard handler.
+  const treeItems = useRef(new Map<string, TreeItemEntry>());
+  treeItems.current = new Map();
   const [dragOverGroup, setDragOverGroup] = useState<string | null>(null);
   const [draggingConnId, setDraggingConnId] = useState<string | null>(null);
   const [emptyGroups, setEmptyGroups] = useState<Set<string>>(() => {
@@ -250,9 +286,20 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   const [confirmAction, setConfirmAction] = useState<{
     title: string;
     message: string;
+    confirmLabel?: string;
+    /** Rejecting keeps the dialog open and shows the error inline. */
     action: () => Promise<void>;
     node: TreeNode;
   } | null>(null);
+
+  /** Report a failed store action as an error toast. */
+  const reportError = useCallback(
+    (prefix: string, err: unknown) => {
+      console.error(prefix, err);
+      addToast(`${prefix}: ${errorText(err)}`, "error");
+    },
+    [addToast],
+  );
 
   useEffect(() => {
     if (!showTypeFilter) return;
@@ -285,16 +332,27 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   }, [renamingGroup]);
 
   useEffect(() => {
-    if (!groupContextMenu) return;
+    if (!showTypeFilter) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setGroupContextMenu(null);
+      if (e.key === "Escape") setShowTypeFilter(false);
     };
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  }, [groupContextMenu]);
+  }, [showTypeFilter]);
+
+  const folderExists = (name: string, except?: string) => {
+    const lower = name.toLowerCase();
+    if (except && except.toLowerCase() === lower) return false;
+    return Object.keys(grouped.groups).some((g) => g.toLowerCase() === lower);
+  };
 
   const handleCreateFolder = () => {
     const name = newFolderName.trim().slice(0, MAX_FOLDER_NAME_LENGTH);
+    if (name && folderExists(name)) {
+      addToast(`A folder named "${name}" already exists.`, "error");
+      newFolderInputRef.current?.focus();
+      return;
+    }
     if (name) {
       setEmptyGroups((prev) => new Set(prev).add(name));
       setCollapsedGroups((prev) => {
@@ -308,15 +366,31 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   };
 
   const handleRenameGroup = async (oldName: string) => {
+    // Enter commits and unmounts the input, whose blur would commit again.
+    if (renamingBusyRef.current) return;
     const newName = renameValue.trim().slice(0, MAX_FOLDER_NAME_LENGTH);
     if (!newName || newName === oldName) {
       setRenamingGroup(null);
       return;
     }
+    if (folderExists(newName, oldName)) {
+      // Renaming onto an existing folder used to merge the two silently.
+      addToast(`A folder named "${newName}" already exists.`, "error");
+      setRenameValue(oldName);
+      setRenamingGroup(null);
+      return;
+    }
+    renamingBusyRef.current = true;
     const oldLower = oldName.toLowerCase();
     const toUpdate = connections.filter((c) => c.group?.trim().toLowerCase() === oldLower);
-    for (const conn of toUpdate) {
-      await updateConnection({ ...conn, group: newName });
+    try {
+      for (const conn of toUpdate) {
+        await updateConnection({ ...conn, group: newName });
+      }
+    } catch (e) {
+      reportError(`Couldn't rename folder "${oldName}"`, e);
+    } finally {
+      renamingBusyRef.current = false;
     }
     setEmptyGroups((prev) => {
       const next = new Set([...prev].filter((g) => g.toLowerCase() !== oldLower));
@@ -333,8 +407,13 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   const handleDeleteGroup = async (groupName: string) => {
     const lower = groupName.toLowerCase();
     const toUpdate = connections.filter((c) => c.group?.trim().toLowerCase() === lower);
-    for (const conn of toUpdate) {
-      await updateConnection({ ...conn, group: null });
+    try {
+      for (const conn of toUpdate) {
+        await updateConnection({ ...conn, group: null });
+      }
+    } catch (e) {
+      reportError(`Couldn't delete folder "${groupName}"`, e);
+      return;
     }
     setEmptyGroups((prev) => {
       return new Set([...prev].filter((g) => g.toLowerCase() !== lower));
@@ -354,7 +433,11 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
 
   const handleMoveToGroup = async (conn: import("../../lib/tauri").ConnectionConfig, group: string | null) => {
     preserveSourceGroup(conn);
-    await updateConnection({ ...conn, group });
+    try {
+      await updateConnection({ ...conn, group });
+    } catch (e) {
+      reportError(`Couldn't move "${conn.name || conn.database}"`, e);
+    }
   };
 
   const handleDrop = async (e: React.DragEvent, targetGroup: string | null) => {
@@ -366,8 +449,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     if (!connId) return;
     const conn = connections.find((c) => c.id === connId);
     if (conn && (conn.group?.trim()?.toLowerCase() || null) !== (targetGroup?.toLowerCase() || null)) {
-      preserveSourceGroup(conn);
-      await updateConnection({ ...conn, group: targetGroup });
+      await handleMoveToGroup(conn, targetGroup);
     }
   };
 
@@ -542,16 +624,15 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     return children;
   }, []);
 
-  const expandNode = useCallback(
+  const loadChildren = useCallback(
     async (node: TreeNode) => {
       const nodeId = node.id;
-      if (expanded.has(nodeId)) return;
-
-      setExpanded((prev) => new Set(prev).add(nodeId));
-
-      if (childrenMap[nodeId]) return;
-
       setLoadingNodes((prev) => new Set(prev).add(nodeId));
+      setErrorNodes((prev) => {
+        if (!(nodeId in prev)) return prev;
+        const { [nodeId]: _gone, ...rest } = prev;
+        return rest;
+      });
 
       try {
         const children = await fetchChildren(node);
@@ -560,12 +641,14 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         if (node.type === "connection" && children.length === 1) {
           const dbNode = children[0];
           setExpanded((prev) => new Set(prev).add(dbNode.id));
-          setTimeout(() => expandNode(dbNode), 50);
+          setTimeout(() => loadChildren(dbNode), 50);
         }
 
         setChildrenMap((prev) => ({ ...prev, [nodeId]: children }));
       } catch (err) {
+        // Shown as an error row with Retry under the node (see renderNode).
         console.error("Failed to load tree children:", err);
+        setErrorNodes((prev) => ({ ...prev, [nodeId]: errorText(err) }));
       } finally {
         setLoadingNodes((prev) => {
           const next = new Set(prev);
@@ -574,7 +657,19 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         });
       }
     },
-    [expanded, childrenMap, fetchChildren]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [fetchChildren]
+  );
+
+  const expandNode = useCallback(
+    async (node: TreeNode) => {
+      const nodeId = node.id;
+      if (expanded.has(nodeId)) return;
+      setExpanded((prev) => new Set(prev).add(nodeId));
+      if (childrenMap[nodeId]) return;
+      await loadChildren(node);
+    },
+    [expanded, childrenMap, loadChildren]
   );
 
   const toggleExpand = useCallback(
@@ -595,7 +690,13 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     [expanded, expandNode]
   );
 
-  const handleConnectDirect = async (conn: import("../../lib/tauri").ConnectionConfig) => {
+  /** Connect, open the server's Activity tab and (optionally) expand the
+   *  connection. Failures are reported as an error toast; a prompt the
+   *  user cancelled (passphrase / host key) is not a failure. */
+  const connectAndOpen = async (
+    conn: import("../../lib/tauri").ConnectionConfig,
+    opts?: { expand?: boolean },
+  ) => {
     if (connectingId) return;
     setConnectingId(conn.id);
     try {
@@ -609,9 +710,40 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         database: conn.database,
         schema: "",
       });
+      if (opts?.expand) {
+        await expandNode({
+          id: conn.id,
+          label: conn.name || conn.database,
+          type: "connection",
+          connectionId: conn.id,
+          connectionColor: conn.color,
+        });
+      }
     } catch (e) {
       console.error("Connection failed:", e);
-    } finally { setConnectingId(null); }
+      if (!wasCancelledByUser(e)) addToast(formatConnectFailure(e, conn), "error");
+    } finally {
+      setConnectingId(null);
+    }
+  };
+
+  const handleDisconnect = async (connectionId: string) => {
+    try {
+      await disconnectFrom(connectionId);
+    } catch (e) {
+      const conn = connections.find((c) => c.id === connectionId);
+      reportError(`Couldn't disconnect "${conn?.name || conn?.database || "connection"}"`, e);
+    }
+  };
+
+  const requestDeleteConnection = (conn: import("../../lib/tauri").ConnectionConfig, node: TreeNode) => {
+    setConfirmAction({
+      title: "Delete Connection",
+      confirmLabel: "Delete",
+      message: `Delete "${conn.name || conn.database}"? This action cannot be undone.`,
+      action: () => removeConnection(conn.id),
+      node,
+    });
   };
 
   const handleDoubleClick = async (node: TreeNode) => {
@@ -619,24 +751,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       const isActive = activeConnections.has(node.connectionId);
       if (!isActive) {
         const conn = connections.find((c) => c.id === node.connectionId);
-        if (conn) {
-          setConnectingId(conn.id);
-          try {
-            await connectTo(conn);
-            openTab({
-              id: `activity:${conn.id}`,
-              type: "activity",
-              title: `Activity: ${conn.name || conn.database}`,
-              connectionId: conn.id,
-              connectionColor: conn.color || "#5284e0",
-              database: conn.database,
-              schema: "",
-            });
-            await expandNode(node);
-          } catch (e) {
-            console.error("Connection failed:", e);
-          } finally { setConnectingId(null); }
-        }
+        if (conn) await connectAndOpen(conn, { expand: true });
       }
       return;
     }
@@ -728,6 +843,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           object_name: node.tableName!,
           object_type: objType,
         });
+        addToast(`Dropped ${objType.toLowerCase()} ${node.schema}.${node.tableName}`, "success");
         const parentId = node.type === "view"
           ? `${node.connectionId}:${node.database}:${node.schema}:views`
           : `${node.connectionId}:${node.database}:${node.schema}:tables`;
@@ -769,6 +885,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           schema: node.schema!,
           table_name: node.tableName!,
         });
+        addToast(`Truncated ${node.schema}.${node.tableName}`, "success");
       },
     });
   };
@@ -822,6 +939,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       const expandedNow = expandedRef.current;
       const refreshed = new Set<string>();
       let failed = false;
+      let firstError: unknown = null;
       let structureChanged = false;
 
       if (!opts?.silent) setLoadingNodes((prev) => new Set(prev).add(root.id));
@@ -835,6 +953,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           } catch (err) {
             console.error("Failed to refresh tree children:", err);
             failed = true;
+            firstError ??= err;
             continue;
           }
           refreshed.add(node.id);
@@ -873,9 +992,13 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           });
         }
       }
+      // Background polls stay quiet; an explicit Refresh reports failure.
+      if (failed && !opts?.silent) {
+        addToast(`Couldn't refresh "${root.label}": ${errorText(firstError)}`, "error");
+      }
       return structureChanged;
     },
-    [fetchChildren]
+    [fetchChildren, addToast]
   );
 
   const connectionsRef = useRef(connections);
@@ -973,24 +1096,85 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     e.preventDefault();
     e.stopPropagation();
     const z = readZoomFactor();
-    setContextMenu({ x: e.clientX / z, y: e.clientY / z, node });
+    const item = (e.currentTarget as HTMLElement).closest<HTMLElement>("[role='treeitem']");
+    setContextMenu({ x: e.clientX / z, y: e.clientY / z, node, returnFocusTo: item });
   };
 
-  const renderNode = (node: TreeNode, depth: number, labelSuffix?: React.ReactNode) => {
+  const openContextMenuFor = (node: TreeNode, el: HTMLElement) => {
+    setContextMenu({ ...menuPointFor(el), node, returnFocusTo: el });
+  };
+
+  /** Props shared by every `role="treeitem"` (roving tabindex). The tree
+   *  is "flat" in ARIA terms: each treeitem is just its row, with the
+   *  hierarchy given by aria-level / aria-setsize / aria-posinset, so a
+   *  row's accessible name is its own label and never swallows the text
+   *  of its descendants. */
+  const treeItemProps = (
+    id: string,
+    opts: { level: number; label: string; expanded?: boolean; className?: string; pos?: [number, number] },
+  ) => ({
+    role: "treeitem" as const,
+    "aria-level": opts.level,
+    "aria-expanded": opts.expanded,
+    "aria-posinset": opts.pos?.[0],
+    "aria-setsize": opts.pos?.[1],
+    "aria-selected": focusedId === id,
+    "aria-label": opts.label,
+    tabIndex: focusedId === id ? 0 : -1,
+    "data-tree-id": id,
+    className: `tree-item${opts.className ? ` ${opts.className}` : ""}`,
+    onFocus: (e: React.FocusEvent<HTMLElement>) => {
+      if (e.target === e.currentTarget) setFocusedId(id);
+    },
+  });
+
+  /** Buttons inside a row are only tab stops while that row is current. */
+  const rowTabIndex = (id: string) => (focusedId === id ? 0 : -1);
+
+  /** Non-object rows ("(empty)", load errors) are treeitems too, so arrow
+   *  keys don't skip them; Enter on an error row retries. */
+  const registerPlaceholder = (id: string, activate?: () => void) => () => {
+    treeItems.current.set(id, {
+      expandable: false,
+      expanded: false,
+      toggle: () => {},
+      activate: activate ?? (() => {}),
+      openMenu: () => {},
+    });
+  };
+
+  interface RenderNodeOptions {
+    /** aria-level of this node (folders shift connections down a level). */
+    level: number;
+    /** [position, set size] among the node's siblings. */
+    pos?: [number, number];
+    labelSuffix?: React.ReactNode;
+    /** Extra controls rendered at the end of the row (connection actions). */
+    actions?: React.ReactNode;
+    rowClassName?: string;
+    labelClassName?: string;
+    /** Overrides the default expandability (inactive connections can't expand). */
+    expandable?: boolean;
+    icon?: React.ReactNode;
+  }
+
+  const renderNode = (node: TreeNode, depth: number, opts: RenderNodeOptions) => {
+    const { level, labelSuffix } = opts;
     // A node is expandable when it ships preloadedChildren (partitioned
     // parent / partition-group) or when it's a non-leaf branch type.
     const isPartitionedParent = node.type === "table" && !!node.preloadedChildren;
     const baseLeaf =
       node.type === "table" || node.type === "view" || node.type === "function";
-    const isLeaf = baseLeaf && !isPartitionedParent;
+    const isLeaf = opts.expandable === undefined ? baseLeaf && !isPartitionedParent : !opts.expandable;
     const children = isPartitionedParent
       ? node.preloadedChildren!
       : childrenMap[node.id];
     const q = searchQuery.trim().toLowerCase();
     const selfMatches = hasActiveFilter && q && node.label.toLowerCase().includes(q);
     const descendantMatches = hasActiveFilter && !selfMatches && children?.some((c) => nodeMatchesFilter(c, q));
-    const isExpanded = expanded.has(node.id) || (hasActiveFilter && !!descendantMatches);
+    const isExpanded = !isLeaf && (expanded.has(node.id) || (hasActiveFilter && !!descendantMatches));
     const isLoading = loadingNodes.has(node.id);
+    const loadError = errorNodes[node.id];
 
     const getIconInfo = (): { icon: React.ReactNode; cls: string } => {
       if (isLoading) return { icon: <Loader2 size={15} className="spin" />, cls: "" };
@@ -1034,27 +1218,60 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     const partitionGroupCount =
       node.type === "partition-group" ? children?.length ?? 0 : null;
 
+    const activate = () => {
+      // Partitioned parent tables are still tables — opening their data
+      // tab on a single click matches a regular table; expansion happens
+      // via the chevron (or double-click on a non-leaf branch type).
+      if (baseLeaf) {
+        handleDoubleClick(node);
+      } else if (node.type === "connection" && isLeaf) {
+        handleDoubleClick(node);
+      } else {
+        toggleExpand(node);
+      }
+    };
+    treeItems.current.set(node.id, {
+      expandable: !isLeaf,
+      expanded: isExpanded,
+      toggle: () => toggleExpand(node),
+      activate,
+      openMenu: (el) => openContextMenuFor(node, el),
+    });
+    const tab = rowTabIndex(node.id);
+    // The accessible name includes any visible chip text so it matches
+    // what's on screen (WCAG 2.5.3).
+    const rowName = [
+      node.label,
+      showStrategyChip ? node.partitionStrategy : null,
+      isDefaultPartition ? "default" : null,
+      partitionGroupCount ? String(partitionGroupCount) : null,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const childList = isExpanded && children ? filterNodes(children) : [];
+
     return (
-      <div key={node.id}>
+      <div key={node.id} className="tree-subtree">
         <div
-          className={`tree-node ${isLeaf ? "leaf" : ""} ${isDefaultPartition ? "tree-node-default-partition" : ""}`}
+          {...treeItemProps(node.id, {
+            level,
+            label: rowName,
+            expanded: isLeaf ? undefined : isExpanded,
+            pos: opts.pos,
+            className: `tree-node ${isLeaf ? "leaf" : ""} ${isDefaultPartition ? "tree-node-default-partition" : ""}${opts.rowClassName ? ` ${opts.rowClassName}` : ""}`,
+          })}
           style={{ paddingLeft: depth * 12 + 6 }}
           onClick={() => {
-            // Partitioned parent tables are still tables — opening their data
-            // tab on a single click matches a regular table; expansion happens
-            // via the chevron (or double-click on a non-leaf branch type).
-            if (baseLeaf) {
-              handleDoubleClick(node);
-            } else {
-              toggleExpand(node);
-            }
+            if (node.type === "connection" && isLeaf) return; // inactive: double-click connects
+            activate();
           }}
-          onDoubleClick={() => !isLeaf && handleDoubleClick(node)}
+          onDoubleClick={() => !baseLeaf && handleDoubleClick(node)}
           onContextMenu={(e) => handleContextMenu(e, node)}
         >
           {!isLeaf && (
             <span
               className="tree-chevron"
+              aria-hidden="true"
               onClick={(e) => {
                 e.stopPropagation();
                 toggleExpand(node);
@@ -1063,19 +1280,29 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
               {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
             </span>
           )}
-          {isLeaf && <span className="tree-chevron-spacer" />}
-          <span className={`tree-icon ${iconInfo.cls}`}>
-            {iconInfo.icon}
+          {/* Disconnected connections sit flush, as before (no spacer). */}
+          {isLeaf && node.type !== "connection" && <span className="tree-chevron-spacer" aria-hidden="true" />}
+          {opts.icon ?? (
+            <span className={`tree-icon ${iconInfo.cls}`} aria-hidden="true">
+              {iconInfo.icon}
+            </span>
+          )}
+          <span className={`tree-label${opts.labelClassName ? ` ${opts.labelClassName}` : ""}`} title={node.label}>
+            {node.label}
           </span>
-          <span className="tree-label">{node.label}</span>
+          {/* Word break for assistive tech between the label and chips
+              (whitespace-only text is dropped from the flex layout). */}
+          {" "}
           {labelSuffix}
           {showStrategyChip && (
             <button
               className={`tree-chip tree-chip-partition-${node.partitionStrategy} tree-chip-clickable`}
+              tabIndex={tab}
               onClick={(e) => {
                 e.stopPropagation();
                 handleOpenPartitions(node);
               }}
+              // Visible text names it; the title adds what it does.
               title="Open Partitions view"
             >
               {node.partitionStrategy}
@@ -1092,39 +1319,82 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           {showWarning && (
             <span
               className="tree-warning"
+              role="img"
+              aria-label={
+                node.hasDefaultPartitionRows
+                  ? "Default partition has rows — likely a bound mismatch"
+                  : "Partition sizes are skewed"
+              }
               title={
                 node.hasDefaultPartitionRows
                   ? "Default partition has rows — likely a bound mismatch"
                   : "Partition sizes are skewed"
               }
             >
-              <AlertTriangle size={12} />
+              <AlertTriangle size={12} aria-hidden="true" />
             </span>
           )}
           {node.type === "database" && (
             <button
               className="btn-icon tree-action"
+              tabIndex={tab}
               onClick={(e) => {
                 e.stopPropagation();
                 handleOpenQueryTab(node.connectionId, node.connectionColor, node.database!);
               }}
               title="New Query"
+              aria-label={`New query on ${node.label}`}
             >
               <Terminal size={12} />
             </button>
           )}
+          {opts.actions}
         </div>
-        {isExpanded && children && (
+        {isExpanded && (children || loadError) && (
           <div className="tree-children">
-            {children.length === 0 ? (
+            {loadError && !children ? (
               <div
-                className="tree-node tree-empty"
+                {...treeItemProps(`${node.id}::error`, {
+                  level: level + 1,
+                  label: `Couldn't load ${node.label}: ${loadError}`,
+                  className: "tree-node tree-error",
+                })}
                 style={{ paddingLeft: (depth + 1) * 12 + 6 }}
+                ref={registerPlaceholder(`${node.id}::error`, () => loadChildren(node))}
+              >
+                <AlertTriangle size={13} aria-hidden="true" className="tree-error-icon" />
+                <span className="tree-label tree-error-text" title={loadError}>
+                  Couldn't load: {loadError}
+                </span>
+                <button
+                  className="btn-icon tree-error-retry"
+                  tabIndex={rowTabIndex(`${node.id}::error`)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    loadChildren(node);
+                  }}
+                  title="Retry"
+                  aria-label={`Retry loading ${node.label}`}
+                >
+                  <RotateCw size={12} />
+                </button>
+              </div>
+            ) : children!.length === 0 ? (
+              <div
+                {...treeItemProps(`${node.id}::empty`, {
+                  level: level + 1,
+                  label: "(empty)",
+                  className: "tree-node tree-empty",
+                })}
+                style={{ paddingLeft: (depth + 1) * 12 + 6 }}
+                ref={registerPlaceholder(`${node.id}::empty`)}
               >
                 <span className="tree-label text-muted">(empty)</span>
               </div>
             ) : (
-              filterNodes(children).map((child) => renderNode(child, depth + 1))
+              childList.map((child, i) =>
+                renderNode(child, depth + 1, { level: level + 1, pos: [i + 1, childList.length] }),
+              )
             )}
           </div>
         )}
@@ -1136,7 +1406,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     if (!contextMenu) return null;
     const { node } = contextMenu;
 
-    const items: { label: string; action: () => void; children?: { label: string; action: () => void }[] }[] = [];
+    const items: MenuEntry[] = [];
 
     if (node.type === "table" || node.type === "view") {
       items.push({
@@ -1245,7 +1515,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       if (isActive) {
         items.push({
           label: "Disconnect",
-          action: async () => { await disconnectFrom(node.connectionId); },
+          action: () => { void handleDisconnect(node.connectionId); },
         });
         items.push({
           label: "Server Activity",
@@ -1286,22 +1556,8 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       } else {
         items.push({
           label: "Connect",
-          action: async () => {
-            if (conn) {
-              setConnectingId(conn.id);
-              try {
-                await connectTo(conn);
-                openTab({
-                  id: `activity:${conn.id}`,
-                  type: "activity",
-                  title: `Activity: ${conn.name || conn.database}`,
-                  connectionId: conn.id,
-                  connectionColor: conn.color || "#5284e0",
-                  database: conn.database,
-                  schema: "",
-                });
-              } catch (e) { console.error("Connection failed:", e); } finally { setConnectingId(null); }
-            }
+          action: () => {
+            if (conn) void connectAndOpen(conn);
           },
         });
       }
@@ -1318,7 +1574,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
 
         const existingGroups = Object.keys(grouped.groups).sort();
         const currentGroupLower = conn.group?.trim()?.toLowerCase() || null;
-        const moveChildren: { label: string; action: () => void }[] = [];
+        const moveChildren: MenuEntry[] = [];
         for (const g of existingGroups) {
           if (g.toLowerCase() !== currentGroupLower) {
             moveChildren.push({
@@ -1348,7 +1604,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         items.push({ label: "---", action: () => {} });
         items.push({
           label: "Delete Connection",
-          action: () => setDeleteTarget(conn),
+          action: () => requestDeleteConnection(conn, node),
         });
       }
     }
@@ -1376,67 +1632,15 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       });
     }
 
-    return createPortal(
-      <>
-        <div className="context-backdrop" onClick={() => setContextMenu(null)} />
-        <div
-          className="context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-          ref={(el) => {
-            if (!el) return;
-            const z = readZoomFactor();
-            const cssVh = window.innerHeight / z;
-            const cssVw = window.innerWidth / z;
-            if (contextMenu.y + el.offsetHeight > cssVh) {
-              el.style.top = `${Math.max(4, cssVh - el.offsetHeight)}px`;
-            }
-            if (contextMenu.x + el.offsetWidth > cssVw) {
-              el.style.left = `${Math.max(4, cssVw - el.offsetWidth)}px`;
-            }
-          }}
-        >
-          {items.map((item, i) =>
-            item.label === "---" ? (
-              <div key={i} className="context-menu-separator" />
-            ) : item.children ? (
-              <div key={i} className="context-menu-submenu">
-                <button className="context-menu-submenu-trigger">
-                  {item.label}
-                  <ChevronRight size={12} />
-                </button>
-                <div className="context-menu-submenu-content">
-                  {item.children.map((child, j) =>
-                    child.label === "---" ? (
-                      <div key={j} className="context-menu-separator" />
-                    ) : (
-                      <button
-                        key={j}
-                        onClick={() => {
-                          child.action();
-                          setContextMenu(null);
-                        }}
-                      >
-                        {child.label}
-                      </button>
-                    )
-                  )}
-                </div>
-              </div>
-            ) : (
-              <button
-                key={i}
-                onClick={() => {
-                  item.action();
-                  setContextMenu(null);
-                }}
-              >
-                {item.label}
-              </button>
-            )
-          )}
-        </div>
-      </>,
-      document.body
+    return (
+      <ContextMenu
+        x={contextMenu.x}
+        y={contextMenu.y}
+        items={items}
+        label={`${node.label} actions`}
+        returnFocusTo={contextMenu.returnFocusTo}
+        onClose={() => setContextMenu(null)}
+      />
     );
   };
 
@@ -1510,16 +1714,75 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     });
   };
 
-  const renderConnectionNode = (conn: import("../../lib/tauri").ConnectionConfig) => {
+  const renderConnectionNode = (
+    conn: import("../../lib/tauri").ConnectionConfig,
+    level: number,
+    pos: [number, number],
+  ) => {
     const isActive = activeConnections.has(conn.id);
     const isConn = connectingId === conn.id;
+    const name = conn.name || conn.database;
     const node: TreeNode = {
       id: conn.id,
-      label: conn.name || conn.database,
+      label: name,
       type: "connection",
       connectionId: conn.id,
       connectionColor: conn.color,
     };
+    const tab = rowTabIndex(conn.id);
+    const sshBadge = conn.ssh_enabled && (
+      <span
+        className={`tree-conn-ssh-badge${isActive ? "" : " tree-conn-ssh-badge--idle"}`}
+        role="img"
+        aria-label="SSH tunnel"
+        title={`${isActive ? "Tunneled" : "Will tunnel"} through ${conn.ssh_user || "ssh"}@${conn.ssh_host || "bastion"}:${conn.ssh_port || 22}`}
+      >
+        <ShieldCheck size={11} aria-hidden="true" />
+      </span>
+    );
+    const actions = (
+      <div className="tree-conn-actions">
+        {isActive ? (
+          <button
+            className="btn-icon tree-action"
+            tabIndex={tab}
+            onClick={(e) => { e.stopPropagation(); void handleDisconnect(conn.id); }}
+            title="Disconnect"
+            aria-label={`Disconnect ${name}`}
+          >
+            <PowerOff size={12} />
+          </button>
+        ) : (
+          <button
+            className="btn-icon tree-action"
+            tabIndex={tab}
+            onClick={(e) => { e.stopPropagation(); void connectAndOpen(conn); }}
+            title="Connect"
+            aria-label={`Connect ${name}`}
+          >
+            <Power size={12} />
+          </button>
+        )}
+        <button
+          className="btn-icon tree-action"
+          tabIndex={tab}
+          onClick={(e) => { e.stopPropagation(); setEditingConn(conn); }}
+          title="Edit"
+          aria-label={`Edit ${name}`}
+        >
+          <Pencil size={12} />
+        </button>
+        <button
+          className="btn-icon tree-action tree-action-danger"
+          tabIndex={tab}
+          onClick={(e) => { e.stopPropagation(); requestDeleteConnection(conn, node); }}
+          title="Delete"
+          aria-label={`Delete ${name}`}
+        >
+          <Trash2 size={12} />
+        </button>
+      </div>
+    );
     return (
       <div
         key={conn.id}
@@ -1539,116 +1802,248 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         <div className="tree-root-header">
           <div
             className="connection-dot"
+            aria-hidden="true"
             style={{
               background: isActive ? "var(--success)" : "var(--text-muted)",
               boxShadow: isActive ? "0 0 6px var(--success)" : "none",
             }}
           />
           <div style={{ flex: 1, minWidth: 0 }}>
-            {isActive ? (
-              <div className="tree-conn-row">
-                {renderNode(
-                  node,
-                  0,
-                  conn.ssh_enabled && (
-                    <span
-                      className="tree-conn-ssh-badge"
-                      title={`Tunneled through ${conn.ssh_user || "ssh"}@${conn.ssh_host || "bastion"}:${conn.ssh_port || 22}`}
-                    >
-                      <ShieldCheck size={11} />
-                    </span>
-                  ),
-                )}
-                <div className="tree-conn-actions">
-                  <button
-                    className="btn-icon tree-action"
-                    onClick={(e) => { e.stopPropagation(); disconnectFrom(conn.id); }}
-                    title="Disconnect"
-                  >
-                    <PowerOff size={12} />
-                  </button>
-                  <button
-                    className="btn-icon tree-action"
-                    onClick={(e) => { e.stopPropagation(); setEditingConn(conn); }}
-                    title="Edit"
-                  >
-                    <Pencil size={12} />
-                  </button>
-                  <button
-                    className="btn-icon tree-action tree-action-danger"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setConfirmAction({
-                        title: "Delete Connection",
-                        message: `Delete "${conn.name || conn.database}"? This cannot be undone.`,
-                        action: () => removeConnection(conn.id),
-                        node,
-                      });
-                    }}
-                    title="Delete"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              </div>
+            {renderNode(node, 0, {
+              level,
+              pos,
+              labelSuffix: sshBadge,
+              actions,
+              rowClassName: "tree-conn-row",
+              expandable: isActive,
+              labelClassName: isActive ? undefined : "tree-label--inactive",
+              icon: isConn ? (
+                <span className="tree-icon" aria-hidden="true">
+                  <Loader2 size={14} className="spin" style={{ color: "var(--accent)" }} />
+                </span>
+              ) : undefined,
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const onTreeKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    // Keys typed into the folder-rename input or pressed on a row button
+    // keep their normal meaning.
+    if (target.getAttribute("role") !== "treeitem") return;
+    const id = target.dataset.treeId;
+    const entry = id ? treeItems.current.get(id) : undefined;
+    const tree = treeRef.current;
+    if (!entry || !tree) return;
+    const items = Array.from(tree.querySelectorAll<HTMLElement>("[role='treeitem']"));
+    const idx = items.indexOf(target);
+    const levelOf = (el: HTMLElement) => Number(el.getAttribute("aria-level") ?? 1);
+    const focusAt = (i: number) => items[Math.max(0, Math.min(items.length - 1, i))]?.focus();
+    const handled = () => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    if ((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") {
+      handled();
+      entry.openMenu(target);
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    switch (e.key) {
+      case "ArrowDown":
+        handled();
+        focusAt(idx + 1);
+        return;
+      case "ArrowUp":
+        handled();
+        focusAt(idx - 1);
+        return;
+      case "Home":
+        handled();
+        focusAt(0);
+        return;
+      case "End":
+        handled();
+        focusAt(items.length - 1);
+        return;
+      case "ArrowRight": {
+        handled();
+        if (entry.expandable && !entry.expanded) {
+          entry.toggle();
+        } else if (entry.expandable && entry.expanded) {
+          const next = items[idx + 1];
+          if (next && levelOf(next) === levelOf(target) + 1) next.focus();
+        } else if (!entry.expandable && id && connections.some((c) => c.id === id)) {
+          // A disconnected connection "expands" by connecting.
+          entry.activate();
+        }
+        return;
+      }
+      case "ArrowLeft": {
+        handled();
+        if (entry.expandable && entry.expanded) {
+          entry.toggle();
+        } else {
+          // Parent = nearest earlier row one level up.
+          const level = levelOf(target);
+          for (let i = idx - 1; i >= 0; i--) {
+            if (levelOf(items[i]) < level) {
+              items[i].focus();
+              break;
+            }
+          }
+        }
+        return;
+      }
+      case "Enter":
+      case " ":
+        handled();
+        entry.activate();
+        return;
+      case "F2":
+        if (entry.rename) {
+          handled();
+          entry.rename();
+        }
+        return;
+    }
+  };
+
+  // Keep exactly one tab stop in the tree: when the current row goes away
+  // (collapsed parent, filter, disconnect) fall back to the first row.
+  useEffect(() => {
+    const tree = treeRef.current;
+    if (!tree) return;
+    if (tree.querySelector("[role='treeitem'][tabindex='0']")) return;
+    const first = tree.querySelector<HTMLElement>("[role='treeitem']");
+    const id = first?.dataset.treeId ?? null;
+    if (id !== focusedId) setFocusedId(id);
+  });
+
+  const renderGroup = (
+    groupName: string,
+    conns: typeof connections,
+    groupIndex: number,
+    pos: [number, number],
+  ) => {
+    const isCollapsed = collapsedGroups.has(groupName);
+    const isRenaming = renamingGroup === groupName;
+    const groupId = `group:${groupName}`;
+    const startRename = () => {
+      setRenamingGroup(groupName);
+      setRenameValue(groupName);
+    };
+    treeItems.current.set(groupId, {
+      expandable: true,
+      expanded: !isCollapsed,
+      toggle: () => toggleGroup(groupName),
+      activate: () => toggleGroup(groupName),
+      openMenu: (el) => setGroupContextMenu({ ...menuPointFor(el), group: groupName, returnFocusTo: el }),
+      rename: startRename,
+    });
+    return (
+      <div
+        key={groupId}
+        className={`connection-group ${groupIndex === 0 ? "connection-group-first" : ""} ${dragOverGroup === groupName ? "drag-over" : ""}`}
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+        onDragEnter={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const key = `group:${groupName}`;
+          dragCounterRef.current[key] = (dragCounterRef.current[key] || 0) + 1;
+          if (draggingConnId) {
+            const dragged = connections.find((c) => c.id === draggingConnId);
+            if ((dragged?.group?.trim()?.toLowerCase() || null) !== groupName.toLowerCase()) {
+              setDragOverGroup(groupName);
+            }
+          }
+        }}
+        onDragLeave={(e) => {
+          e.stopPropagation();
+          const key = `group:${groupName}`;
+          dragCounterRef.current[key] = (dragCounterRef.current[key] || 1) - 1;
+          if (dragCounterRef.current[key] <= 0) {
+            dragCounterRef.current[key] = 0;
+            if (dragOverGroup === groupName) setDragOverGroup(null);
+          }
+        }}
+        onDrop={(e) => { e.stopPropagation(); handleDrop(e, groupName); }}
+      >
+        <div
+          {...treeItemProps(groupId, {
+            level: 1,
+            label: `${groupName} folder`,
+            expanded: !isCollapsed,
+            pos,
+            className: "connection-group-header",
+          })}
+          onClick={() => !isRenaming && toggleGroup(groupName)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            const z = readZoomFactor();
+            const item = (e.currentTarget as HTMLElement).closest<HTMLElement>("[role='treeitem']");
+            setGroupContextMenu({ x: e.clientX / z, y: e.clientY / z, group: groupName, returnFocusTo: item });
+          }}
+        >
+          <span className="connection-group-chevron" aria-hidden="true">
+            {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+          </span>
+          {isCollapsed ? (
+            <Folder size={13} className="connection-group-folder-icon" aria-hidden="true" />
+          ) : (
+            <FolderOpen size={13} className="connection-group-folder-icon" aria-hidden="true" />
+          )}
+          {isRenaming ? (
+            <input
+              ref={renameInputRef}
+              className="folder-name-input"
+              aria-label={`Rename folder ${groupName}`}
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value.slice(0, MAX_FOLDER_NAME_LENGTH))}
+              maxLength={MAX_FOLDER_NAME_LENGTH}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void handleRenameGroup(groupName).then(() =>
+                    treeRef.current?.querySelector<HTMLElement>(`[data-tree-id="${CSS.escape(`group:${renameValue.trim() || groupName}`)}"]`)?.focus(),
+                  );
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setRenamingGroup(null);
+                  (e.currentTarget.closest("[role='treeitem']") as HTMLElement | null)?.focus();
+                }
+              }}
+              onBlur={() => handleRenameGroup(groupName)}
+              onClick={(e) => e.stopPropagation()}
+            />
+          ) : (
+            <span className="connection-group-name" title={groupName}>{groupName}</span>
+          )}
+        </div>
+        {!isCollapsed && (
+          <div className="connection-group-children">
+            {conns.length > 0 ? (
+              conns.map((c, i) => renderConnectionNode(c, 2, [i + 1, conns.length]))
             ) : (
               <div
-                className="tree-node tree-conn-row"
-                style={{ paddingLeft: 6 }}
-                onDoubleClick={() => handleDoubleClick(node)}
-                onContextMenu={(e) => handleContextMenu(e, node)}
+                {...treeItemProps(`${groupId}::empty`, {
+                  level: 2,
+                  label: "Empty folder. Drag connections here",
+                  className: "connection-group-empty",
+                })}
+                ref={registerPlaceholder(`${groupId}::empty`)}
               >
-                {isConn ? (
-                  <Loader2 size={14} className="spin" style={{ color: "var(--accent)" }} />
-                ) : (
-                  <span className="tree-icon icon-connection"><Database size={14} /></span>
-                )}
-                <span className="tree-label" style={{ color: "var(--text-muted)" }}>
-                  {conn.name || conn.database}
-                </span>
-                {conn.ssh_enabled && (
-                  <span
-                    className="tree-conn-ssh-badge tree-conn-ssh-badge--idle"
-                    title={`Will tunnel through ${conn.ssh_user || "ssh"}@${conn.ssh_host || "bastion"}:${conn.ssh_port || 22}`}
-                  >
-                    <ShieldCheck size={11} />
-                  </span>
-                )}
-                <div className="tree-conn-actions">
-                  <button
-                    className="btn-icon tree-action"
-                    onClick={(e) => { e.stopPropagation(); handleConnectDirect(conn); }}
-                    title="Connect"
-                  >
-                    <Power size={12} />
-                  </button>
-                  <button
-                    className="btn-icon tree-action"
-                    onClick={(e) => { e.stopPropagation(); setEditingConn(conn); }}
-                    title="Edit"
-                  >
-                    <Pencil size={12} />
-                  </button>
-                  <button
-                    className="btn-icon tree-action tree-action-danger"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setConfirmAction({
-                        title: "Delete Connection",
-                        message: `Delete "${conn.name || conn.database}"? This cannot be undone.`,
-                        action: () => removeConnection(conn.id),
-                        node,
-                      });
-                    }}
-                    title="Delete"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
+                Drag connections here
               </div>
             )}
           </div>
-        </div>
+        )}
       </div>
     );
   };
@@ -1658,10 +2053,10 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       <div className="sidebar-header">
         <span>Explorer</span>
         <div style={{ display: "flex", gap: 2 }}>
-          <button className="btn-icon" onClick={onAddConnection} title="New Connection">
+          <button className="btn-icon" onClick={onAddConnection} title="New Connection" aria-label="New connection">
             <Plus size={16} />
           </button>
-          <button className="btn-icon" onClick={() => { setCreatingFolder(true); setNewFolderName(""); }} title="New Folder">
+          <button className="btn-icon" onClick={() => { setCreatingFolder(true); setNewFolderName(""); }} title="New Folder" aria-label="New folder">
             <Folder size={15} />
           </button>
         </div>
@@ -1701,9 +2096,10 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         ) : (
           <>
             <div className="tree-search">
-              <SearchIcon size={13} />
+              <SearchIcon size={13} aria-hidden="true" />
               <input
                 placeholder="Filter objects..."
+                aria-label="Filter objects"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
@@ -1712,18 +2108,20 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                   className={`btn-icon tree-filter-btn ${!allTypesEnabled ? "tree-filter-active" : ""}`}
                   onClick={() => setShowTypeFilter((v) => !v)}
                   title="Filter by type"
+                  aria-label="Filter by type"
+                  aria-expanded={showTypeFilter}
                 >
                   <Filter size={13} />
                 </button>
                 {showTypeFilter && (
-                  <div className="tree-type-filter-dropdown">
+                  <div className="tree-type-filter-dropdown" role="group" aria-label="Object types">
                     <label className="tree-type-filter-item">
                       <input
                         type="checkbox"
                         checked={typeFilters.tables}
                         onChange={(e) => setTypeFilters((f) => ({ ...f, tables: e.target.checked }))}
                       />
-                      <Table2 size={13} />
+                      <Table2 size={13} aria-hidden="true" />
                       <span>Tables</span>
                     </label>
                     <label className="tree-type-filter-item">
@@ -1732,7 +2130,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                         checked={typeFilters.views}
                         onChange={(e) => setTypeFilters((f) => ({ ...f, views: e.target.checked }))}
                       />
-                      <Eye size={13} />
+                      <Eye size={13} aria-hidden="true" />
                       <span>Views</span>
                     </label>
                     <label className="tree-type-filter-item">
@@ -1741,7 +2139,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                         checked={typeFilters.functions}
                         onChange={(e) => setTypeFilters((f) => ({ ...f, functions: e.target.checked }))}
                       />
-                      <Zap size={13} />
+                      <Zap size={13} aria-hidden="true" />
                       <span>Functions</span>
                     </label>
                   </div>
@@ -1750,10 +2148,11 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
             </div>
             {creatingFolder && (
               <div className="connection-group-create">
-                <Folder size={13} />
+                <Folder size={13} aria-hidden="true" />
                 <input
                   ref={newFolderInputRef}
                   className="folder-name-input"
+                  aria-label="New folder name"
                   value={newFolderName}
                   onChange={(e) => setNewFolderName(e.target.value.slice(0, MAX_FOLDER_NAME_LENGTH))}
                   maxLength={MAX_FOLDER_NAME_LENGTH}
@@ -1763,117 +2162,49 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                   }}
                   placeholder="Enter folder name"
                 />
-                <button className="btn-icon" onClick={handleCreateFolder} title="Create"><Check size={13} /></button>
-                <button className="btn-icon" onClick={() => { setCreatingFolder(false); setNewFolderName(""); }} title="Cancel"><X size={13} /></button>
+                <button className="btn-icon" onClick={handleCreateFolder} title="Create" aria-label="Create folder"><Check size={13} /></button>
+                <button className="btn-icon" onClick={() => { setCreatingFolder(false); setNewFolderName(""); }} title="Cancel" aria-label="Cancel new folder"><X size={13} /></button>
               </div>
             )}
-            {Object.entries(grouped.groups)
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([groupName, conns], groupIndex) => {
-                const isCollapsed = collapsedGroups.has(groupName);
-                const isRenaming = renamingGroup === groupName;
+            <div
+              ref={treeRef}
+              role="tree"
+              aria-label="Connections"
+              className="object-tree"
+              onKeyDown={onTreeKeyDown}
+            >
+              {(() => {
+                const groups = Object.entries(grouped.groups).sort(([a], [b]) => a.localeCompare(b));
+                const total = groups.length + grouped.ungrouped.length;
                 return (
-                  <div
-                    key={`group:${groupName}`}
-                    className={`connection-group ${groupIndex === 0 ? "connection-group-first" : ""} ${dragOverGroup === groupName ? "drag-over" : ""}`}
-                    onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                    onDragEnter={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      const key = `group:${groupName}`;
-                      dragCounterRef.current[key] = (dragCounterRef.current[key] || 0) + 1;
-                      if (draggingConnId) {
-                        const dragged = connections.find((c) => c.id === draggingConnId);
-                        if ((dragged?.group?.trim()?.toLowerCase() || null) !== groupName.toLowerCase()) {
-                          setDragOverGroup(groupName);
-                        }
-                      }
-                    }}
-                    onDragLeave={(e) => {
-                      e.stopPropagation();
-                      const key = `group:${groupName}`;
-                      dragCounterRef.current[key] = (dragCounterRef.current[key] || 1) - 1;
-                      if (dragCounterRef.current[key] <= 0) {
-                        dragCounterRef.current[key] = 0;
-                        if (dragOverGroup === groupName) setDragOverGroup(null);
-                      }
-                    }}
-                    onDrop={(e) => { e.stopPropagation(); handleDrop(e, groupName); }}
-                  >
-                    <div
-                      className="connection-group-header"
-                      onClick={() => !isRenaming && toggleGroup(groupName)}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        const z = readZoomFactor();
-                        setGroupContextMenu({ x: e.clientX / z, y: e.clientY / z, group: groupName });
-                      }}
-                    >
-                      <span className="connection-group-chevron">
-                        {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                      </span>
-                      {isCollapsed ? (
-                        <Folder size={13} className="connection-group-folder-icon" />
-                      ) : (
-                        <FolderOpen size={13} className="connection-group-folder-icon" />
-                      )}
-                      {isRenaming ? (
-                        <input
-                          ref={renameInputRef}
-                          className="folder-name-input"
-                          value={renameValue}
-                          onChange={(e) => setRenameValue(e.target.value.slice(0, MAX_FOLDER_NAME_LENGTH))}
-                          maxLength={MAX_FOLDER_NAME_LENGTH}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") handleRenameGroup(groupName);
-                            if (e.key === "Escape") setRenamingGroup(null);
-                          }}
-                          onBlur={() => handleRenameGroup(groupName)}
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                      ) : (
-                        <span className="connection-group-name">{groupName}</span>
-                      )}
-                    </div>
-                    {!isCollapsed && (conns.length > 0
-                      ? conns.map(renderConnectionNode)
-                      : <div className="connection-group-empty">Drag connections here</div>
-                    )}
-                  </div>
+                  <>
+                    {groups.map(([groupName, conns], i) => renderGroup(groupName, conns, i, [i + 1, total]))}
+                    {grouped.ungrouped.map((c, i) => renderConnectionNode(c, 1, [groups.length + i + 1, total]))}
+                  </>
                 );
-              })}
-            {grouped.ungrouped.map(renderConnectionNode)}
-            {groupContextMenu && createPortal(
-              <>
-                <div className="context-backdrop" onClick={() => setGroupContextMenu(null)} />
-                <div
-                  className="context-menu"
-                  style={{ left: groupContextMenu.x, top: groupContextMenu.y }}
-                  ref={(el) => {
-                    if (!el) return;
-                    const z = readZoomFactor();
-                    const cssVh = window.innerHeight / z;
-                    const cssVw = window.innerWidth / z;
-                    if (groupContextMenu.y + el.offsetHeight > cssVh) {
-                      el.style.top = `${Math.max(4, cssVh - el.offsetHeight)}px`;
-                    }
-                    if (groupContextMenu.x + el.offsetWidth > cssVw) {
-                      el.style.left = `${Math.max(4, cssVw - el.offsetWidth)}px`;
-                    }
-                  }}
-                >
-                  <button onClick={() => {
-                    setRenamingGroup(groupContextMenu.group);
-                    setRenameValue(groupContextMenu.group);
-                    setGroupContextMenu(null);
-                  }}>Rename Folder</button>
-                  <button onClick={() => {
-                    handleDeleteGroup(groupContextMenu.group);
-                    setGroupContextMenu(null);
-                  }}>Delete Folder</button>
-                </div>
-              </>,
-              document.body
+              })()}
+            </div>
+            {groupContextMenu && (
+              <ContextMenu
+                x={groupContextMenu.x}
+                y={groupContextMenu.y}
+                label={`${groupContextMenu.group} folder actions`}
+                returnFocusTo={groupContextMenu.returnFocusTo}
+                onClose={() => setGroupContextMenu(null)}
+                items={[
+                  {
+                    label: "Rename Folder",
+                    action: () => {
+                      setRenamingGroup(groupContextMenu.group);
+                      setRenameValue(groupContextMenu.group);
+                    },
+                  },
+                  {
+                    label: "Delete Folder",
+                    action: () => { void handleDeleteGroup(groupContextMenu.group); },
+                  },
+                ]}
+              />
             )}
           </>
         )}
@@ -1882,16 +2213,13 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           <ConfirmDialog
             title={confirmAction.title}
             message={confirmAction.message}
-            confirmLabel={confirmAction.title}
+            confirmLabel={confirmAction.confirmLabel ?? confirmAction.title}
             danger
             onConfirm={async () => {
-              try {
-                await confirmAction.action();
-              } catch (err) {
-                console.error("Action failed:", err);
-              } finally {
-                setConfirmAction(null);
-              }
+              // A rejection propagates to ConfirmDialog, which stays open
+              // and shows the error instead of closing as if it worked.
+              await confirmAction.action();
+              setConfirmAction(null);
             }}
             onCancel={() => setConfirmAction(null)}
           />
@@ -1908,19 +2236,6 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
           editConfig={duplicatingConn}
           duplicate
           onClose={() => setDuplicatingConn(null)}
-        />
-      )}
-      {deleteTarget && (
-        <ConfirmDialog
-          title="Delete Connection"
-          message={`Are you sure you want to delete "${deleteTarget.name || deleteTarget.database}"? This action cannot be undone.`}
-          confirmLabel="Delete"
-          danger
-          onConfirm={async () => {
-            await removeConnection(deleteTarget.id);
-            setDeleteTarget(null);
-          }}
-          onCancel={() => setDeleteTarget(null)}
         />
       )}
     </>

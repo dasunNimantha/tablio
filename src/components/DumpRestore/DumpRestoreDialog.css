@@ -1,6 +1,6 @@
 .dr-dialog {
   width: 500px;
-  max-width: 92vw;
+  max-width: calc(92 * var(--vw));
 }
 
 .dr-footer {
@@ -331,4 +331,9 @@
 .dr-btn-danger:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.dr-banner-body {
+  flex: 1;
+  min-width: 0;
 }

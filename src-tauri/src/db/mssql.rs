@@ -106,6 +106,74 @@ fn bracket(ident: &str) -> String {
     format!("[{}]", ident.replace(']', "]]"))
 }
 
+/// Statement terminators / comment markers / quotes can't appear in a
+/// column type; matches the checks the other drivers apply.
+fn type_fragment_is_unsafe(s: &str) -> bool {
+    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/") || s.contains('\'')
+}
+
+/// Like `type_fragment_is_unsafe` but allows `'` so string defaults
+/// such as `DEFAULT 'pending'` survive.
+fn default_fragment_is_unsafe(s: &str) -> bool {
+    s.contains(';') || s.contains("--") || s.contains("/*") || s.contains("*/")
+}
+
+/// `[name] TYPE [DEFAULT x] NULL|NOT NULL` for CREATE TABLE / ADD.
+fn column_definition_sql(col: &ColumnDefinition) -> Result<String> {
+    let data_type = col.data_type.trim();
+    if data_type.is_empty() {
+        anyhow::bail!("Data type is required for column {}", col.name);
+    }
+    if type_fragment_is_unsafe(data_type) {
+        anyhow::bail!("Invalid character in data type for column {}", col.name);
+    }
+    let mut def = format!("{} {}", bracket(&col.name), data_type);
+    if let Some(d) = col
+        .default_value
+        .as_deref()
+        .filter(|d| !d.trim().is_empty())
+    {
+        if default_fragment_is_unsafe(d) {
+            anyhow::bail!("Invalid character in default value for column {}", col.name);
+        }
+        def.push_str(&format!(" DEFAULT {}", d));
+    }
+    def.push_str(if col.is_nullable {
+        " NULL"
+    } else {
+        " NOT NULL"
+    });
+    Ok(def)
+}
+
+fn create_table_sql(
+    schema: &str,
+    table_name: &str,
+    columns: &[ColumnDefinition],
+) -> Result<String> {
+    if columns.is_empty() {
+        anyhow::bail!("At least one column is required");
+    }
+    let mut parts = Vec::with_capacity(columns.len() + 1);
+    for col in columns {
+        parts.push(column_definition_sql(col)?);
+    }
+    let pk: Vec<String> = columns
+        .iter()
+        .filter(|c| c.is_primary_key)
+        .map(|c| bracket(&c.name))
+        .collect();
+    if !pk.is_empty() {
+        parts.push(format!("PRIMARY KEY ({})", pk.join(", ")));
+    }
+    Ok(format!(
+        "CREATE TABLE {}.{} ({})",
+        bracket(schema),
+        bracket(table_name),
+        parts.join(", ")
+    ))
+}
+
 /// Mirrors `pg_common::filter_is_unsafe` so the MSSQL driver rejects the
 /// same set of filter patterns as Postgres / MySQL / SQLite. See the
 /// doc comment on the Postgres helper for the threat model.
@@ -1886,33 +1954,7 @@ impl DatabaseDriver for MssqlDriver {
         table_name: &str,
         columns: &[ColumnDefinition],
     ) -> Result<()> {
-        if columns.is_empty() {
-            anyhow::bail!("At least one column is required");
-        }
-        let mut parts = Vec::new();
-        let mut pk: Vec<String> = Vec::new();
-        for col in columns {
-            let null = if col.is_nullable { "NULL" } else { "NOT NULL" };
-            let ident = format!("{} {}", bracket(&col.name), col.data_type);
-            let ident = if let Some(d) = &col.default_value {
-                format!("{} DEFAULT {}", ident, d)
-            } else {
-                ident
-            };
-            parts.push(format!("{} {}", ident, null));
-            if col.is_primary_key {
-                pk.push(bracket(&col.name));
-            }
-        }
-        if !pk.is_empty() {
-            parts.push(format!("PRIMARY KEY ({})", pk.join(", ")));
-        }
-        let sql = format!(
-            "CREATE TABLE {}.{} ({})",
-            bracket(schema),
-            bracket(table_name),
-            parts.join(", ")
-        );
+        let sql = create_table_sql(schema, table_name, columns)?;
         self.run_batch_in(database, &sql).await?;
         Ok(())
     }
@@ -1936,18 +1978,7 @@ impl DatabaseDriver for MssqlDriver {
             let fq = format!("{}.{}", bracket(schema), bracket(&current_table));
             let stmt = match op {
                 AlterTableOperation::AddColumn { column } => {
-                    let null = if column.is_nullable {
-                        "NULL"
-                    } else {
-                        "NOT NULL"
-                    };
-                    format!(
-                        "ALTER TABLE {} ADD {} {} {}",
-                        fq,
-                        bracket(&column.name),
-                        column.data_type,
-                        null
-                    )
+                    format!("ALTER TABLE {} ADD {}", fq, column_definition_sql(column)?)
                 }
                 AlterTableOperation::DropColumn { column_name } => {
                     format!("ALTER TABLE {} DROP COLUMN {}", fq, bracket(column_name))
@@ -2413,6 +2444,69 @@ impl DatabaseDriver for MssqlDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn coldef(
+        name: &str,
+        ty: &str,
+        nullable: bool,
+        pk: bool,
+        default: Option<&str>,
+    ) -> ColumnDefinition {
+        ColumnDefinition {
+            name: name.into(),
+            data_type: ty.into(),
+            is_nullable: nullable,
+            is_primary_key: pk,
+            default_value: default.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn create_table_sql_identity_pk_and_default() {
+        let sql = create_table_sql(
+            "dbo",
+            "t",
+            &[
+                coldef("id", "INT IDENTITY(1,1)", false, true, None),
+                coldef("status", "NVARCHAR(20)", true, false, Some("'new'")),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            sql,
+            "CREATE TABLE [dbo].[t] ([id] INT IDENTITY(1,1) NOT NULL, [status] NVARCHAR(20) DEFAULT 'new' NULL, PRIMARY KEY ([id]))"
+        );
+    }
+
+    #[test]
+    fn create_table_sql_rejects_unsafe_type_and_default() {
+        assert!(create_table_sql(
+            "dbo",
+            "t",
+            &[coldef("a", "INT; DROP TABLE x", true, false, None)]
+        )
+        .is_err());
+        assert!(create_table_sql(
+            "dbo",
+            "t",
+            &[coldef("a", "INT", true, false, Some("1; DROP TABLE x"))]
+        )
+        .is_err());
+        assert!(create_table_sql("dbo", "t", &[coldef("a", "  ", true, false, None)]).is_err());
+        assert!(create_table_sql("dbo", "t", &[]).is_err());
+    }
+
+    #[test]
+    fn column_definition_sql_ignores_blank_default() {
+        assert_eq!(
+            column_definition_sql(&coldef("n", "INT", false, false, Some(" "))).unwrap(),
+            "[n] INT NOT NULL"
+        );
+        assert_eq!(
+            column_definition_sql(&coldef("n", "INT", true, false, Some("0"))).unwrap(),
+            "[n] INT DEFAULT 0 NULL"
+        );
+    }
 
     #[test]
     fn bracket_plain_identifier() {

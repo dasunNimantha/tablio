@@ -68,7 +68,7 @@
 }
 
 .tv-pill-range {
-  color: #10b981;
+  color: color-mix(in srgb, #10b981 55%, var(--text-primary));
   background: color-mix(in srgb, #10b981 15%, transparent);
   border-color: color-mix(in srgb, #10b981 35%, transparent);
 }
@@ -449,7 +449,7 @@
 }
 
 .tv-badge-c-unique {
-  color: #10b981;
+  color: color-mix(in srgb, #10b981 55%, var(--text-primary));
   background: color-mix(in srgb, #10b981 15%, transparent);
 }
 
@@ -543,7 +543,7 @@
 }
 
 .tv-schema-tab.active .tv-schema-tab-count {
-  color: var(--accent);
+  color: color-mix(in srgb, var(--accent) 65%, var(--text-primary));
   background: var(--accent-muted);
 }
 

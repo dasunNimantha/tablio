@@ -14,21 +14,21 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   width: 540px;
-  max-height: 85vh;
+  max-height: calc(85 * var(--vh));
   overflow-y: auto;
   box-shadow: var(--shadow-lg);
   min-width: 400px;
 }
 
 .connection-dialog {
-  width: min(840px, calc(100vw - 32px));
-  min-width: min(760px, calc(100vw - 32px));
+  width: min(840px, calc(100 * var(--vw) - 32px));
+  min-width: min(760px, calc(100 * var(--vw) - 32px));
   /* Fixed height so the dialog frame doesn't jump as the user moves
      between sections or toggles SSH options. Sized to fit the tallest
      section (SSH with identity file) plus the inline form-error banner
      under it without clipping; inner content scrolls when it overflows
      on small viewports. */
-  height: min(86vh, 700px);
+  height: min(calc(86 * var(--vh)), 700px);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -138,9 +138,16 @@
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.25;
+  /* Up to two lines instead of a one-line ellipsis that hid most of it. */
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* Muted text isn't 4.5:1 on the active item's accent tint. */
+.connection-nav-item--active .connection-nav-item__description {
+  color: var(--text-secondary);
 }
 
 .connection-nav-item__error {
@@ -156,6 +163,9 @@
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  /* The form reflows on its own width (zoomed-in or narrow windows),
+     not the window's: see the @container rule below. */
+  container-type: inline-size;
   padding: 22px 24px;
   display: flex;
   flex-direction: column;
@@ -372,7 +382,8 @@
   gap: 6px;
 }
 
-.form-group label {
+.form-group label,
+.form-group .form-label {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-muted);
@@ -724,9 +735,11 @@
   align-items: flex-start;
   padding: 10px 12px;
   border-radius: var(--radius-md);
-  border: 1px solid rgba(239, 68, 68, 0.18);
-  background: rgba(239, 68, 68, 0.08);
-  color: #ffb4b4;
+  border: 1px solid color-mix(in srgb, var(--error) 35%, transparent);
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+  /* Primary text keeps the message readable in every theme; the red
+     border, tint and icon carry the "error" signal. */
+  color: var(--text-primary);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -734,6 +747,7 @@
 .connection-form-error svg {
   margin-top: 2px;
   flex-shrink: 0;
+  color: var(--error);
 }
 
 
@@ -1000,9 +1014,9 @@
 
 @media (max-width: 760px) {
   .connection-dialog {
-    width: calc(100vw - 20px);
+    width: calc(100 * var(--vw) - 20px);
     min-width: 0;
-    max-height: 90vh;
+    max-height: calc(90 * var(--vh));
   }
 
   .connection-dialog-body {
@@ -1059,5 +1073,20 @@
 
   .ssh-tunnel-fields {
     padding-left: 0;
+  }
+}
+
+/* Narrow form area (e.g. 150% zoom on a 1024px window): stack the
+   side-by-side fields instead of squeezing / clipping them. */
+@container (max-width: 560px) {
+  .connection-dialog-content .form-row {
+    flex-wrap: wrap;
+  }
+  .connection-dialog-content .form-row > * {
+    flex: 1 1 100%;
+    width: auto !important;
+  }
+  .connection-dialog-content .form-row--ssh-identity {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

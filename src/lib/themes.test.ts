@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { themes, getThemeById } from "./themes";
+import { contrastRatio, parseColor } from "./contrast";
 
 describe("themes", () => {
   it("has at least one theme", () => {
@@ -76,5 +77,28 @@ describe("getThemeById", () => {
   it("falls back to first theme for empty string", () => {
     const theme = getThemeById("");
     expect(theme.id).toBe(themes[0].id);
+  });
+});
+
+describe("theme text contrast (WCAG AA)", () => {
+  const BACKGROUNDS = ["--bg-primary", "--bg-secondary", "--bg-tertiary", "--bg-header", "--bg-surface", "--bg-elevated"];
+  for (const theme of themes) {
+    for (const token of ["--text-primary", "--text-secondary", "--text-muted", "--cell-null"]) {
+      it(`${theme.id}: ${token} is at least 4.5:1 on every background`, () => {
+        const fg = parseColor(theme.vars[token]);
+        for (const bg of BACKGROUNDS) {
+          const ratio = contrastRatio(fg, parseColor(theme.vars[bg]));
+          expect(ratio, `${token} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+        }
+      });
+    }
+  }
+});
+
+describe("contrastRatio", () => {
+  it("matches the WCAG reference values", () => {
+    expect(contrastRatio(parseColor("#000"), parseColor("#fff"))).toBeCloseTo(21, 5);
+    expect(contrastRatio(parseColor("#777777"), parseColor("#ffffff"))).toBeCloseTo(4.48, 2);
+    expect(contrastRatio(parseColor("rgba(0,0,0,0.5)"), parseColor("#ffffff"))).toBeCloseTo(3.95, 1);
   });
 });

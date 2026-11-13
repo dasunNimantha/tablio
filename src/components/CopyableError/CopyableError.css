@@ -1,0 +1,25 @@
+.copyable-error {
+  margin-top: 4px;
+  min-width: 0;
+}
+
+.copyable-error__text {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+.copyable-error__copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 2px 6px;
+  font-size: 12px;
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { useToastStore } from "./toastStore";
+import { useToastStore, TOAST_DURATION_MS } from "./toastStore";
 
 describe("toastStore", () => {
   beforeEach(() => {
@@ -84,6 +84,49 @@ describe("toastStore", () => {
     expect(useToastStore.getState().toasts).toHaveLength(1);
     expect(useToastStore.getState().toasts[0].message).toBe("Second");
     vi.advanceTimersByTime(1000);
+    expect(useToastStore.getState().toasts).toHaveLength(0);
+  });
+});
+
+describe("toastStore error toasts and pausing", () => {
+  beforeEach(() => {
+    useToastStore.setState({ toasts: [] });
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps error toasts up much longer than success toasts", () => {
+    useToastStore.getState().addToast("Boom", "error");
+    vi.advanceTimersByTime(3000);
+    expect(useToastStore.getState().toasts).toHaveLength(1);
+    vi.advanceTimersByTime(TOAST_DURATION_MS.error - 3000);
+    expect(useToastStore.getState().toasts).toHaveLength(0);
+  });
+
+  it("does not dismiss while paused and resumes with the remaining time", () => {
+    useToastStore.getState().addToast("Hover me");
+    const id = useToastStore.getState().toasts[0].id;
+    vi.advanceTimersByTime(1000);
+    useToastStore.getState().pauseToast(id);
+    vi.advanceTimersByTime(60_000);
+    expect(useToastStore.getState().toasts).toHaveLength(1);
+    useToastStore.getState().resumeToast(id);
+    vi.advanceTimersByTime(1999);
+    expect(useToastStore.getState().toasts).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(useToastStore.getState().toasts).toHaveLength(0);
+  });
+
+  it("resume after manual removal is a no-op", () => {
+    useToastStore.getState().addToast("Gone", "error");
+    const id = useToastStore.getState().toasts[0].id;
+    useToastStore.getState().pauseToast(id);
+    useToastStore.getState().removeToast(id);
+    useToastStore.getState().resumeToast(id);
+    vi.advanceTimersByTime(20_000);
     expect(useToastStore.getState().toasts).toHaveLength(0);
   });
 });

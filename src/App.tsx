@@ -26,7 +26,8 @@ import { Database, Plus, Keyboard, Palette, Check, Cpu, MemoryStick, ShieldCheck
 import { themes, getThemeById, applyTheme } from "./lib/themes";
 import { syncMonacoTheme } from "./lib/monacoTheme";
 import { api } from "./lib/tauri";
-import { getZoomTarget, isChromiumWebview } from "./lib/zoom";
+import { defaultZoomPercent, getZoomTarget, isChromiumWebview } from "./lib/zoom";
+import { PopoverMenu } from "./components/Menu/PopoverMenu";
 
 const SIDEBAR_WIDTH_MIN = 200;
 /** Keep at least this many pixels for the main editor / grid area. */
@@ -143,21 +144,15 @@ export default function App() {
   const zoomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const themePickerRef = useRef<HTMLDivElement>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
+  const themeButtonRef = useRef<HTMLButtonElement>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const [themeId, setThemeId] = useState<string>(() => {
     return localStorage.getItem("tablio-theme") || "dark";
   });
   const [zoom, setZoom] = useState<number>(() => {
     const saved = localStorage.getItem("tablio-zoom");
     if (saved) return parseFloat(saved);
-    // Windows defaults the OS scale to 125% on most 1080p laptops, so the
-    // app already lands at ~125% physical scale. Layering our 110% default
-    // on top of that compounds into ~137%, which feels visibly bigger
-    // than the same UI on Linux/macOS (both default to 100% OS scale).
-    // Default to 100% on Windows to keep visual size roughly platform-
-    // consistent; users can still adjust via Ctrl/Cmd+= and Ctrl/Cmd+-.
-    const isWindows =
-      /Windows/i.test(navigator.userAgent) || /^Win/i.test(navigator.platform);
-    return isWindows ? 100 : 110;
+    return defaultZoomPercent();
   });
   // Mirror of `zoom` for the keyboard / wheel handler closures so they
   // can read the current value without us having to call `setZoom` from
@@ -337,7 +332,7 @@ export default function App() {
       }
       if (e.ctrlKey && e.key === "0") {
         e.preventDefault();
-        applyZoom(110);
+        applyZoom(defaultZoomPercent());
         return;
       }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "n") {
@@ -426,95 +421,112 @@ export default function App() {
           <ResourceMonitor />
           <div className="statusbar-right">
             {showZoom && (
-              <span
+              <button
+                type="button"
                 className="zoom-indicator"
-                onClick={() => applyZoom(110)}
+                onClick={() => applyZoom(defaultZoomPercent())}
                 title="Reset Zoom (Ctrl+0)"
+                aria-label={`Zoom ${zoom}%. Reset zoom`}
               >
                 {zoom}%
-              </span>
+              </button>
             )}
             <button
               className="btn-icon"
               onClick={() => setShowShortcuts(true)}
               title="Keyboard Shortcuts (Ctrl+?)"
+              aria-label="Keyboard shortcuts"
             >
               <Keyboard size={14} />
             </button>
             <div className="theme-picker-wrapper" ref={themePickerRef}>
               <button
+                ref={themeButtonRef}
                 className="btn-icon"
                 onClick={() => setShowThemePicker((p) => !p)}
                 title="Change Theme"
+                aria-label="Change theme"
+                aria-haspopup="menu"
+                aria-expanded={showThemePicker}
               >
                 <Palette size={14} />
               </button>
               {showThemePicker && (
-                <div className="theme-picker-popover">
-                  <div className="theme-picker-group">
-                    <div className="theme-picker-group-label">Dark</div>
-                    {themes.filter((t) => t.group === "dark").map((t) => (
-                      <button
-                        key={t.id}
-                        className={`theme-picker-item${t.id === themeId ? " active" : ""}`}
-                        onClick={() => { setThemeId(t.id); setShowThemePicker(false); }}
-                      >
-                        <span className="theme-picker-name">{t.name}</span>
-                        {t.id === themeId && <Check size={13} />}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="theme-picker-group">
-                    <div className="theme-picker-group-label">Light</div>
-                    {themes.filter((t) => t.group === "light").map((t) => (
-                      <button
-                        key={t.id}
-                        className={`theme-picker-item${t.id === themeId ? " active" : ""}`}
-                        onClick={() => { setThemeId(t.id); setShowThemePicker(false); }}
-                      >
-                        <span className="theme-picker-name">{t.name}</span>
-                        {t.id === themeId && <Check size={13} />}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <PopoverMenu label="Theme" triggerRef={themeButtonRef} onClose={() => setShowThemePicker(false)}>
+                  {(["dark", "light"] as const).map((group) => (
+                    <div className="theme-picker-group" role="group" aria-labelledby={`theme-group-${group}`} key={group}>
+                      <div className="theme-picker-group-label" id={`theme-group-${group}`}>
+                        {group === "dark" ? "Dark" : "Light"}
+                      </div>
+                      {themes.filter((t) => t.group === group).map((t) => (
+                        <button
+                          key={t.id}
+                          role="menuitemradio"
+                          aria-checked={t.id === themeId}
+                          tabIndex={-1}
+                          className={`theme-picker-item${t.id === themeId ? " active" : ""}`}
+                          onClick={() => {
+                            setThemeId(t.id);
+                            setShowThemePicker(false);
+                            themeButtonRef.current?.focus();
+                          }}
+                        >
+                          <span className="theme-picker-name">{t.name}</span>
+                          {t.id === themeId && <Check size={13} aria-hidden="true" />}
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                </PopoverMenu>
               )}
             </div>
             <div className="theme-picker-wrapper" ref={settingsMenuRef}>
               <button
+                ref={settingsButtonRef}
                 className="btn-icon"
                 onClick={() => setShowSettingsMenu((p) => !p)}
                 title="Settings"
+                aria-label="Settings"
+                aria-haspopup="menu"
+                aria-expanded={showSettingsMenu}
               >
                 <Settings size={14} />
               </button>
               {showSettingsMenu && (
-                <div className="theme-picker-popover">
-                  <div className="theme-picker-group">
-                    <div className="theme-picker-group-label">Settings</div>
+                <PopoverMenu label="Settings" triggerRef={settingsButtonRef} onClose={() => setShowSettingsMenu(false)}>
+                  <div className="theme-picker-group" role="group" aria-labelledby="settings-group-label">
+                    <div className="theme-picker-group-label" id="settings-group-label">Settings</div>
                     <button
+                      role="menuitem"
+                      tabIndex={-1}
                       className="theme-picker-item"
                       data-testid="preferences-menu-item"
                       onClick={() => {
+                        // Return focus to the trigger first so the dialog
+                        // restores focus there when it closes.
+                        settingsButtonRef.current?.focus();
                         setShowSettingsMenu(false);
                         setShowPreferences(true);
                       }}
                     >
-                      <Sliders size={13} />
+                      <Sliders size={13} aria-hidden="true" />
                       <span className="theme-picker-name">Preferences</span>
                     </button>
                     <button
+                      role="menuitem"
+                      tabIndex={-1}
                       className="theme-picker-item"
                       onClick={() => {
+                        settingsButtonRef.current?.focus();
                         setShowSettingsMenu(false);
                         setShowKnownHosts(true);
                       }}
                     >
-                      <ShieldCheck size={13} />
+                      <ShieldCheck size={13} aria-hidden="true" />
                       <span className="theme-picker-name">SSH known hosts</span>
                     </button>
                   </div>
-                </div>
+                </PopoverMenu>
               )}
             </div>
           </div>
@@ -549,7 +561,18 @@ export default function App() {
           schema={importTarget.schema}
           tableName={importTarget.tableName}
           onClose={() => setImportTarget(null)}
-          onImported={() => setImportTarget(null)}
+          onImported={() =>
+            // The dialog stays open on its success state; refresh any open
+            // grid of the table behind it.
+            useConnectionStore
+              .getState()
+              .invalidateTableData(
+                importTarget.connectionId,
+                importTarget.database,
+                importTarget.schema,
+                importTarget.tableName,
+              )
+          }
         />
       )}
       {backupTarget && (

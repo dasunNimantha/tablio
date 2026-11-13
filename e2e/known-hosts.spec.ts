@@ -11,7 +11,7 @@ test.describe("SSH known hosts dialog", () => {
     await page.getByRole("button", { name: "Settings" }).click();
 
     // The Settings group contains the entry that opens the dialog.
-    await page.getByRole("button", { name: /SSH known hosts/i }).click();
+    await page.getByRole("menuitem", { name: /SSH known hosts/i }).click();
 
     // The dialog mounts via portal and is labelled accordingly.
     const dialog = page.getByRole("dialog", { name: /SSH known hosts/i });
@@ -34,7 +34,7 @@ test.describe("SSH known hosts dialog", () => {
   test("filter input narrows the visible rows", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Settings" }).click();
-    await page.getByRole("button", { name: /SSH known hosts/i }).click();
+    await page.getByRole("menuitem", { name: /SSH known hosts/i }).click();
     const dialog = page.getByRole("dialog", { name: /SSH known hosts/i });
     await expect(dialog).toBeVisible();
 
@@ -54,7 +54,7 @@ test.describe("SSH known hosts dialog", () => {
   test("Escape closes the dialog", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Settings" }).click();
-    await page.getByRole("button", { name: /SSH known hosts/i }).click();
+    await page.getByRole("menuitem", { name: /SSH known hosts/i }).click();
     const dialog = page.getByRole("dialog", { name: /SSH known hosts/i });
     await expect(dialog).toBeVisible();
     await page.keyboard.press("Escape");

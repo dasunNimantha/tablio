@@ -235,7 +235,6 @@
   gap: 10px;
   color: var(--text-muted);
   font-size: 13px;
-  opacity: 0.6;
 }
 
 /* Overview stats bar */
@@ -293,11 +292,15 @@
 .chart-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr 1fr;
+  /* Rows share the height but never squash a chart below a readable
+     size (they used to shrink to ~40px on a 1024x640 window); the grid
+     scrolls instead. */
+  grid-template-rows: repeat(2, minmax(180px, 1fr));
   gap: 12px;
   background: var(--bg-primary);
   flex: 1;
-  overflow: hidden;
+  min-height: 0;
+  overflow-y: auto;
   padding: 14px var(--gutter-lg) var(--gutter-lg);
 }
 
@@ -533,6 +536,7 @@
   .chart-grid {
     grid-template-columns: 1fr;
     grid-template-rows: none;
+    grid-auto-rows: minmax(180px, 1fr);
   }
 }
 

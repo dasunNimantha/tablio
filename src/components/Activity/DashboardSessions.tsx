@@ -44,12 +44,13 @@ export function DashboardSessions({ connectionId, paused }: Props) {
         connection_id: connectionId,
         pid: killTarget.pid,
       });
-      setKillTarget(null);
-      fetchActivity();
     } catch (e) {
-      setError(String(e));
-      setKillTarget(null);
+      // Shown inline by ConfirmDialog, which stays open. (It used to go
+      // into the polling error slot, where the next poll wiped it.)
+      throw new Error(`Couldn't cancel the query on PID ${killTarget.pid}: ${e instanceof Error ? e.message : String(e)}`);
     }
+    setKillTarget(null);
+    fetchActivity();
   };
 
   const filtered = useMemo(() => filterSessions(activities, search), [activities, search]);
@@ -67,7 +68,7 @@ export function DashboardSessions({ connectionId, paused }: Props) {
 
   return (
     <div className="dashboard-sub-content">
-      {error && <div className="activity-error">{error}</div>}
+      {error && <div className="activity-error" role="alert">{error}</div>}
 
       <div className="activity-sub-toolbar">
         <span className="activity-count">{activities.length} connections</span>
@@ -76,9 +77,10 @@ export function DashboardSessions({ connectionId, paused }: Props) {
         )}
         <div style={{ flex: 1 }} />
         <div className="config-search">
-          <Search size={14} />
+          <Search size={14} aria-hidden="true" />
           <input
             type="text"
+            aria-label="Filter sessions"
             placeholder="Filter sessions..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -129,6 +131,7 @@ export function DashboardSessions({ connectionId, paused }: Props) {
                         className="btn-icon"
                         onClick={() => setKillTarget(act)}
                         title="Cancel query"
+                        aria-label={`Cancel query on PID ${act.pid}`}
                       >
                         <XCircle size={14} />
                       </button>

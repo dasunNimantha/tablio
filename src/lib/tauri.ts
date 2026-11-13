@@ -42,6 +42,13 @@ function mockSlowQuery<T>(requestId: string | undefined, result: T): Promise<T> 
   });
 }
 
+/**
+ * E2E test hook (mock mode only): `window.__mockOverrides[cmd] = (args) => value`
+ * replaces a mock command. Throwing, or returning a rejected promise, makes
+ * the command fail the way the backend would (Tauri rejects with a string).
+ */
+type MockOverride = (args?: Record<string, unknown>) => unknown;
+
 async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   await new Promise((r) => setTimeout(r, Math.random() * 200 + 50));
 
@@ -57,6 +64,8 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
     const overridden = await hooks.__mockOverride(cmd, args);
     if (overridden !== undefined) return overridden as T;
   }
+  const override = (window as { __mockOverrides?: Record<string, MockOverride> }).__mockOverrides?.[cmd];
+  if (override) return (await override(args)) as T;
 
   switch (cmd) {
     case "load_connections":

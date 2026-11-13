@@ -16,7 +16,7 @@ import {
   TableInfo as TableInfoType,
 } from "../../lib/tauri";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
-import { useConnectionStore } from "../../stores/connectionStore";
+import { tableDataKey, useConnectionStore } from "../../stores/connectionStore";
 import { usePolling } from "../../hooks/usePolling";
 import { SCHEMA_POLL_INTERVAL_MS } from "../../lib/schemaSync";
 import { DataGrid } from "../DataGrid/DataGrid";
@@ -179,6 +179,18 @@ export function TableView({
     seenSchemaVersionRef.current = schemaVersion;
     loadMeta({ silent: true });
   }, [schemaVersion, loadMeta]);
+
+  // Rows changed outside the grid (e.g. Import Data): re-read them. The
+  // grid's structureVersion refetch is silent and leaves unsaved edits alone.
+  const tableDataVersion = useConnectionStore(
+    (s) => s.tableDataVersions[tableDataKey(connectionId, database, schema, table)] ?? 0,
+  );
+  const seenTableDataVersionRef = useRef(tableDataVersion);
+  useEffect(() => {
+    if (seenTableDataVersionRef.current === tableDataVersion) return;
+    seenTableDataVersionRef.current = tableDataVersion;
+    setStructureVersion((v) => v + 1);
+  }, [tableDataVersion]);
 
   const isActiveTab = useTabStore((s) => s.activeTabId === tabId);
   const silentLoadMeta = useCallback(() => loadMeta({ silent: true }), [loadMeta]);

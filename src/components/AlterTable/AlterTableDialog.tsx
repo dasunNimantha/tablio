@@ -1,4 +1,6 @@
+import { useCallback, useId, useState } from "react";
 import { X } from "lucide-react";
+import { Modal } from "../Modal/Modal";
 import { AlterTableEditor } from "./AlterTableEditor";
 import "./AlterTableDialog.css";
 
@@ -40,28 +42,41 @@ export function AlterTableDialog({
     onClose();
   };
 
+  const titleId = useId();
+  const [state, setState] = useState({ dirty: false, busy: false });
+  const handleStateChange = useCallback(
+    (next: { dirty: boolean; busy: boolean }) =>
+      setState((prev) =>
+        prev.dirty === next.dirty && prev.busy === next.busy ? prev : next,
+      ),
+    [],
+  );
+
   return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div
-        className="dialog alter-table-dialog"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="dialog-header">
-          <h2>Alter Table</h2>
-          <button className="btn-icon" onClick={onClose}>
-            <X size={18} />
-          </button>
-        </div>
-        <AlterTableEditor
-          connectionId={connectionId}
-          database={database}
-          schema={schema}
-          tableName={tableName}
-          onSaved={handleSaved}
-          onDiscard={onClose}
-          variant="modal"
-        />
+    <Modal
+      onClose={onClose}
+      className="dialog alter-table-dialog"
+      labelledBy={titleId}
+      // Pending edits survive closing (they're kept as a per-table
+      // draft), so only a save in flight blocks Escape / overlay clicks.
+      busy={state.busy}
+    >
+      <div className="dialog-header">
+        <h2 id={titleId}>Alter Table</h2>
+        <button className="btn-icon" onClick={onClose} aria-label="Close" title="Close">
+          <X size={18} />
+        </button>
       </div>
-    </div>
+      <AlterTableEditor
+        connectionId={connectionId}
+        database={database}
+        schema={schema}
+        tableName={tableName}
+        onSaved={handleSaved}
+        onDiscard={onClose}
+        variant="modal"
+        onStateChange={handleStateChange}
+      />
+    </Modal>
   );
 }
