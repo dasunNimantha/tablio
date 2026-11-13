@@ -45,7 +45,7 @@ impl SecretField {
         }
     }
 
-    fn account(self, connection_id: &str) -> String {
+    pub fn account(self, connection_id: &str) -> String {
         format!("connection/{}/{}", connection_id, self.json_key())
     }
 }
@@ -58,6 +58,16 @@ pub trait SecretStore: Send + Sync {
     fn set(&self, connection_id: &str, field: SecretField, value: &str) -> Result<(), String>;
     /// Remove the value. Removing a value that does not exist is not an error.
     fn delete(&self, connection_id: &str, field: SecretField) -> Result<(), String>;
+
+    /// Every readable value this app stored, keyed by
+    /// [`SecretField::account`], fetched in one round-trip where the
+    /// platform allows it. `None` means "not supported here or failed":
+    /// callers then fall back to [`SecretStore::get`]. A missing key is
+    /// not proof the value doesn't exist (it may be locked), so callers
+    /// fall back for those too.
+    fn get_all(&self) -> Option<HashMap<String, String>> {
+        None
+    }
 }
 
 /// The OS credential store.
@@ -121,6 +131,42 @@ impl SecretStore for KeyringStore {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(self.fail(e)),
         }
+    }
+
+    /// On Linux every `keyring` call opens its own Secret Service session
+    /// (~100 ms each), so loading N connections one by one took N × 100 ms.
+    /// Read all of this app's unlocked items in a single session instead,
+    /// matching the attributes `keyring` writes (`service` + `username`).
+    #[cfg(target_os = "linux")]
+    fn get_all(&self) -> Option<HashMap<String, String>> {
+        use secret_service::blocking::SecretService;
+        use secret_service::EncryptionType;
+
+        if self.unavailable.load(Ordering::Relaxed) {
+            return None;
+        }
+        let ss = SecretService::connect(EncryptionType::Dh)
+            .map_err(|e| log::debug!("Secret Service bulk read unavailable: {e}"))
+            .ok()?;
+        let found = ss
+            .search_items(HashMap::from([("service", SERVICE)]))
+            .map_err(|e| log::debug!("Secret Service search failed: {e}"))
+            .ok()?;
+        let mut out = HashMap::new();
+        for item in found.unlocked {
+            let Ok(attrs) = item.get_attributes() else {
+                continue;
+            };
+            let Some(account) = attrs.get("username") else {
+                continue;
+            };
+            if let Ok(secret) = item.get_secret() {
+                if let Ok(text) = String::from_utf8(secret) {
+                    out.insert(account.clone(), text);
+                }
+            }
+        }
+        Some(out)
     }
 }
 
