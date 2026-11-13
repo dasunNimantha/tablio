@@ -1,0 +1,3 @@
+# Inline scripts in index.html are allowed by CSP hash; keep its line
+# endings identical on every platform so the hash never depends on checkout.
+index.html text eol=lf
