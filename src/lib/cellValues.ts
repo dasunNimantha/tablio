@@ -157,7 +157,11 @@ export function editorInputToValue(raw: unknown, col: EditableColumn): ParseResu
   const s = typeof raw === "string" ? raw : String(raw);
   if (!isTextLike(col.data_type)) {
     const t = s.trim();
-    if (t === "" || t.toLowerCase() === "null") {
+    // For JSON columns `null` is a valid JSON document (the JSON null
+    // literal), distinct from SQL NULL (the explicit "Set NULL" action
+    // or an empty editor).
+    const sqlNullWord = valueCategory(col.data_type) !== "json" && t.toLowerCase() === "null";
+    if (t === "" || sqlNullWord) {
       return col.is_nullable ? { ok: true, value: null } : { ok: false, error: "This column is NOT NULL — value required" };
     }
   }

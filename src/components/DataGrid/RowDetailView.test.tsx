@@ -19,6 +19,12 @@ describe("prepareEditValue", () => {
     expect(prepareEditValue("{a:1}", col("doc", "json")).ok).toBe(false);
   });
 
+  it("treats typed null in a JSON column as the JSON null literal", () => {
+    expect(prepareEditValue("null", col("doc", "jsonb"))).toEqual({ ok: true, value: "null" });
+    expect(prepareEditValue("", col("doc", "jsonb"))).toEqual({ ok: true, value: null });
+    expect(prepareEditValue("null", col("n", "integer"))).toEqual({ ok: true, value: null });
+  });
+
   it("leaves dates and timestamps to the database", () => {
     for (const v of ["infinity", "-infinity", "epoch", "0044-03-15 BC", "275761-01-01", "2024-01-01 10:00:00+02"]) {
       expect(prepareEditValue(v, col("at", "timestamptz"))).toEqual({ ok: true, value: v });

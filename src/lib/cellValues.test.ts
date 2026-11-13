@@ -120,6 +120,21 @@ describe("editorInputToValue", () => {
     expect(editorInputToValue("42", json)).toEqual({ ok: true, value: "42" });
   });
 
+  it("keeps the JSON null literal distinct from SQL NULL in JSON columns", () => {
+    const json = { data_type: "jsonb", is_nullable: true };
+    expect(editorInputToValue("null", json)).toEqual({ ok: true, value: "null" });
+    expect(editorInputToValue(" NULL ", json).ok).toBe(false); // not valid JSON
+    expect(editorInputToValue("", json)).toEqual({ ok: true, value: null });
+    expect(editorInputToValue(null, json)).toEqual({ ok: true, value: null });
+    // Other non-text types still read the word as SQL NULL.
+    expect(editorInputToValue("null", { data_type: "integer", is_nullable: true })).toEqual({ ok: true, value: null });
+  });
+
+  it("accepts non-finite float text as sent by the backend", () => {
+    const f = { data_type: "double precision", is_nullable: true };
+    for (const v of ["NaN", "Infinity", "-Infinity"]) expect(editorInputToValue(v, f)).toEqual({ ok: true, value: v });
+  });
+
   it("rejects invalid JSON and never stores [object Object]", () => {
     const json = { data_type: "json", is_nullable: true };
     expect(editorInputToValue("[object Object]", json).ok).toBe(false);

@@ -98,7 +98,10 @@ export function prepareEditValue(value: string, col: ColumnInfo): EditResult {
   const dataType = col.data_type;
   const trimmed = value.trim();
   if (!isTextLike(dataType)) {
-    if (trimmed === "" || trimmed.toLowerCase() === "null") {
+    // In a JSON column `null` is the JSON null literal, not SQL NULL
+    // (use the NULL button for that).
+    const sqlNullWord = valueCategory(dataType) !== "json" && trimmed.toLowerCase() === "null";
+    if (trimmed === "" || sqlNullWord) {
       return col.is_nullable
         ? { ok: true, value: null }
         : { ok: false, error: "This field is NOT NULL — value required" };

@@ -139,6 +139,20 @@ test.describe("Data grid — multi-line and JSON editing", () => {
     expect(req!.changes.updates[0]).toMatchObject({ column_name: "payload", new_value: '{"a": [1, 2]}' });
   });
 
+  test("typed null in a JSON cell is the JSON null literal, Set NULL is SQL NULL", async ({ page }) => {
+    await cell(page, 1, 3).dblclick();
+    const textarea = page.locator(".ag-large-text textarea");
+    await textarea.fill("null");
+    await textarea.press("Enter");
+    await cell(page, 2, 3).click({ button: "right" });
+    await page.locator(".context-menu button", { hasText: "Set payload to NULL" }).click();
+    await toolbar(page).locator("button", { hasText: "Save 2 changes" }).click();
+    await expect.poll(() => calls(page, "apply_changes").then((c) => c.length)).toBe(1);
+    const [req] = await calls(page, "apply_changes");
+    const byId = Object.fromEntries(req!.changes.updates.map((u: any) => [u.primary_key_values[0][1], u.new_value]));
+    expect(byId).toEqual({ 2: "null", 3: null });
+  });
+
   test("invalid JSON is rejected", async ({ page }) => {
     await cell(page, 1, 3).dblclick();
     const textarea = page.locator(".ag-large-text textarea");
