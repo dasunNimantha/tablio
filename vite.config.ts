@@ -19,7 +19,10 @@ function devCsp(html: string): string {
   // by hash (in dev this includes the React Fast Refresh preamble).
   const inlineScripts = html.matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi);
   for (const [, body] of inlineScripts) {
-    const hash = createHash("sha256").update(body).digest("base64");
+    // Browsers hash the script text after HTML newline normalisation, so a
+    // CRLF checkout (Windows) must be hashed with LF line endings.
+    const text = body.replace(/\r\n?/g, "\n");
+    const hash = createHash("sha256").update(text).digest("base64");
     directives["script-src"] += ` 'sha256-${hash}'`;
   }
   // HMR websocket.
@@ -64,7 +67,15 @@ function tauriCspInDev(): Plugin {
           res.end();
         });
       });
-      server.middlewares.use((_req, res, next) => {
+      server.middlewares.use((req, res, next) => {
+        // Only page navigations can return HTML. Leaving every other
+        // response (modules, the multi-megabyte Monaco bundle) untouched
+        // also avoids a Node crash on Windows ("Lazy deopt after a fast API
+        // call") when a wrapped res.end sends a very large string.
+        if (!String(req.headers.accept ?? "").includes("text/html")) {
+          next();
+          return;
+        }
         const end = res.end.bind(res);
         res.end = ((chunk?: unknown, ...rest: unknown[]) => {
           const type = String(res.getHeader("Content-Type") ?? "");

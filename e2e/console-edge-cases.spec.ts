@@ -167,7 +167,9 @@ test.describe("Result grid — editing", () => {
     await run(page, "SELECT * FROM app_settings");
     const textarea = await openLargeTextEditor(page, rcell(page, 2, 2));
     await expect(textarea).toHaveValue("First\nSecond\nThird");
-    await textarea.press("ControlOrMeta+End");
+    // Caret to the end (Ctrl/Cmd+End differ per platform; the editor
+    // opens with its text selected).
+    await textarea.evaluate((el: HTMLTextAreaElement) => el.setSelectionRange(el.value.length, el.value.length));
     await textarea.press("Shift+Enter");
     await textarea.pressSequentially("Fourth");
     await textarea.press("Enter");
