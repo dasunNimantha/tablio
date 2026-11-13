@@ -145,9 +145,47 @@
    The `> div > .tree-node` chain restricts the rule to the
    connection's body only; without it, hovering the overlay would
    paint every expanded descendant row in the subtree. */
-.tree-node:hover,
-.tree-conn-row:hover > div > .tree-node {
+.tree-node:hover {
   background: var(--tree-row-hover-bg);
+}
+
+/* Roving-tabindex tree: each row is a treeitem and shows its own ring. */
+.tree-item:focus {
+  outline: none;
+}
+.tree-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--tree-row-hover-bg);
+}
+.tree-item[aria-selected="true"] .tree-label {
+  color: var(--text-primary);
+}
+
+.tree-label--inactive {
+  color: var(--text-muted);
+}
+
+.tree-node.tree-error {
+  cursor: default;
+  font-size: 13px;
+}
+.tree-node.tree-error:hover {
+  background: transparent;
+}
+.tree-error-icon {
+  color: var(--error);
+  flex-shrink: 0;
+  margin-left: 22px;
+}
+.tree-node.tree-error .tree-error-text {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.tree-error-retry {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
 }
 
 /* Tables / views / functions only — keep folder & branch labels at base size */
@@ -211,12 +249,12 @@
   flex-shrink: 0;
   line-height: 1;
 }
-.tree-chip-partition-range { background: rgba(91, 155, 213, 0.18); color: #8ab8e0; }
-.tree-chip-partition-list  { background: rgba(196, 123, 176, 0.18); color: #d4a4c5; }
-.tree-chip-partition-hash  { background: rgba(232, 168, 56, 0.18); color: #e6c285; }
+.tree-chip-partition-range { background: rgba(91, 155, 213, 0.18); color: color-mix(in srgb, #8ab8e0 45%, var(--text-primary)); }
+.tree-chip-partition-list  { background: rgba(196, 123, 176, 0.18); color: color-mix(in srgb, #d4a4c5 45%, var(--text-primary)); }
+.tree-chip-partition-hash  { background: rgba(232, 168, 56, 0.18); color: color-mix(in srgb, #e6c285 45%, var(--text-primary)); }
 .tree-chip-default {
   background: rgba(232, 168, 56, 0.14);
-  color: #e6c285;
+  color: color-mix(in srgb, #e6c285 45%, var(--text-primary));
   text-transform: lowercase;
   letter-spacing: 0;
 }
@@ -299,7 +337,9 @@
   transition: opacity 0.15s;
 }
 
-.tree-node:hover .tree-action {
+.tree-node:hover .tree-action,
+.tree-node:focus-within .tree-action,
+.tree-item:focus-visible .tree-action {
   opacity: 1;
   pointer-events: auto;
 }
@@ -324,7 +364,8 @@
 }
 
 .tree-conn-row:hover .tree-conn-ssh-badge,
-.tree-root-header:hover .tree-conn-ssh-badge {
+.tree-conn-row:focus-within .tree-conn-ssh-badge,
+.tree-conn-row:focus-visible .tree-conn-ssh-badge {
   opacity: 0;
 }
 
@@ -353,7 +394,8 @@
 }
 
 .tree-conn-row:hover .tree-conn-actions,
-.tree-root-header:hover .tree-conn-actions {
+.tree-conn-row:focus-within .tree-conn-actions,
+.tree-conn-row:focus-visible .tree-conn-actions {
   opacity: 1;
   pointer-events: auto;
 }
@@ -611,7 +653,6 @@
   font-size: 12px;
   color: var(--text-muted);
   padding: 6px 30px;
-  opacity: 0.6;
   font-style: italic;
 }
 
@@ -711,7 +752,14 @@
   animation: fadeIn 0.1s ease;
 }
 
-.context-menu-submenu:hover > .context-menu-submenu-content {
+.context-menu button:focus-visible {
+  background: var(--accent-muted);
+  color: var(--accent);
+  outline: none;
+}
+
+.context-menu-submenu:hover > .context-menu-submenu-content,
+.context-menu-submenu-content.open {
   display: block;
 }
 
