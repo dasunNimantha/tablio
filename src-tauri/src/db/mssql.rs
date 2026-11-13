@@ -5,9 +5,12 @@ use std::time::Instant;
 use tiberius::numeric::Numeric;
 use tiberius::{AuthMethod, Client, ColumnData, Config, EncryptionLevel, Row};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard};
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
+use crate::db::cancel::{
+    cancelled_error, is_cancelled_error, run_abortable, unless_cancelled, CancellationToken,
+};
 use crate::db::DatabaseDriver;
 use crate::models::*;
 use crate::util::sql::{split_sql_statements, statement_is_select_like};
@@ -15,7 +18,40 @@ use crate::util::sql::{split_sql_statements, statement_is_select_like};
 type MssqlStream = tokio_util::compat::Compat<tokio::net::TcpStream>;
 
 pub struct MssqlDriver {
-    client: Mutex<Client<MssqlStream>>,
+    session: Mutex<MssqlSession>,
+    /// Kept so a session discarded by a console cancel can be reopened.
+    tcfg: Config,
+}
+
+/// The driver's one shared connection. `client` is `None` after a
+/// console cancel dropped it mid-protocol and reopening failed; the
+/// next [`MssqlDriver::lock`] reconnects.
+struct MssqlSession {
+    client: Option<MssqlClient>,
+    /// Identity of `client`'s server session, used to `KILL` it after
+    /// a cancel.
+    spid: Option<SessionIdentity>,
+}
+
+/// `@@SPID` alone is not enough to target a discarded session: once its
+/// socket is closed the server may hand the same id to an unrelated new
+/// connection. The login time pins the exact session.
+#[derive(Debug, Clone)]
+struct SessionIdentity {
+    spid: i16,
+    login_time: String,
+}
+
+impl SessionIdentity {
+    /// `KILL` the session only if the id still belongs to it.
+    fn kill_sql(&self) -> String {
+        format!(
+            "IF EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE session_id = {spid} \
+             AND CONVERT(varchar(33), login_time, 126) = '{lt}') EXEC('KILL {spid}')",
+            spid = self.spid,
+            lt = self.login_time.replace('\'', "''"),
+        )
+    }
 }
 
 fn bracket(ident: &str) -> String {
@@ -401,7 +437,128 @@ async fn client_use_database(c: &mut MssqlClient, database: &str) -> Result<()> 
     Ok(())
 }
 
+/// Open a connection and read its session identity.
+async fn open_client(tcfg: &Config) -> Result<(MssqlClient, Option<SessionIdentity>)> {
+    let tcp = TcpStream::connect(tcfg.get_addr())
+        .await
+        .map_err(|e| anyhow!("TCP connect failed: {}", e))?;
+    tcp.set_nodelay(true)
+        .map_err(|e| anyhow!("set_nodelay: {}", e))?;
+    let mut client = Client::connect(tcfg.clone(), tcp.compat_write())
+        .await
+        .map_err(|e| anyhow!("SQL Server login failed: {}", e))?;
+    let spid = match client
+        .simple_query(
+            "SELECT @@SPID, CONVERT(varchar(33), login_time, 126) \
+             FROM sys.dm_exec_sessions WHERE session_id = @@SPID",
+        )
+        .await
+    {
+        Ok(stream) => stream.into_row().await.ok().flatten().and_then(|r| {
+            Some(SessionIdentity {
+                spid: r.get::<i16, _>(0)?,
+                login_time: r.get::<&str, _>(1)?.to_string(),
+            })
+        }),
+        Err(_) => None,
+    };
+    Ok((client, spid))
+}
+
+/// Run a console script: see the matching comment in
+/// `pg_common::pg_execute_query`. The input is split on top-level
+/// semicolons, each leading statement runs on the same `Client`, and the
+/// exec path for the LAST statement is picked from its shape — so
+/// `CREATE VIEW v ...; SELECT * FROM v;` returns rows from the SELECT.
+/// The caller holds the lock for the `USE` and every statement so no
+/// other task can switch the database in between.
+async fn mssql_run_statements(
+    c: &mut MssqlClient,
+    database: &str,
+    statements: &[String],
+) -> Result<QueryResult> {
+    let start = Instant::now();
+    let Some((last, leading)) = statements.split_last() else {
+        return Err(anyhow!("Query is empty"));
+    };
+
+    client_use_database(c, database).await?;
+
+    for stmt in leading {
+        if MssqlDriver::statement_is_select_like(stmt) || MssqlDriver::is_ddl(stmt) {
+            // Even a leading SELECT could materialise a temp
+            // table via SELECT INTO. Run it as a batch so any
+            // side effects land, and discard the rowset.
+            client_batch(c, stmt).await?;
+        } else {
+            client_exec(c, stmt).await?;
+        }
+    }
+
+    if MssqlDriver::statement_is_select_like(last) {
+        let (columns, rows) = client_select(c, last).await?;
+        let elapsed = start.elapsed().as_millis() as u64;
+        let n = rows.len() as u64;
+        return Ok(QueryResult {
+            columns,
+            rows,
+            rows_affected: n,
+            execution_time_ms: elapsed,
+            is_select: true,
+        });
+    }
+
+    if MssqlDriver::is_ddl(last) {
+        client_batch(c, last).await?;
+        let elapsed = start.elapsed().as_millis() as u64;
+        return Ok(QueryResult {
+            columns: vec![],
+            rows: vec![],
+            rows_affected: 0,
+            execution_time_ms: elapsed,
+            is_select: false,
+        });
+    }
+
+    let rows_affected = client_exec(c, last).await?;
+    let elapsed = start.elapsed().as_millis() as u64;
+    Ok(QueryResult {
+        columns: vec![],
+        rows: vec![],
+        rows_affected,
+        execution_time_ms: elapsed,
+        is_select: false,
+    })
+}
+
+/// Upper bound for reopening the connection (and killing the old
+/// session) after a cancel. On timeout the next use reconnects.
+const MSSQL_RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl MssqlDriver {
+    /// Throw away the shared client after a cancel dropped it
+    /// mid-protocol, open a fresh one and `KILL` the old session.
+    async fn discard_session(&self) {
+        let mut session = self.session.lock().await;
+        let old_spid = session.spid.take();
+        // Dropping the client closes the socket.
+        drop(session.client.take());
+        let reopen = async {
+            let (mut client, spid) = open_client(&self.tcfg).await?;
+            if let Some(old) = old_spid {
+                // Fails harmlessly if the server already ended the session
+                // or the login lacks ALTER ANY CONNECTION.
+                let _ = client_batch(&mut client, &old.kill_sql()).await;
+            }
+            Ok::<_, anyhow::Error>((client, spid))
+        };
+        if let Ok(Ok((client, spid))) = tokio::time::timeout(MSSQL_RECONNECT_TIMEOUT, reopen).await
+        {
+            session.client = Some(client);
+            session.spid = spid;
+        }
+    }
+
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
         let mut tcfg = Config::new();
         tcfg.host(&config.host);
@@ -422,31 +579,42 @@ impl MssqlDriver {
             tcfg.encryption(EncryptionLevel::Off);
             tcfg.trust_cert();
         }
-        let tcp = TcpStream::connect(tcfg.get_addr())
-            .await
-            .map_err(|e| anyhow!("TCP connect failed: {}", e))?;
-        tcp.set_nodelay(true)
-            .map_err(|e| anyhow!("set_nodelay: {}", e))?;
-        let client = Client::connect(tcfg, tcp.compat_write())
-            .await
-            .map_err(|e| anyhow!("SQL Server login failed: {}", e))?;
+        let (client, spid) = open_client(&tcfg).await?;
         Ok(Self {
-            client: Mutex::new(client),
+            session: Mutex::new(MssqlSession {
+                client: Some(client),
+                spid,
+            }),
+            tcfg,
         })
     }
 
+    /// Lock the shared connection, reopening it first if a cancelled
+    /// console run discarded it.
+    async fn lock(&self) -> Result<MappedMutexGuard<'_, MssqlClient>> {
+        let mut session = self.session.lock().await;
+        if session.client.is_none() {
+            let (client, spid) = open_client(&self.tcfg).await?;
+            session.client = Some(client);
+            session.spid = spid;
+        }
+        Ok(MutexGuard::map(session, |s| {
+            s.client.as_mut().expect("client was just ensured")
+        }))
+    }
+
     async fn run_select(&self, sql: &str) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>)> {
-        let mut c = self.client.lock().await;
+        let mut c = self.lock().await?;
         client_select(&mut c, sql).await
     }
 
     async fn run_exec(&self, sql: &str) -> Result<u64> {
-        let mut c = self.client.lock().await;
+        let mut c = self.lock().await?;
         client_exec(&mut c, sql).await
     }
 
     async fn run_batch(&self, sql: &str) -> Result<()> {
-        let mut c = self.client.lock().await;
+        let mut c = self.lock().await?;
         client_batch(&mut c, sql).await
     }
 
@@ -460,13 +628,13 @@ impl MssqlDriver {
         database: &str,
         sql: &str,
     ) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>)> {
-        let mut c = self.client.lock().await;
+        let mut c = self.lock().await?;
         client_use_database(&mut c, database).await?;
         client_select(&mut c, sql).await
     }
 
     async fn run_batch_in(&self, database: &str, sql: &str) -> Result<()> {
-        let mut c = self.client.lock().await;
+        let mut c = self.lock().await?;
         client_use_database(&mut c, database).await?;
         client_batch(&mut c, sql).await
     }
@@ -1120,69 +1288,39 @@ impl DatabaseDriver for MssqlDriver {
     }
 
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult> {
-        let start = Instant::now();
+        self.execute_query_cancellable(database, sql, CancellationToken::new())
+            .await
+    }
 
-        // Multi-statement support: see the matching comment in
-        // `pg_common::pg_execute_query`. We split the input on
-        // top-level semicolons and run each leading statement on
-        // the same `Client`, then pick the exec path for the LAST
-        // statement based on its shape — so `CREATE VIEW v ...;
-        // SELECT * FROM v;` returns rows from the SELECT. The lock is
-        // held for the `USE` and every statement so no other task can
-        // switch the database in between.
+    /// tiberius cannot send a TDS attention (cancel) packet, so a cancel
+    /// drops the in-flight future. That leaves the shared client
+    /// mid-protocol, so it is discarded: closing the socket makes SQL
+    /// Server abort the batch and roll back the session's transaction,
+    /// and the old session is additionally `KILL`ed from the replacement
+    /// connection so server-side work stops even if the server has not
+    /// noticed the disconnect yet.
+    async fn execute_query_cancellable(
+        &self,
+        database: &str,
+        sql: &str,
+        cancel: CancellationToken,
+    ) -> Result<QueryResult> {
         let statements = split_sql_statements(sql);
-        let Some((last, leading)) = statements.split_last() else {
+        if statements.is_empty() {
             return Err(anyhow!("Query is empty"));
-        };
-
-        let mut c = self.client.lock().await;
-        client_use_database(&mut c, database).await?;
-
-        for stmt in leading {
-            if Self::statement_is_select_like(stmt) || Self::is_ddl(stmt) {
-                // Even a leading SELECT could materialise a temp
-                // table via SELECT INTO. Run it as a batch so any
-                // side effects land, and discard the rowset.
-                client_batch(&mut c, stmt).await?;
-            } else {
-                client_exec(&mut c, stmt).await?;
+        }
+        // Wait for the shared connection unless cancelled meanwhile.
+        let mut c = unless_cancelled(self.lock(), &cancel).await?;
+        let outcome =
+            run_abortable(mssql_run_statements(&mut c, database, &statements), &cancel).await;
+        drop(c);
+        if cancel.is_cancelled() {
+            if outcome.as_ref().err().is_some_and(is_cancelled_error) {
+                self.discard_session().await;
             }
+            return Err(cancelled_error());
         }
-
-        if Self::statement_is_select_like(last) {
-            let (columns, rows) = client_select(&mut c, last).await?;
-            let elapsed = start.elapsed().as_millis() as u64;
-            let n = rows.len() as u64;
-            return Ok(QueryResult {
-                columns,
-                rows,
-                rows_affected: n,
-                execution_time_ms: elapsed,
-                is_select: true,
-            });
-        }
-
-        if Self::is_ddl(last) {
-            client_batch(&mut c, last).await?;
-            let elapsed = start.elapsed().as_millis() as u64;
-            return Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                rows_affected: 0,
-                execution_time_ms: elapsed,
-                is_select: false,
-            });
-        }
-
-        let rows_affected = client_exec(&mut c, last).await?;
-        let elapsed = start.elapsed().as_millis() as u64;
-        Ok(QueryResult {
-            columns: vec![],
-            rows: vec![],
-            rows_affected,
-            execution_time_ms: elapsed,
-            is_select: false,
-        })
+        outcome
     }
 
     async fn explain_query(&self, database: &str, sql: &str) -> Result<ExplainResult> {
@@ -1191,7 +1329,7 @@ impl DatabaseDriver for MssqlDriver {
         // so ON / query / OFF are three batches on the same connection,
         // under one lock, and OFF runs even when the query fails.
         let result = {
-            let mut c = self.client.lock().await;
+            let mut c = self.lock().await?;
             let planned = async {
                 client_use_database(&mut c, database).await?;
                 client_batch(&mut c, "SET SHOWPLAN_XML ON").await?;
@@ -1257,7 +1395,7 @@ impl DatabaseDriver for MssqlDriver {
             }));
         }
         let batch = format!("SET PARSEONLY ON; {}; SET PARSEONLY OFF;", sql);
-        let mut client = self.client.lock().await;
+        let mut client = self.lock().await?;
         client_use_database(&mut client, database).await?;
         match client.execute(&*batch, &[]).await {
             Ok(_) => Ok(None),
@@ -1671,7 +1809,7 @@ impl DatabaseDriver for MssqlDriver {
 
         // All-or-nothing like the Postgres / MySQL drivers: one
         // transaction on the (shared) connection, held under one lock.
-        let mut c = self.client.lock().await;
+        let mut c = self.lock().await?;
         client_use_database(&mut c, database).await?;
         client_batch(&mut c, "BEGIN TRANSACTION").await?;
         let inserted = async {

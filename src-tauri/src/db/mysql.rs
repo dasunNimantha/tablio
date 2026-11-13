@@ -4,6 +4,7 @@ use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{MySqlPool, Row};
 use std::time::{Duration, Instant};
 
+use crate::db::cancel::CancellationToken;
 use crate::db::mysql_common::*;
 use crate::db::DatabaseDriver;
 use crate::models::*;
@@ -106,6 +107,14 @@ impl DatabaseDriver for MysqlDriver {
     }
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult> {
         my_execute_query(&self.pool, database, sql).await
+    }
+    async fn execute_query_cancellable(
+        &self,
+        database: &str,
+        sql: &str,
+        cancel: CancellationToken,
+    ) -> Result<QueryResult> {
+        my_execute_query_cancellable(&self.pool, database, sql, true, cancel).await
     }
     async fn get_ddl(
         &self,

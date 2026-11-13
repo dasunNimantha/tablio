@@ -17,11 +17,13 @@ use serde::Serialize;
 use serde_json::Value;
 use std::io::Cursor;
 
-/// Hard cap on the byte payload accepted from the renderer. Tauri's
-/// IPC bridge happily ferries 100MB+ blobs but holding multiple copies
-/// in memory while parsing the workbook is wasteful, and a malicious
-/// dialog mock could otherwise pin the parser thread.
-const MAX_BYTES: usize = 100 * 1024 * 1024;
+/// Hard cap on the byte payload accepted from the renderer. The bytes
+/// arrive as a JSON number array (~4x the file size) and the zipped XML
+/// inflates several times while parsing, so a large workbook costs a
+/// multiple of its size in memory. 25 MB of xlsx is already over a
+/// million cells. The import dialog checks the same limit
+/// (`MAX_XLSX_BYTES`) before reading the file.
+const MAX_BYTES: usize = 25 * 1024 * 1024;
 
 const PREVIEW_ROWS: usize = 50;
 

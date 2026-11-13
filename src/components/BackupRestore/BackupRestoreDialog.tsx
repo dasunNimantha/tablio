@@ -137,6 +137,7 @@ export function BackupRestoreDialog({
   onClose,
 }: Props) {
   const connections = useConnectionStore((s) => s.connections);
+  const invalidateSchema = useConnectionStore((s) => s.invalidateSchema);
   const connectionLabel = useMemo(
     () =>
       connections.find((c) => c.id === connectionId)?.name ||
@@ -277,6 +278,10 @@ export function BackupRestoreDialog({
     } catch (e) {
       setError(String(e));
     } finally {
+      // Reload the schema tree and open table views: a restore replaces
+      // objects (for SQLite the whole file), and a failed one may still
+      // have applied part of the dump.
+      invalidateSchema(connectionId);
       setLoading(false);
     }
   };
