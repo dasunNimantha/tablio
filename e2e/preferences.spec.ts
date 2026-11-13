@@ -225,10 +225,9 @@ test.describe("Preferences dialog (#62)", () => {
     await openTable(page, "users");
     // Target a real data cell by `col-id` so we skip AG Grid's
     // row-number gutter cell (which renders at a fixed smaller
-    // font and isn't covered by the editor-font setting).
-    const idCell = page
-      .locator('.ag-cell[col-id="id"], .ag-cell[col-id="ID"]')
-      .first();
+    // font and isn't covered by the editor-font setting). Data
+    // columns are addressed by position: `c0` is the id column.
+    const idCell = page.locator('.ag-cell[col-id="c0"]').first();
     await idCell.waitFor({ timeout: 8000 });
     await expect
       .poll(async () =>

@@ -40,14 +40,10 @@ pub fn pg_row_to_json_values(
         .collect()
 }
 
+/// Finite floats as numbers; NaN / ±Infinity as PostgreSQL spells them
+/// (`NaN`, `Infinity`, `-Infinity`), which it also accepts back.
 fn pg_float_to_json(v: f64) -> serde_json::Value {
-    if v.is_finite() {
-        serde_json::Number::from_f64(v)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::String(v.to_string()))
-    } else {
-        serde_json::Value::String(v.to_string())
-    }
+    crate::util::values::f64_to_json(v)
 }
 
 fn pg_cell_to_json(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
@@ -87,10 +83,11 @@ fn pg_cell_to_json(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
             .ok()
             .map(|v| Value::Number(v.into())),
         "INT8" => row.try_get::<i64, _>(i).ok().map(i64_to_json),
+        // Shortest f32 text (`0.1`, not the widened 0.10000000149011612).
         "FLOAT4" => row
             .try_get::<f32, _>(i)
             .ok()
-            .map(|v| pg_float_to_json(v as f64)),
+            .map(crate::util::values::f32_to_json),
         "FLOAT8" => row.try_get::<f64, _>(i).ok().map(pg_float_to_json),
         "NUMERIC" => match raw_text() {
             // Exact text, including values beyond rust_decimal's 28
@@ -101,7 +98,17 @@ fn pg_cell_to_json(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
                 .ok()
                 .map(|d| exact_numeric_text_to_json(&d.to_string())),
         },
-        "JSON" | "JSONB" => row.try_get::<serde_json::Value, _>(i).ok(),
+        // The server's JSON text as a string. Parsing it would round
+        // big numbers, reorder / dedupe `json` keys and turn JSON `null`
+        // into SQL NULL; saving would then write the altered document.
+        "JSON" | "JSONB" => raw.as_bytes().ok().map(|b| {
+            // Binary-format jsonb is a version byte (1) + the text.
+            let b = match (is_text, type_name.as_str(), b.first()) {
+                (false, "JSONB", Some(1)) => &b[1..],
+                _ => b,
+            };
+            Value::String(String::from_utf8_lossy(b).into_owned())
+        }),
         "TIMESTAMP" => row
             .try_get::<chrono::NaiveDateTime, _>(i)
             .ok()
@@ -2216,5 +2223,19 @@ mod tests {
         let deserialized: ValidationError = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.message, err.message);
         assert_eq!(deserialized.position, Some(15));
+    }
+}
+
+#[cfg(test)]
+mod value_tests {
+    #[test]
+    fn non_finite_floats_use_postgres_spelling() {
+        use serde_json::json;
+        assert_eq!(super::pg_float_to_json(f64::INFINITY), json!("Infinity"));
+        assert_eq!(
+            super::pg_float_to_json(f64::NEG_INFINITY),
+            json!("-Infinity")
+        );
+        assert_eq!(super::pg_float_to_json(f64::NAN), json!("NaN"));
     }
 }

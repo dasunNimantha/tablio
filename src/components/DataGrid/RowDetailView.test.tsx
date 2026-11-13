@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
-import { RowDetailView, prepareEditValue } from "./RowDetailView";
+import { RowDetailView, codePointLength, prepareEditValue } from "./RowDetailView";
 import type { ColumnInfo } from "../../lib/tauri";
 
 const col = (name: string, data_type: string, is_nullable = true, is_primary_key = false): ColumnInfo => ({
@@ -14,6 +14,30 @@ const col = (name: string, data_type: string, is_nullable = true, is_primary_key
 });
 
 describe("prepareEditValue", () => {
+  it("validates JSON but returns the typed text", () => {
+    expect(prepareEditValue('{ "a": 1 }', col("doc", "jsonb"))).toEqual({ ok: true, value: '{ "a": 1 }' });
+    expect(prepareEditValue("{a:1}", col("doc", "json")).ok).toBe(false);
+  });
+
+  it("treats typed null in a JSON column as the JSON null literal", () => {
+    expect(prepareEditValue("null", col("doc", "jsonb"))).toEqual({ ok: true, value: "null" });
+    expect(prepareEditValue("", col("doc", "jsonb"))).toEqual({ ok: true, value: null });
+    expect(prepareEditValue("null", col("n", "integer"))).toEqual({ ok: true, value: null });
+  });
+
+  it("leaves dates and timestamps to the database", () => {
+    for (const v of ["infinity", "-infinity", "epoch", "0044-03-15 BC", "275761-01-01", "2024-01-01 10:00:00+02"]) {
+      expect(prepareEditValue(v, col("at", "timestamptz"))).toEqual({ ok: true, value: v });
+    }
+    expect(prepareEditValue("infinity", col("d", "date"))).toEqual({ ok: true, value: "infinity" });
+  });
+
+  it("counts varchar length in characters, not UTF-16 units", () => {
+    expect(codePointLength("😀😀")).toBe(2);
+    expect(prepareEditValue("😀😀😀😀", col("e", "varchar(4)"))).toEqual({ ok: true, value: "😀😀😀😀" });
+    expect(prepareEditValue("😀😀😀😀😀", col("e", "varchar(4)")).ok).toBe(false);
+  });
+
   it("stores an empty string for nullable text columns", () => {
     expect(prepareEditValue("", col("note", "text"))).toEqual({ ok: true, value: "" });
   });
@@ -40,6 +64,13 @@ describe("prepareEditValue", () => {
       .toEqual({ ok: true, value: "9223372036854775807" });
     expect(prepareEditValue("1234567890123456789.0123456789", col("amt", "numeric(38,10)")))
       .toEqual({ ok: true, value: "1234567890123456789.0123456789" });
+  });
+
+  it("sends JSON as the validated text, not a re-serialised value", () => {
+    expect(prepareEditValue('{"big":123456789012345678901234567890}', col("j", "jsonb")))
+      .toEqual({ ok: true, value: '{"big":123456789012345678901234567890}' });
+    expect(prepareEditValue('"str"', col("j", "json"))).toEqual({ ok: true, value: '"str"' });
+    expect(prepareEditValue("{bad", col("j", "json")).ok).toBe(false);
   });
 
   it("rejects malformed numbers instead of truncating them", () => {
@@ -98,5 +129,28 @@ describe("RowDetailView editing", () => {
     fireEvent.keyDown(ta, { key: "Enter" });
     fireEvent.click(screen.getByText(/Apply 1 edit/));
     expect(onCellChange).toHaveBeenCalledWith(1, "");
+  });
+});
+
+describe("RowDetailView read-only", () => {
+  const columns = [col("id", "integer", false, true), col("note", "text"), col("id", "integer")];
+
+  it("never opens an editor and says it's read-only", () => {
+    const onCellChange = vi.fn();
+    render(
+      <RowDetailView columns={columns} row={[1, "x", 2]} rowIndex={0} onClose={() => {}} onCellChange={onCellChange} readOnly />,
+    );
+    expect(screen.getByText("Read-only")).toBeTruthy();
+    const values = document.querySelectorAll(".json-value-inline");
+    fireEvent.doubleClick(values[1]);
+    expect(document.querySelector("textarea")).toBeNull();
+    expect(onCellChange).not.toHaveBeenCalled();
+  });
+
+  it("shows every column of a row with duplicate names", () => {
+    render(
+      <RowDetailView columns={columns} row={[1, "x", 2]} rowIndex={0} onClose={() => {}} onCellChange={() => {}} readOnly />,
+    );
+    expect(document.querySelectorAll(".json-row")).toHaveLength(3);
   });
 });

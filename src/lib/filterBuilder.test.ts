@@ -175,6 +175,34 @@ describe("buildWhereClause", () => {
     expect(result).toBe(`("id" = 1 OR "id" = 2) AND "name" = 'x'`);
   });
 
+  it("groups a OR b AND c strictly left to right", () => {
+    // The first condition's join is hidden in the UI (defaults to AND)
+    // and must not affect grouping.
+    const result = buildWhereClause(
+      [
+        cond({ column: "id", operator: "=", value: "1", join: "AND" }),
+        cond({ column: "id", operator: "=", value: "2", join: "OR" }),
+        cond({ column: "name", operator: "=", value: "x", join: "AND" }),
+      ],
+      columns
+    );
+    expect(result).toBe(`("id" = 1 OR "id" = 2) AND "name" = 'x'`);
+  });
+
+  it("nests every change of join", () => {
+    const result = buildWhereClause(
+      [
+        cond({ column: "id", operator: "=", value: "1" }),
+        cond({ column: "id", operator: "=", value: "2", join: "OR" }),
+        cond({ column: "name", operator: "=", value: "x", join: "AND" }),
+        cond({ column: "name", operator: "=", value: "y", join: "AND" }),
+        cond({ column: "id", operator: "=", value: "3", join: "OR" }),
+      ],
+      columns
+    );
+    expect(result).toBe(`(("id" = 1 OR "id" = 2) AND "name" = 'x' AND "name" = 'y') OR "id" = 3`);
+  });
+
   it("filters out invalid conditions", () => {
     expect(
       buildWhereClause(

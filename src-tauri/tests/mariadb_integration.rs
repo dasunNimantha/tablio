@@ -2426,6 +2426,258 @@ async fn mariadb_console_cancel_before_start_is_reported() {
 }
 
 // ---------------------------------------------------------------------------
+// Value decoding and write-back
+// ---------------------------------------------------------------------------
+
+async fn mariadb_exec(driver: &impl DatabaseDriver, db: &str, sql: &str) -> QueryResult {
+    driver
+        .execute_query(db, sql)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+}
+
+fn mariadb_update(
+    db: &str,
+    tbl: &str,
+    pk: Vec<(String, serde_json::Value)>,
+    col: &str,
+    new: serde_json::Value,
+) -> DataChanges {
+    DataChanges {
+        connection_id: "test".into(),
+        database: db.into(),
+        schema: db.into(),
+        table: tbl.into(),
+        updates: vec![CellChange {
+            row_index: 0,
+            column_name: col.into(),
+            old_value: serde_json::Value::Null,
+            new_value: new,
+            primary_key_values: pk,
+        }],
+        inserts: vec![],
+        deletes: vec![],
+    }
+}
+
+#[tokio::test]
+async fn mariadb_bin_collated_text_is_text_and_editable() {
+    use serde_json::json;
+    let (driver, db) = mariadb_driver!();
+    let tbl = unique_table("bincoll");
+    mariadb_exec(
+        &driver,
+        &db,
+        &format!(
+            "CREATE TABLE `{tbl}` (k VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY, \
+             s TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin)"
+        ),
+    )
+    .await;
+    mariadb_exec(
+        &driver,
+        &db,
+        &format!("INSERT INTO `{tbl}` VALUES ('Abc', 'x')"),
+    )
+    .await;
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0], vec![json!("Abc"), json!("x")]);
+
+    driver
+        .apply_changes(&mariadb_update(
+            &db,
+            &tbl,
+            vec![("k".into(), json!("Abc"))],
+            "s",
+            json!("y"),
+        ))
+        .await
+        .unwrap();
+    let r = mariadb_exec(
+        &driver,
+        &db,
+        &format!("SELECT s, 'x' COLLATE utf8mb4_bin FROM `{tbl}`"),
+    )
+    .await;
+    assert_eq!(r.rows[0], vec![json!("y"), json!("x")]);
+    let r = mariadb_exec(&driver, &db, &format!("SHOW COLUMNS FROM `{tbl}`")).await;
+    assert_eq!(r.rows[0][0], json!("k"));
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mariadb_binary_values_write_back_as_bytes() {
+    use serde_json::json;
+    let (driver, db) = mariadb_driver!();
+    let tbl = unique_table("binwb");
+    let id = "0x00112233445566778899aabbccddeeff";
+    mariadb_exec(
+        &driver,
+        &db,
+        &format!("CREATE TABLE `{tbl}` (id BINARY(16) PRIMARY KEY, b VARBINARY(10), bl BLOB)"),
+    )
+    .await;
+    mariadb_exec(
+        &driver,
+        &db,
+        &format!("INSERT INTO `{tbl}` VALUES ({id}, 0x00ff80, 0x01)"),
+    )
+    .await;
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        data.rows[0],
+        vec![json!(id), json!("0x00ff80"), json!("0x01")]
+    );
+
+    // Edit through the binary primary key.
+    driver
+        .apply_changes(&mariadb_update(
+            &db,
+            &tbl,
+            vec![("id".into(), json!(id))],
+            "b",
+            json!("0xdeadbeef"),
+        ))
+        .await
+        .unwrap();
+    // Text typed into a binary column is stored as its bytes.
+    driver
+        .apply_changes(&mariadb_update(
+            &db,
+            &tbl,
+            vec![("id".into(), json!(id))],
+            "bl",
+            json!("hi"),
+        ))
+        .await
+        .unwrap();
+    let r = mariadb_exec(
+        &driver,
+        &db,
+        &format!("SELECT HEX(b), HEX(bl) FROM `{tbl}`"),
+    )
+    .await;
+    assert_eq!(r.rows[0], vec![json!("DEADBEEF"), json!("6869")]);
+
+    let mut del = mariadb_update(&db, &tbl, vec![], "b", json!(null));
+    del.updates.clear();
+    del.deletes.push(DeleteRow {
+        primary_key_values: vec![("id".into(), json!(id))],
+    });
+    driver.apply_changes(&del).await.unwrap();
+    let r = mariadb_exec(&driver, &db, &format!("SELECT COUNT(*) FROM `{tbl}`")).await;
+    assert_eq!(r.rows[0][0], json!(0));
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mariadb_json_is_sent_as_server_text() {
+    use serde_json::json;
+    let (driver, db) = mariadb_driver!();
+    let tbl = unique_table("jsontext");
+    mariadb_exec(
+        &driver,
+        &db,
+        &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY, j JSON)"),
+    )
+    .await;
+    mariadb_exec(
+        &driver,
+        &db,
+        &format!(
+            "INSERT INTO `{tbl}` VALUES (1, '{{\"b\":1,\"aa\":2,\"big\":12345678901234567890}}'), \
+             (2, 'null'), (3, '\"str\"'), (4, NULL)"
+        ),
+    )
+    .await;
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    let text = mariadb_exec(
+        &driver,
+        &db,
+        &format!("SELECT CAST(j AS CHAR) FROM `{tbl}` ORDER BY id"),
+    )
+    .await;
+    for (i, row) in data.rows.iter().enumerate() {
+        assert_eq!(row[1], text.rows[i][0], "row {}", i + 1);
+    }
+    assert!(data.rows[0][1]
+        .as_str()
+        .unwrap()
+        .contains("12345678901234567890"));
+    assert_eq!(data.rows[1][1], json!("null"));
+    assert_eq!(data.rows[2][1], json!("\"str\""));
+    assert_eq!(data.rows[3][1], json!(null));
+
+    // The edited text is written as JSON: a JSON string scalar and a
+    // JSON null (not SQL NULL).
+    driver
+        .apply_changes(&mariadb_update(
+            &db,
+            &tbl,
+            vec![("id".into(), json!(2))],
+            "j",
+            json!("\"hello\""),
+        ))
+        .await
+        .unwrap();
+    driver
+        .apply_changes(&mariadb_update(
+            &db,
+            &tbl,
+            vec![("id".into(), json!(3))],
+            "j",
+            json!("null"),
+        ))
+        .await
+        .unwrap();
+    let r = mariadb_exec(
+        &driver,
+        &db,
+        &format!("SELECT JSON_TYPE(j), j IS NULL FROM `{tbl}` WHERE id IN (2, 3) ORDER BY id"),
+    )
+    .await;
+    assert_eq!(r.rows[0][0], json!("STRING"));
+    assert_eq!(r.rows[1][0], json!("NULL"));
+    assert_eq!(r.rows[1][1], json!(0));
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mariadb_tinyint1_decodes_as_integer() {
+    use serde_json::json;
+    let (driver, db) = mariadb_driver!();
+    let tbl = unique_table("tiny1");
+    mariadb_exec(
+        &driver,
+        &db,
+        &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY, f TINYINT(1))"),
+    )
+    .await;
+    mariadb_exec(
+        &driver,
+        &db,
+        &format!("INSERT INTO `{tbl}` VALUES (1, 5), (2, 1), (3, 0)"),
+    )
+    .await;
+    let data = driver
+        .fetch_rows(&db, &db, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    let got: Vec<_> = data.rows.iter().map(|r| r[1].clone()).collect();
+    assert_eq!(got, vec![json!(5), json!(1), json!(0)]);
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
 // Console: session state, result shapes, comments
 // ---------------------------------------------------------------------------
 

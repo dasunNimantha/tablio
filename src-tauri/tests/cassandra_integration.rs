@@ -1460,3 +1460,192 @@ async fn cassandra_console_shows_rows_by_result_not_keyword() {
 
     teardown_keyspace(&driver, &ks).await;
 }
+
+// ---------------------------------------------------------------------------
+// Value decoding and write-back
+// ---------------------------------------------------------------------------
+
+async fn cql_exec(driver: &CassandraDriver, cql: &str) -> QueryResult {
+    driver
+        .execute_query("", cql)
+        .await
+        .unwrap_or_else(|e| panic!("{cql}: {e}"))
+}
+
+#[tokio::test]
+async fn cassandra_typed_values_display_and_round_trip() {
+    use serde_json::json;
+    let driver = create_driver().await;
+    let ks = setup_keyspace(&driver).await;
+    let tbl = unique_table("types");
+    cql_exec(
+        &driver,
+        &format!("CREATE TYPE {ks}.addr (street text, zip int, codes frozen<map<int, text>>)"),
+    )
+    .await;
+    cql_exec(
+        &driver,
+        &format!(
+            "CREATE TABLE {ks}.{tbl} (id uuid, tu timeuuid, s set<int>, l list<text>, \
+             m map<int, text>, tp frozen<tuple<int, text>>, a frozen<addr>, du duration, \
+             t time, dt date, ts timestamp, b blob, f float, dbl double, \
+             PRIMARY KEY (id, tu))"
+        ),
+    )
+    .await;
+    let id = "6f1c0f3e-3b8a-4e4f-9a51-0c9d2b7a1e11";
+    let tu = "e7a5f0c0-8a3b-11ef-8000-000000000001";
+    cql_exec(
+        &driver,
+        &format!(
+            "INSERT INTO {ks}.{tbl} (id, tu, s, l, m, tp, a, du, t, dt, ts, b, f, dbl) VALUES \
+             ({id}, {tu}, {{3, 1}}, ['x', 'y'], {{1: 'one', 2: 'two'}}, (7, 'seven'), \
+             {{street: 'Main', zip: 12345, codes: {{9: 'nine'}}}}, 1mo2d3h4m5s6ms, \
+             '08:12:54.123', '2024-02-29', '2024-02-29 12:34:56.789+0000', 0x00ff80, 0.1, NaN)"
+        ),
+    )
+    .await;
+    let data = driver
+        .fetch_rows(&ks, &ks, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    let names: Vec<String> = data.columns.iter().map(|c| c.name.clone()).collect();
+    let get = |row: &Vec<serde_json::Value>, n: &str| {
+        row[names.iter().position(|c| c == n).unwrap()].clone()
+    };
+    let row = &data.rows[0];
+    assert_eq!(get(row, "id"), json!(id));
+    assert_eq!(get(row, "tu"), json!(tu));
+    assert_eq!(get(row, "s"), json!([1, 3]));
+    assert_eq!(get(row, "l"), json!(["x", "y"]));
+    assert_eq!(get(row, "m"), json!({"1": "one", "2": "two"}));
+    assert_eq!(get(row, "tp"), json!([7, "seven"]));
+    assert_eq!(
+        get(row, "a"),
+        json!({"street": "Main", "zip": 12345, "codes": {"9": "nine"}})
+    );
+    assert_eq!(get(row, "du"), json!("1mo2d3h4m5s6ms"));
+    assert_eq!(get(row, "t"), json!("08:12:54.123"));
+    assert_eq!(get(row, "dt"), json!("2024-02-29"));
+    assert_eq!(get(row, "ts"), json!("2024-02-29 12:34:56.789Z"));
+    assert_eq!(get(row, "b"), json!("0x00ff80"));
+    assert_eq!(get(row, "f"), json!(0.1));
+    assert_eq!(get(row, "dbl"), json!("NaN"));
+
+    // Saving every displayed value through the uuid / timeuuid key
+    // writes the same row back.
+    let key = vec![("id".to_string(), json!(id)), ("tu".to_string(), json!(tu))];
+    let editable = [
+        "s", "l", "m", "tp", "a", "du", "t", "dt", "ts", "b", "f", "dbl",
+    ];
+    let updates: Vec<CellChange> = editable
+        .iter()
+        .map(|c| cell(key.clone(), c, get(row, c)))
+        .collect();
+    driver
+        .apply_changes(&row_changes(&ks, &tbl, updates, vec![]))
+        .await
+        .unwrap();
+    let again = driver
+        .fetch_rows(&ks, &ks, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(&again.rows[0], row);
+
+    // Edited text forms (what the cell editor sends) are accepted too.
+    let edits = vec![
+        cell(key.clone(), "s", json!("[5, 4]")),
+        cell(key.clone(), "m", json!("{\"3\": \"three\"}")),
+        cell(key.clone(), "tp", json!("[8, \"eight\"]")),
+        cell(
+            key.clone(),
+            "a",
+            json!("{\"street\": \"Side\", \"zip\": 1}"),
+        ),
+        cell(key.clone(), "du", json!("-2h")),
+        cell(key.clone(), "dbl", json!("-Infinity")),
+        cell(key.clone(), "f", json!("Infinity")),
+        cell(key.clone(), "b", json!("0xdead")),
+    ];
+    driver
+        .apply_changes(&row_changes(&ks, &tbl, edits, vec![]))
+        .await
+        .unwrap();
+    let edited = driver
+        .fetch_rows(&ks, &ks, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    let row = &edited.rows[0];
+    assert_eq!(get(row, "s"), json!([4, 5]));
+    assert_eq!(get(row, "m"), json!({"3": "three"}));
+    assert_eq!(get(row, "tp"), json!([8, "eight"]));
+    assert_eq!(
+        get(row, "a"),
+        json!({"street": "Side", "zip": 1, "codes": null})
+    );
+    assert_eq!(get(row, "du"), json!("-2h"));
+    assert_eq!(get(row, "dbl"), json!("-Infinity"));
+    assert_eq!(get(row, "f"), json!("Infinity"));
+    assert_eq!(get(row, "b"), json!("0xdead"));
+
+    // Delete by the uuid key.
+    driver
+        .apply_changes(&row_changes(
+            &ks,
+            &tbl,
+            vec![],
+            vec![DeleteRow {
+                primary_key_values: key,
+            }],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(row_count(&driver, &ks, &tbl).await, 0);
+    teardown_keyspace(&driver, &ks).await;
+}
+
+#[tokio::test]
+async fn cassandra_counter_edits_apply_the_difference() {
+    use serde_json::json;
+    let driver = create_driver().await;
+    let ks = setup_keyspace(&driver).await;
+    let tbl = unique_table("ctr");
+    cql_exec(
+        &driver,
+        &format!("CREATE TABLE {ks}.{tbl} (id int PRIMARY KEY, hits counter, misses counter)"),
+    )
+    .await;
+    cql_exec(
+        &driver,
+        &format!("UPDATE {ks}.{tbl} SET hits = hits + 5, misses = misses + 1 WHERE id = 1"),
+    )
+    .await;
+    let edit = |col: &str, old: i64, new: i64| CellChange {
+        row_index: 0,
+        primary_key_values: vec![("id".into(), json!(1))],
+        column_name: col.into(),
+        old_value: json!(old),
+        new_value: json!(new),
+    };
+    let mut changes = row_changes(
+        &ks,
+        &tbl,
+        vec![edit("hits", 5, 12), edit("misses", 1, 0)],
+        vec![],
+    );
+    changes.inserts.push(NewRow {
+        values: vec![("id".into(), json!(2)), ("hits".into(), json!(3))],
+    });
+    driver.apply_changes(&changes).await.unwrap();
+    let r = cql_exec(&driver, &format!("SELECT id, hits, misses FROM {ks}.{tbl}")).await;
+    let mut rows = r.rows.clone();
+    rows.sort_by_key(|r| r[0].as_i64());
+    assert_eq!(
+        rows,
+        vec![
+            vec![json!(1), json!(12), json!(0)],
+            vec![json!(2), json!(3), json!(null)]
+        ]
+    );
+    teardown_keyspace(&driver, &ks).await;
+}

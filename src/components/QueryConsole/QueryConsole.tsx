@@ -13,7 +13,19 @@ import { useToastStore } from "../../stores/toastStore";
 import { useTabStore } from "../../stores/tabStore";
 import { useUserSettingsStore } from "../../stores/userSettingsStore";
 import { useReportTabDirty } from "../../hooks/useTabDirty";
+import { useConnectionStore } from "../../stores/connectionStore";
 import { readZoomFactor } from "../../lib/zoom";
+import { formatterLanguage } from "../../lib/sqlDialect";
+import { ConfirmDialog } from "../ConfirmDialog";
+import {
+  DEFAULT_SQL,
+  addHistoryEntry,
+  hasUnsavedSql,
+  needsReplaceConfirm,
+  sortHistoryForDisplay,
+  toggleHistoryPin,
+  type HistoryEntry,
+} from "./queryHistory";
 import "./QueryConsole.css";
 
 interface Props {
@@ -39,14 +51,6 @@ interface LoadedSavedQuery {
   name: string;
   sql: string;
   created_at: number;
-}
-
-interface HistoryEntry {
-  sql: string;
-  timestamp: number;
-  executionTimeMs: number;
-  rowCount: number;
-  error?: string;
 }
 
 type ResultMode = "results" | "explain" | "chart";
@@ -231,7 +235,6 @@ function ensureCompletionProviders(monaco: Monaco) {
   } as any);
 }
 
-const DEFAULT_SQL = "SELECT 1;";
 const SQL_STORAGE_PREFIX = "tablio-query-sql:";
 
 /** Editor text is kept per tab for the session so a reload restores it. */
@@ -283,7 +286,11 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [saveQueryName, setSaveQueryName] = useState("");
   const [editorHeight, setEditorHeight] = useState(45);
-  const [pinnedQueries, setPinnedQueries] = useState<Set<number>>(() => new Set());
+  const [savingQuery, setSavingQuery] = useState(false);
+  const savingQueryRef = useRef(false);
+  /** Load that would replace unsaved SQL, waiting for confirmation. */
+  const [pendingReplace, setPendingReplace] = useState<{ what: string; apply: () => void } | null>(null);
+  const dbType = useConnectionStore((s) => s.connections.find((c) => c.id === connectionId)?.db_type);
   const [suggestionsEnabled, setSuggestionsEnabled] = useState(true);
   const suggestionsEnabledRef = useRef(true);
   const [monacoTheme, setMonacoTheme] = useState<string>(() =>
@@ -294,6 +301,8 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<Monaco | null>(null);
   const consoleRef = useRef<HTMLDivElement>(null);
+  const editorWrapperRef = useRef<HTMLDivElement>(null);
+  const formatRef = useRef<() => void>(() => {});
   const draggingRef = useRef(false);
   const themeVersionRef = useRef(0);
   const executeRef = useRef<() => void>(() => {});
@@ -445,6 +454,14 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       keybindings: [2048 | 49],
       run: () => { saveOrUpdateRef.current(); },
     });
+    // 2048 = CtrlCmd, 1024 = Shift, 36 = KeyCode.KeyF → Ctrl/Cmd+Shift+F.
+    editor.addAction({
+      id: "format-sql",
+      label: "Format SQL",
+      keybindings: [2048 | 1024 | 36],
+      run: () => { formatRef.current(); },
+    });
+    layoutEditor();
   }, []);
 
   useEffect(() => {
@@ -664,15 +681,10 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       } else {
         setSourceTable(null);
       }
-      setHistory((prev) => {
-        const trimmed = queryToRun.trim();
-        const filtered = prev.filter((h) => h.sql.trim() !== trimmed);
-        return [{
-          sql: queryToRun, timestamp: Date.now(),
-          executionTimeMs: res.execution_time_ms, rowCount: res.rows.length,
-        }, ...filtered.slice(0, 99)];
-      });
-      setPinnedQueries(new Set());
+      setHistory((prev) => addHistoryEntry(prev, {
+        sql: queryToRun, timestamp: Date.now(),
+        executionTimeMs: res.execution_time_ms, rowCount: res.is_select ? res.rows.length : res.rows_affected,
+      }));
     } catch (e) {
       if (!isCurrent()) return;
       if (isCancellation(e)) {
@@ -685,15 +697,10 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       setError(errMsg);
       setResult(null);
       setSourceTable(null);
-      setHistory((prev) => {
-        const trimmed = queryToRun.trim();
-        const filtered = prev.filter((h) => h.sql.trim() !== trimmed);
-        return [{
-          sql: queryToRun, timestamp: Date.now(),
-          executionTimeMs: 0, rowCount: 0, error: errMsg,
-        }, ...filtered.slice(0, 99)];
-      });
-      setPinnedQueries(new Set());
+      setHistory((prev) => addHistoryEntry(prev, {
+        sql: queryToRun, timestamp: Date.now(),
+        executionTimeMs: 0, rowCount: 0, error: errMsg,
+      }));
     } finally {
       endRequest(reqId);
     }
@@ -725,9 +732,28 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
 
   useEffect(() => { executeRef.current = executeCurrentStatement; }, [executeCurrentStatement]);
 
+  // Monaco is laid out from the wrapper's own client size instead of
+  // `automaticLayout`: under the app's CSS zoom on Chromium / WebView2
+  // Monaco's self-measurement comes out wider than the wrapper, so the
+  // editor overflowed (the wrapper scrolled and the toolbar got pushed).
+  const layoutEditor = useCallback(() => {
+    const el = editorWrapperRef.current;
+    const editor = editorRef.current;
+    if (!el || !editor) return;
+    editor.layout({ width: el.clientWidth, height: el.clientHeight });
+  }, []);
+
   useEffect(() => {
-    if (editorRef.current) requestAnimationFrame(() => editorRef.current?.layout());
-  }, [error, result]);
+    const el = editorWrapperRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => layoutEditor());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [layoutEditor]);
+
+  useEffect(() => {
+    requestAnimationFrame(() => layoutEditor());
+  }, [error, result, layoutEditor]);
 
   const explainCurrentStatement = useCallback(async () => {
     const queryToRun = getQueryText();
@@ -775,10 +801,15 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
   }, [result, addToast]);
 
   const handleFormatSql = useCallback(() => {
+    const text = editorRef.current?.getModel()?.getValue() ?? sql;
+    if (!text.trim()) return;
     try {
-      setSql(formatSQL(sql, { language: "postgresql", tabWidth: 2 }));
-    } catch {}
-  }, [sql]);
+      setSql(formatSQL(text, { language: formatterLanguage(dbType), tabWidth: 2 }));
+    } catch (e) {
+      addToast(`Couldn't format SQL: ${e instanceof Error ? e.message : String(e)}`, "error");
+    }
+  }, [sql, dbType, addToast]);
+  useEffect(() => { formatRef.current = handleFormatSql; }, [handleFormatSql]);
 
   /**
    * "Dirty" = the editor's text has diverged from the snapshot of
@@ -795,7 +826,18 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     [loadedSavedQuery, sql],
   );
 
-  useReportTabDirty(tabId, "query", isDirty);
+  // Closing the tab asks first when typed or edited SQL would be lost.
+  const unsavedSql = hasUnsavedSql(sql, loadedSavedQuery?.sql ?? null);
+  useReportTabDirty(tabId, "query", unsavedSql);
+
+  /** Replace the editor text, asking first when unsaved SQL would be lost. */
+  const confirmReplace = useCallback((incoming: string, what: string, apply: () => void) => {
+    if (needsReplaceConfirm(sql, loadedSavedQuery?.sql ?? null, incoming, history.map((h) => h.sql))) {
+      setPendingReplace({ what, apply });
+    } else {
+      apply();
+    }
+  }, [sql, loadedSavedQuery, history]);
 
   // Session persistence of the editor text, keyed by tab.
   useEffect(() => {
@@ -817,9 +859,19 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     setTimeout(() => saveInputRef.current?.focus(), 50);
   }, []);
 
+  const closeSaveDialog = useCallback(() => {
+    setShowSaveDialog(false);
+    // Back to the editor instead of leaving focus on <body>.
+    requestAnimationFrame(() => editorRef.current?.focus());
+  }, []);
+
   const handleSaveQueryConfirm = useCallback(async () => {
     const name = saveQueryName.trim();
-    if (!name) return;
+    // One save per dialog: Enter pressed twice (or Enter + click) used
+    // to store two copies before the dialog closed.
+    if (!name || savingQueryRef.current) return;
+    savingQueryRef.current = true;
+    setSavingQuery(true);
     // Brand-new save (no loaded saved query). Mint a fresh id, but
     // immediately adopt it as `loadedSavedQuery` so the next edit
     // already shows the "Save changes" affordance instead of
@@ -838,9 +890,12 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       addToast(`Query "${name}" saved`);
     } catch (e) {
       setError(String(e));
+    } finally {
+      savingQueryRef.current = false;
+      setSavingQuery(false);
     }
-    setShowSaveDialog(false);
-  }, [saveQueryName, sql, connectionId, database, tabId, setTabTitle, addToast]);
+    closeSaveDialog();
+  }, [saveQueryName, sql, connectionId, database, tabId, setTabTitle, addToast, closeSaveDialog]);
 
   /**
    * In-place update of the currently-loaded saved query. No dialog —
@@ -897,16 +952,18 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
   }, [handleSaveOrUpdate]);
 
   const handleSelectSavedQuery = useCallback((query: SavedQuery) => {
-    setSql(query.sql);
-    setLoadedSavedQuery({
-      id: query.id,
-      name: query.name,
-      sql: query.sql,
-      created_at: query.created_at,
-    });
-    setTabTitle(tabId, query.name);
     setShowSavedQueries(false);
-  }, [tabId, setTabTitle]);
+    confirmReplace(query.sql, `the saved query "${query.name}"`, () => {
+      setSql(query.sql);
+      setLoadedSavedQuery({
+        id: query.id,
+        name: query.name,
+        sql: query.sql,
+        created_at: query.created_at,
+      });
+      setTabTitle(tabId, query.name);
+    });
+  }, [tabId, setTabTitle, confirmReplace]);
 
   // ── Resizable split ──
 
@@ -941,12 +998,8 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
 
   // ── History ──
 
-  const handleTogglePin = useCallback((idx: number) => {
-    setPinnedQueries((prev) => {
-      const next = new Set(prev);
-      next.has(idx) ? next.delete(idx) : next.add(idx);
-      return next;
-    });
+  const handleTogglePin = useCallback((id: string) => {
+    setHistory((prev) => toggleHistoryPin(prev, id));
   }, []);
 
   const handleCopyHistorySql = useCallback((entry: HistoryEntry) => {
@@ -954,19 +1007,40 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     addToast("Query copied to clipboard");
   }, [addToast]);
 
-  const sortedHistory = useMemo(() => {
-    const indexed = history.map((entry, idx) => ({ entry, idx }));
-    return indexed.sort((a, b) => {
-      const ap = pinnedQueries.has(a.idx) ? 0 : 1;
-      const bp = pinnedQueries.has(b.idx) ? 0 : 1;
-      return ap - bp || a.idx - b.idx;
-    });
-  }, [history, pinnedQueries]);
+  const sortedHistory = useMemo(() => sortHistoryForDisplay(history), [history]);
 
   const handleHistorySelect = useCallback((entry: HistoryEntry) => {
-    setSql(entry.sql);
     setShowHistory(false);
-  }, []);
+    confirmReplace(entry.sql, "this history entry", () => setSql(entry.sql));
+  }, [confirmReplace]);
+
+  // Esc stops the running query from anywhere in this console (the
+  // editor has its own binding), except where Esc already means
+  // something: text inputs, dialogs, menus.
+  useEffect(() => {
+    if (!isActiveTab) return;
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const root = consoleRef.current;
+      if (!root || !target) return;
+      const inConsole = target === document.body || root.contains(target);
+      if (!inConsole) return;
+      if (root.querySelector(".query-editor-wrapper")?.contains(target)) return;
+      const typing = target.tagName === "INPUT" || target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" || target.isContentEditable;
+      if (e.key === "Escape") {
+        if (!runningExecIdRef.current || typing) return;
+        if (target.closest("[role='dialog'], .dialog-overlay, .context-menu, .row-detail-panel")) return;
+        e.preventDefault();
+        cancelRef.current();
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "f" && !typing) {
+        e.preventDefault();
+        formatRef.current();
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [isActiveTab]);
 
   const toggleResultMode = useCallback(() => {
     setResultMode((m) => m === "chart" ? "results" : "chart");
@@ -1050,6 +1124,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
           </button>
         </div>
         <div className="query-editor-wrapper">
+          <div className="query-editor-zoom" ref={editorWrapperRef}>
           <Editor
             height="100%"
             defaultLanguage="sql"
@@ -1066,7 +1141,8 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
               lineNumbers: "on",
               scrollBeyondLastLine: false,
               wordWrap: "on",
-              automaticLayout: true,
+              // Laid out by our ResizeObserver (see `layoutEditor`).
+              automaticLayout: false,
               tabSize: 2,
               padding: { top: 8 },
               fixedOverflowWidgets: true,
@@ -1078,6 +1154,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
               inlineSuggest: { enabled: true, showToolbar: "onHover" },
             }}
           />
+          </div>
         </div>
       </div>
 
@@ -1086,7 +1163,22 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       <div className="query-results-section">
         {executing && <div className="query-loading-bar" />}
         {error && (
-          <div className="query-error"><span>{error}</span></div>
+          <div className="query-error" role="alert">
+            <span>{error}</span>
+            <button
+              className="btn-icon query-error-copy"
+              title="Copy error"
+              aria-label="Copy error"
+              onClick={() => {
+                navigator.clipboard.writeText(error).then(
+                  () => addToast("Error copied to clipboard"),
+                  (e) => addToast(`Copy failed: ${String(e)}`, "error"),
+                );
+              }}
+            >
+              <Copy size={13} />
+            </button>
+          </div>
         )}
         {cancelled && !executing && !error && (
           <div className="query-cancelled" data-testid="query-cancelled" role="status">
@@ -1113,7 +1205,9 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
             {resultMode === "chart" && result.is_select && result.rows.length > 0 ? (
               <ChartView columns={result.columns} rows={result.rows as unknown[][]} />
             ) : (
-              result.is_select && result.rows.length > 0 && (
+              // Zero-row SELECTs still show their columns (and Export),
+              // when the backend reports them.
+              result.is_select && (result.rows.length > 0 || result.columns.length > 0) && (
                 <ResultTable
                   result={result}
                   resultMode={resultMode}
@@ -1146,11 +1240,11 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
             {history.length === 0 ? (
               <div className="query-history-empty">No queries yet</div>
             ) : (
-              sortedHistory.map(({ entry, idx }) => {
-                const isPinned = pinnedQueries.has(idx);
+              sortedHistory.map((entry) => {
+                const isPinned = !!entry.pinned;
                 return (
                   <div
-                    key={idx}
+                    key={entry.id}
                     className={`query-history-item ${entry.error ? "error" : ""} ${isPinned ? "pinned" : ""}`}
                     onClick={() => handleHistorySelect(entry)}
                   >
@@ -1159,7 +1253,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
                       <div className="query-history-actions">
                         <button
                           className={`btn-icon query-history-action ${isPinned ? "pinned" : ""}`}
-                          onClick={(e) => { e.stopPropagation(); handleTogglePin(idx); }}
+                          onClick={(e) => { e.stopPropagation(); handleTogglePin(entry.id); }}
                           title={isPinned ? "Unpin" : "Pin"}
                         >
                           <Pin size={12} />
@@ -1193,9 +1287,24 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
         <SavedQueries onSelectQuery={handleSelectSavedQuery} onClose={() => setShowSavedQueries(false)} />
       )}
 
+      {pendingReplace && (
+        <ConfirmDialog
+          title="Replace unsaved SQL?"
+          message={`Loading ${pendingReplace.what} replaces the SQL in the editor, which hasn't been saved.`}
+          confirmLabel="Replace"
+          danger
+          onConfirm={() => {
+            const { apply } = pendingReplace;
+            setPendingReplace(null);
+            apply();
+          }}
+          onCancel={() => setPendingReplace(null)}
+        />
+      )}
+
       {showSaveDialog && (
-        <div className="dialog-overlay" onClick={() => setShowSaveDialog(false)}>
-          <div className="save-query-dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-overlay" onClick={() => { if (!savingQueryRef.current) closeSaveDialog(); }}>
+          <div className="save-query-dialog" role="dialog" aria-modal="true" aria-label="Save Query" onClick={(e) => e.stopPropagation()}>
             <h3>Save Query</h3>
             <input
               ref={saveInputRef}
@@ -1204,14 +1313,17 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
               placeholder="Enter query name..."
               value={saveQueryName}
               onChange={(e) => setSaveQueryName(e.target.value)}
+              disabled={savingQuery}
               onKeyDown={(e) => {
-                if (e.key === "Enter") handleSaveQueryConfirm();
-                if (e.key === "Escape") setShowSaveDialog(false);
+                if (e.key === "Enter") { e.preventDefault(); handleSaveQueryConfirm(); }
+                if (e.key === "Escape" && !savingQueryRef.current) closeSaveDialog();
               }}
             />
             <div className="save-query-actions">
-              <button className="btn-secondary" onClick={() => setShowSaveDialog(false)}>Cancel</button>
-              <button className="btn-primary" onClick={handleSaveQueryConfirm} disabled={!saveQueryName.trim()}>Save</button>
+              <button className="btn-secondary" onClick={closeSaveDialog} disabled={savingQuery}>Cancel</button>
+              <button className="btn-primary" onClick={handleSaveQueryConfirm} disabled={!saveQueryName.trim() || savingQuery}>
+                {savingQuery ? "Saving..." : "Save"}
+              </button>
             </div>
           </div>
         </div>

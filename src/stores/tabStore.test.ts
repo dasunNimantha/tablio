@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { useTabStore, type TabInfo } from "./tabStore";
+import { numberedQueryTitle, useTabStore, type TabInfo } from "./tabStore";
 
 function makeTab(id: string, connectionId = "conn1"): TabInfo {
   return {
@@ -17,6 +17,45 @@ function makeTab(id: string, connectionId = "conn1"): TabInfo {
 describe("tabStore", () => {
   beforeEach(() => {
     useTabStore.setState({ tabs: [], activeTabId: null });
+  });
+
+  describe("query tab titles", () => {
+    const query = (id: string, title: string): TabInfo => ({
+      ...makeTab(id), type: "query", title, schema: "",
+    });
+
+    it("numbers untitled consoles for the same target", () => {
+      const { openTab } = useTabStore.getState();
+      openTab(query("q1", "Query - postgres"));
+      openTab(query("q2", "Query - postgres"));
+      openTab(query("q3", "Query - postgres"));
+      openTab(query("q4", "Query - other"));
+      expect(useTabStore.getState().tabs.map((t) => t.title)).toEqual([
+        "Query - postgres", "Query 2 - postgres", "Query 3 - postgres", "Query - other",
+      ]);
+    });
+
+    it("continues after the highest open number", () => {
+      const tabs = [query("a", "Query - db"), query("b", "Query 4 - db")];
+      expect(numberedQueryTitle(tabs, "Query - db")).toBe("Query 5 - db");
+      expect(numberedQueryTitle([], "Query - db")).toBe("Query - db");
+      expect(numberedQueryTitle(tabs, "My saved query")).toBe("My saved query");
+    });
+
+    it("ignores non-query tabs", () => {
+      expect(numberedQueryTitle([{ ...makeTab("x"), title: "Query - db" }], "Query - db")).toBe("Query - db");
+    });
+  });
+
+  describe("initialFilter", () => {
+    it("is applied to an already open tab and switches it to data", () => {
+      const { openTab } = useTabStore.getState();
+      openTab({ ...makeTab("t1"), subTab: "schema" });
+      openTab({ ...makeTab("t1"), subTab: "data", initialFilter: { column: "id", value: 5, nonce: 1 } });
+      const tab = useTabStore.getState().tabs[0];
+      expect(tab.subTab).toBe("data");
+      expect(tab.initialFilter).toEqual({ column: "id", value: 5, nonce: 1 });
+    });
   });
 
   describe("openTab", () => {

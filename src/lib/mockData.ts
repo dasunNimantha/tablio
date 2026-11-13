@@ -81,6 +81,10 @@ export const mockTables: TableInfo[] = [
   { name: "reviews", schema: "public", table_type: "BASE TABLE", row_count_estimate: 67800, total_bytes: 8388608 },
   { name: "active_users_view", schema: "public", table_type: "VIEW", row_count_estimate: null },
   { name: "order_summary_view", schema: "public", table_type: "VIEW", row_count_estimate: null },
+  // Edge cases for the grids: a dotted column name, multi-line text,
+  // raw JSON text, a structured (map) value; and a table without a PK.
+  { name: "app_settings", schema: "public", table_type: "BASE TABLE", row_count_estimate: 4, total_bytes: 16384 },
+  { name: "audit_log", schema: "public", table_type: "BASE TABLE", row_count_estimate: 3, total_bytes: 16384 },
   // Partitioned: orders by RANGE(created_at)
   { name: "orders", schema: "public", table_type: "BASE TABLE", row_count_estimate: 184320, partition_strategy: "range" },
   { name: "orders_2025_q4", schema: "public", table_type: "BASE TABLE", row_count_estimate: 60100, total_bytes: 5242880, parent_table: "public.orders", partition_bound: "2025-10-01 \u2192 2026-01-01", is_default_partition: false },
@@ -172,7 +176,42 @@ const reviewsColumns: ColumnInfo[] = [
   { name: "product_id", data_type: "integer", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 3, is_auto_generated: false },
 ];
 
+const appSettingsColumns: ColumnInfo[] = [
+  { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, default_value: "nextval('app_settings_id_seq')", ordinal_position: 1, is_auto_generated: true },
+  { name: "config.key", data_type: "varchar(100)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2, is_auto_generated: false },
+  { name: "description", data_type: "text", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 3, is_auto_generated: false },
+  { name: "payload", data_type: "jsonb", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 4, is_auto_generated: false },
+  { name: "tags", data_type: "map<text, text>", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 5, is_auto_generated: false },
+  { name: "enabled", data_type: "boolean", is_nullable: false, is_primary_key: false, default_value: "true", ordinal_position: 6, is_auto_generated: false },
+];
+
+/** JSON/JSONB values arrive as their raw JSON text; maps as objects. */
+function generateAppSettingsRows(): unknown[][] {
+  return [
+    [1, "ui.theme", "Line one\r\nLine two", '{"theme": "dark", "size": 12}', { owner: "ui" }, true],
+    [2, "ui.font", "Single line", '[1, 2, 3]', null, true],
+    [3, "db.pool", "First\nSecond\nThird", '{"max": 10}', { owner: "db", tier: "gold" }, false],
+    [4, "NULL", null, null, null, true],
+  ];
+}
+
+const auditLogColumns: ColumnInfo[] = [
+  { name: "event_time", data_type: "timestamptz", is_nullable: false, is_primary_key: false, default_value: "now()", ordinal_position: 1, is_auto_generated: false },
+  { name: "actor", data_type: "varchar(50)", is_nullable: false, is_primary_key: false, default_value: null, ordinal_position: 2, is_auto_generated: false },
+  { name: "action", data_type: "text", is_nullable: true, is_primary_key: false, default_value: null, ordinal_position: 3, is_auto_generated: false },
+];
+
+function generateAuditLogRows(): unknown[][] {
+  return [
+    ["2024-01-01T10:00:00Z", "alice", "login"],
+    ["2024-01-01T10:00:00Z", "alice", "login"],
+    ["2024-01-02T11:30:00Z", "bob", "export"],
+  ];
+}
+
 const columnsMap: Record<string, ColumnInfo[]> = {
+  app_settings: appSettingsColumns,
+  audit_log: auditLogColumns,
   users: usersColumns,
   orders: ordersColumns,
   products: productsColumns,
@@ -182,6 +221,8 @@ const columnsMap: Record<string, ColumnInfo[]> = {
 };
 
 const rowsMap: Record<string, (count: number) => unknown[][]> = {
+  app_settings: generateAppSettingsRows,
+  audit_log: generateAuditLogRows,
   users: generateUserRows,
   orders: generateOrderRows,
 };
@@ -279,14 +320,71 @@ export function getTableColumns(table: string): ColumnInfo[] {
 
 export function getTableRows(table: string, offset: number, limit: number): { rows: unknown[][]; total: number } {
   const generator = rowsMap[table] || generateUserRows;
-  const total = table === "orders" ? 184320 : table === "users" ? 15420 : 100;
+  const total = table === "orders" ? 184320 : table === "users" ? 15420
+    : table === "app_settings" ? 4 : table === "audit_log" ? 3 : 100;
   const allRows = generator(Math.min(total, 200));
   const sliced = allRows.slice(offset, offset + limit);
   return { rows: sliced, total };
 }
 
+/** Columns + rows of a mock table, as a console SELECT * returns them. */
+function tableQueryResult(table: string, rowLimit: number | null): QueryResult {
+  const cols = columnsMap[table];
+  const { rows } = getTableRows(table, 0, 200);
+  return {
+    columns: cols.map((c) => c.name),
+    rows: rowLimit === null ? rows : rows.slice(0, rowLimit),
+    rows_affected: 0,
+    execution_time_ms: 3,
+    is_select: true,
+  };
+}
+
+/**
+ * Canned console results for edge cases, chosen by SQL text:
+ *   - `FROM app_settings` / `FROM audit_log`: that table's rows (editable /
+ *     no-PK); `LIMIT 0` or `WHERE false` gives columns with no rows
+ *   - `dup_cols`: duplicate column names
+ *   - `dotted_cols`: dotted / expression column names
+ */
+function specialQueryResult(lowerSql: string): QueryResult | null {
+  const zeroRows = /\blimit\s+0\b|\bwhere\s+false\b/.test(lowerSql);
+  const table = /\bfrom\s+(?:public\.)?(app_settings|audit_log)\b/.exec(lowerSql)?.[1];
+  if (table) return tableQueryResult(table, zeroRows ? 0 : null);
+  if (lowerSql.includes("dup_cols")) {
+    return {
+      columns: ["id", "name", "id"],
+      rows: [[1, "left", 101], [2, "right", 102]],
+      rows_affected: 0,
+      execution_time_ms: 2,
+      is_select: true,
+    };
+  }
+  if (lowerSql.includes("dotted_cols")) {
+    return {
+      columns: ["id", "price*1.1", "t.name"],
+      rows: [[1, 11.0, "alpha"], [2, 22.0, "beta"]],
+      rows_affected: 0,
+      execution_time_ms: 2,
+      is_select: true,
+    };
+  }
+  if (zeroRows) {
+    return {
+      columns: ["id", "name", "value"],
+      rows: [],
+      rows_affected: 0,
+      execution_time_ms: 1,
+      is_select: true,
+    };
+  }
+  return null;
+}
+
 export function generateQueryResult(sql: string): QueryResult {
   const lowerSql = sql.toLowerCase().trim();
+  const special = lowerSql.startsWith("select") || lowerSql.startsWith("with") ? specialQueryResult(lowerSql) : null;
+  if (special) return special;
   if (lowerSql.startsWith("select")) {
     const columns = ["id", "name", "value", "category", "created_at"];
     const categories = ["Electronics", "Books", "Clothing", "Food", "Sports"];
