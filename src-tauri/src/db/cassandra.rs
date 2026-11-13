@@ -108,12 +108,12 @@ impl CassandraDriver {
         qualified: &str,
         changes: &DataChanges,
         row: &[(String, serde_json::Value)],
-        lit: &(dyn Fn(&str, &serde_json::Value) -> String + Sync),
+        lit: &(dyn Fn(&str, &serde_json::Value) -> Result<String> + Sync),
     ) -> Result<()> {
         let pk_clause = row
             .iter()
-            .map(|(col, val)| format!("{} = {}", quote_ident(col), lit(col, val)))
-            .collect::<Vec<_>>()
+            .map(|(col, val)| Ok(format!("{} = {}", quote_ident(col), lit(col, val)?)))
+            .collect::<Result<Vec<_>>>()?
             .join(" AND ");
         let (action, cql) = if changes.deletes.is_empty() {
             // Every edited cell of the row in one statement; a column
@@ -127,8 +127,8 @@ impl CassandraDriver {
             }
             let set_clause = sets
                 .iter()
-                .map(|(c, v)| format!("{} = {}", quote_ident(c), lit(c, v)))
-                .collect::<Vec<_>>()
+                .map(|(c, v)| Ok(format!("{} = {}", quote_ident(c), lit(c, v)?)))
+                .collect::<Result<Vec<_>>>()?
                 .join(", ");
             (
                 "update",
@@ -174,6 +174,32 @@ impl CassandraDriver {
         }
     }
 
+    /// Field names and types of every user-defined type in `keyspace`.
+    async fn load_udt_defs(&self, keyspace: &str) -> Result<UdtDefs> {
+        let result = self
+            .session
+            .query_unpaged(
+                "SELECT type_name, field_names, field_types FROM system_schema.types \
+                 WHERE keyspace_name = ?",
+                (keyspace,),
+            )
+            .await
+            .map_err(|e| anyhow!("{}", e))?
+            .into_rows_result()
+            .map_err(|e| anyhow!("{}", e))?;
+        let mut defs = UdtDefs::new();
+        if let Ok(rows) = result.rows::<(String, Vec<String>, Vec<String>)>() {
+            for (name, names, types) in rows.flatten() {
+                let fields = names
+                    .into_iter()
+                    .zip(types.iter().map(|t| parse_cql_type(t)))
+                    .collect();
+                defs.insert(name, fields);
+            }
+        }
+        Ok(defs)
+    }
+
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
         // Bracket IPv6 literals so the port separator is unambiguous.
         let host = config.host.trim();
@@ -195,25 +221,24 @@ impl CassandraDriver {
 
 fn cql_value_to_json(_col_type: &str, raw: &scylla::value::CqlValue) -> serde_json::Value {
     use scylla::value::CqlValue;
+    use serde_json::Value;
     match raw {
-        CqlValue::Ascii(s) | CqlValue::Text(s) => serde_json::Value::String(s.clone()),
-        CqlValue::Boolean(b) => serde_json::Value::Bool(*b),
+        CqlValue::Ascii(s) | CqlValue::Text(s) => Value::String(s.clone()),
+        CqlValue::Boolean(b) => Value::Bool(*b),
         CqlValue::Int(i) => serde_json::json!(*i),
         CqlValue::BigInt(i) => i64_to_json(*i),
         CqlValue::SmallInt(i) => serde_json::json!(*i),
         CqlValue::TinyInt(i) => serde_json::json!(*i),
-        CqlValue::Float(f) => serde_json::json!(*f),
-        CqlValue::Double(d) => serde_json::json!(*d),
-        CqlValue::Uuid(u) => serde_json::Value::String(u.to_string()),
-        CqlValue::Timeuuid(t) => serde_json::Value::String(t.as_ref().to_string()),
-        CqlValue::Timestamp(ts) => serde_json::Value::String(format!("{}", ts.0)),
-        CqlValue::Date(d) => serde_json::Value::String(format!("{}", d.0)),
-        CqlValue::Time(t) => serde_json::Value::String(format!("{}", t.0)),
-        CqlValue::Inet(addr) => serde_json::Value::String(addr.to_string()),
-        CqlValue::Blob(b) => {
-            let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
-            serde_json::Value::String(format!("0x{}", hex))
-        }
+        CqlValue::Float(f) => crate::util::values::f32_to_json(*f),
+        CqlValue::Double(d) => crate::util::values::f64_to_json(*d),
+        CqlValue::Uuid(u) => Value::String(u.to_string()),
+        CqlValue::Timeuuid(t) => Value::String(t.as_ref().to_string()),
+        CqlValue::Timestamp(ts) => Value::String(cql_timestamp_text(ts.0)),
+        CqlValue::Date(d) => Value::String(cql_date_text(d.0)),
+        CqlValue::Time(t) => Value::String(cql_time_text(t.0)),
+        CqlValue::Duration(d) => Value::String(cql_duration_text(d.months, d.days, d.nanoseconds)),
+        CqlValue::Inet(addr) => Value::String(addr.to_string()),
+        CqlValue::Blob(b) => Value::String(format!("0x{}", crate::util::values::hex_encode(b))),
         CqlValue::Varint(v) => {
             exact_decimal_to_json(&signed_be_bytes_to_decimal(v.as_signed_bytes_be_slice()))
         }
@@ -225,55 +250,164 @@ fn cql_value_to_json(_col_type: &str, raw: &scylla::value::CqlValue) -> serde_js
             ))
         }
         CqlValue::Counter(c) => i64_to_json(c.0),
-        CqlValue::Set(items) => {
-            let arr: Vec<serde_json::Value> =
-                items.iter().map(|v| cql_value_to_json("", v)).collect();
-            serde_json::Value::Array(arr)
-        }
-        CqlValue::List(items) => {
-            let arr: Vec<serde_json::Value> =
-                items.iter().map(|v| cql_value_to_json("", v)).collect();
-            serde_json::Value::Array(arr)
+        CqlValue::Set(items) | CqlValue::List(items) | CqlValue::Vector(items) => {
+            Value::Array(items.iter().map(|v| cql_value_to_json("", v)).collect())
         }
         CqlValue::Map(entries) => {
-            let obj: serde_json::Map<String, serde_json::Value> = entries
+            let obj: serde_json::Map<String, Value> = entries
                 .iter()
-                .map(|(k, v)| {
-                    let key = match k {
-                        CqlValue::Text(s) | CqlValue::Ascii(s) => s.clone(),
-                        other => format!("{:?}", other),
-                    };
-                    (key, cql_value_to_json("", v))
-                })
+                .map(|(k, v)| (cql_map_key_text(k), cql_value_to_json("", v)))
                 .collect();
-            serde_json::Value::Object(obj)
+            Value::Object(obj)
         }
-        CqlValue::Tuple(fields) => {
-            let arr: Vec<serde_json::Value> = fields
+        CqlValue::Tuple(fields) => Value::Array(
+            fields
                 .iter()
                 .map(|f| match f {
                     Some(v) => cql_value_to_json("", v),
-                    None => serde_json::Value::Null,
+                    None => Value::Null,
                 })
-                .collect();
-            serde_json::Value::Array(arr)
-        }
+                .collect(),
+        ),
         CqlValue::UserDefinedType { fields, .. } => {
-            let obj: serde_json::Map<String, serde_json::Value> = fields
+            let obj: serde_json::Map<String, Value> = fields
                 .iter()
                 .map(|(name, val)| {
                     let v = match val {
                         Some(v) => cql_value_to_json("", v),
-                        None => serde_json::Value::Null,
+                        None => Value::Null,
                     };
                     (name.clone(), v)
                 })
                 .collect();
-            serde_json::Value::Object(obj)
+            Value::Object(obj)
         }
-        CqlValue::Empty => serde_json::Value::Null,
-        _ => serde_json::Value::String(format!("{:?}", raw)),
+        CqlValue::Empty => Value::Null,
+        _ => Value::String(format!("{:?}", raw)),
     }
+}
+
+/// JSON object key for a map entry: the key's own text (`1` for an int
+/// key, the uuid for a uuid key) rather than its Rust `Debug` form.
+fn cql_map_key_text(k: &scylla::value::CqlValue) -> String {
+    match cql_value_to_json("", k) {
+        serde_json::Value::String(s) => s,
+        other => other.to_string(),
+    }
+}
+
+/// `timestamp` (ms since the epoch) as `YYYY-MM-DD HH:MM:SS.mmmZ`, a form
+/// CQL accepts back as a timestamp literal. Out-of-range values keep the
+/// raw millisecond count, which CQL also accepts.
+fn cql_timestamp_text(ms: i64) -> String {
+    match chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms) {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S%.3fZ").to_string(),
+        None => ms.to_string(),
+    }
+}
+
+/// `date` (days since the epoch, offset by 2^31) as `YYYY-MM-DD`.
+fn cql_date_text(raw: u32) -> String {
+    let days = i64::from(raw) - (1i64 << 31);
+    chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+        .and_then(|epoch| epoch.checked_add_signed(chrono::Duration::days(days)))
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| raw.to_string())
+}
+
+/// `time` (ns since midnight) as `HH:MM:SS[.fraction]`.
+fn cql_time_text(ns: i64) -> String {
+    if !(0..86_400_000_000_000).contains(&ns) {
+        return ns.to_string();
+    }
+    let secs = ns / 1_000_000_000;
+    let frac = ns % 1_000_000_000;
+    let base = format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs / 60) % 60,
+        secs % 60
+    );
+    if frac == 0 {
+        base
+    } else {
+        let f = format!("{:09}", frac);
+        format!("{}.{}", base, f.trim_end_matches('0'))
+    }
+}
+
+/// `duration` in CQL's own literal syntax (`1mo2d3h4m5s6ms7us8ns`), which
+/// is also what cqlsh prints and what CQL accepts back unquoted.
+fn cql_duration_text(months: i32, days: i32, nanos: i64) -> String {
+    let negative = months < 0 || days < 0 || nanos < 0;
+    let months = i64::from(months).unsigned_abs();
+    let days = i64::from(days).unsigned_abs();
+    let mut ns = nanos.unsigned_abs();
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    let mut push = |v: u64, unit: &str| {
+        if v > 0 {
+            out.push_str(&format!("{}{}", v, unit));
+        }
+    };
+    push(months / 12, "y");
+    push(months % 12, "mo");
+    push(days, "d");
+    const UNITS: [(u64, &str); 7] = [
+        (3_600_000_000_000, "h"),
+        (60_000_000_000, "m"),
+        (1_000_000_000, "s"),
+        (1_000_000, "ms"),
+        (1_000, "us"),
+        (1, "ns"),
+        (0, ""),
+    ];
+    for (size, unit) in UNITS.iter().take(6) {
+        push(ns / size, unit);
+        ns %= size;
+    }
+    if out.is_empty() || out == "-" {
+        return "0s".to_string();
+    }
+    out
+}
+
+/// True when `s` is a duration literal CQL accepts unquoted: the
+/// `1h30m` unit form or ISO 8601 (`P1DT2H`, `P2W`).
+fn is_cql_duration_literal(s: &str) -> bool {
+    let t = s.strip_prefix('-').unwrap_or(s);
+    if t.is_empty() {
+        return false;
+    }
+    if let Some(iso) = t.strip_prefix('P') {
+        return !iso.is_empty()
+            && iso
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b"YMWDTHS.-:".contains(&b))
+            && iso.bytes().any(|b| b.is_ascii_digit());
+    }
+    let b = t.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == start {
+            return false;
+        }
+        let rest = &t[i..];
+        let unit = ["mo", "ms", "us", "µs", "ns", "y", "w", "d", "h", "m", "s"]
+            .iter()
+            .find(|u| rest.to_ascii_lowercase().starts_with(*u));
+        match unit {
+            Some(u) => i += u.len(),
+            None => return false,
+        }
+    }
+    true
 }
 
 fn json_to_cql_literal(val: &serde_json::Value) -> String {
@@ -296,18 +430,345 @@ fn json_to_cql_literal(val: &serde_json::Value) -> String {
     }
 }
 
-/// Like `json_to_cql_literal`, but a string value destined for a
-/// numeric column is emitted unquoted once it is validated as a plain
-/// numeric literal.
-fn typed_cql_literal(data_type: Option<&str>, val: &serde_json::Value) -> String {
-    if let (Some(t), serde_json::Value::String(s)) = (data_type, val) {
-        if crate::util::sql::is_numeric_type_name(t) {
-            if let Some(n) = crate::util::sql::numeric_literal(s) {
-                return n.to_string();
+/// A parsed CQL column type, as `system_schema` spells it.
+#[derive(Debug, Clone, PartialEq)]
+enum CqlType {
+    /// A native type name, lowercased (`int`, `uuid`, `blob`, ...).
+    Native(String),
+    List(Box<CqlType>),
+    Set(Box<CqlType>),
+    Map(Box<CqlType>, Box<CqlType>),
+    Tuple(Vec<CqlType>),
+    /// A user-defined type, by (unquoted) name.
+    Udt(String),
+}
+
+const CQL_NATIVE_TYPES: &[&str] = &[
+    "ascii",
+    "bigint",
+    "blob",
+    "boolean",
+    "counter",
+    "date",
+    "decimal",
+    "double",
+    "duration",
+    "float",
+    "inet",
+    "int",
+    "smallint",
+    "text",
+    "time",
+    "timestamp",
+    "timeuuid",
+    "tinyint",
+    "uuid",
+    "varchar",
+    "varint",
+];
+
+/// Split `a, b<c, d>, e` at top-level commas.
+fn split_type_args(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut in_quotes = false;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            '<' if !in_quotes => depth += 1,
+            '>' if !in_quotes => depth -= 1,
+            ',' if !in_quotes && depth == 0 => {
+                parts.push(s[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(s[start..].trim());
+    parts
+}
+
+fn parse_cql_type(t: &str) -> CqlType {
+    let t = t.trim();
+    if let Some(open) = t.find('<') {
+        if t.ends_with('>') {
+            let name = t[..open].trim().to_ascii_lowercase();
+            let inner = &t[open + 1..t.len() - 1];
+            let args = split_type_args(inner);
+            match (name.as_str(), args.as_slice()) {
+                ("frozen", [one]) => return parse_cql_type(one),
+                ("list", [one]) => return CqlType::List(Box::new(parse_cql_type(one))),
+                ("set", [one]) => return CqlType::Set(Box::new(parse_cql_type(one))),
+                ("map", [k, v]) => {
+                    return CqlType::Map(Box::new(parse_cql_type(k)), Box::new(parse_cql_type(v)))
+                }
+                ("tuple", items) => {
+                    return CqlType::Tuple(items.iter().map(|i| parse_cql_type(i)).collect())
+                }
+                // vector<float, 3>: written like a list.
+                ("vector", [elem, _]) => return CqlType::List(Box::new(parse_cql_type(elem))),
+                _ => {}
             }
         }
     }
-    json_to_cql_literal(val)
+    let lower = t.to_ascii_lowercase();
+    if CQL_NATIVE_TYPES.contains(&lower.as_str()) || t.starts_with('\'') {
+        CqlType::Native(lower)
+    } else {
+        CqlType::Udt(t.trim_matches('"').to_string())
+    }
+}
+
+/// Field names and types of the user-defined types in a keyspace.
+type UdtDefs = std::collections::HashMap<String, Vec<(String, CqlType)>>;
+
+/// Reads a JSON string as the JSON document it holds (an edited
+/// collection arrives as the text the user typed).
+fn json_from_text(val: &serde_json::Value) -> Option<serde_json::Value> {
+    match val {
+        serde_json::Value::String(s) => serde_json::from_str(s.trim()).ok(),
+        _ => None,
+    }
+}
+
+fn is_canonical_uuid(s: &str) -> bool {
+    s.len() == 36 && uuid::Uuid::try_parse(s).is_ok()
+}
+
+/// CQL literal for `val` written to a column of type `ty`.
+///
+/// Values arrive in the shapes `cql_value_to_json` produces (or as the
+/// edited text of them): uuids, blobs (`0x…`) and durations are written
+/// unquoted after validation; sets as `{…}`, tuples as `(…)`, UDTs with
+/// unquoted field names and map keys converted to the key type.
+fn cql_literal_for(ty: &CqlType, val: &serde_json::Value, udts: &UdtDefs) -> Result<String> {
+    use serde_json::Value;
+    if val.is_null() {
+        return Ok("NULL".to_string());
+    }
+    let wrong = |what: &str| {
+        anyhow!(
+            "Invalid value {} for a {} column: expected {}",
+            val,
+            cql_type_name(ty),
+            what
+        )
+    };
+    match ty {
+        CqlType::Native(name) => Ok(native_cql_literal(name, val)?),
+        CqlType::List(elem) | CqlType::Set(elem) => {
+            let owned;
+            let items = match val {
+                Value::Array(a) => a,
+                _ => {
+                    owned = json_from_text(val).ok_or_else(|| wrong("a JSON array"))?;
+                    owned.as_array().ok_or_else(|| wrong("a JSON array"))?
+                }
+            };
+            let parts = items
+                .iter()
+                .map(|v| cql_literal_for(elem, v, udts))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(if matches!(ty, CqlType::Set(_)) {
+                format!("{{{}}}", parts.join(", "))
+            } else {
+                format!("[{}]", parts.join(", "))
+            })
+        }
+        CqlType::Tuple(types) => {
+            let owned;
+            let items = match val {
+                Value::Array(a) => a,
+                _ => {
+                    owned = json_from_text(val).ok_or_else(|| wrong("a JSON array"))?;
+                    owned.as_array().ok_or_else(|| wrong("a JSON array"))?
+                }
+            };
+            if items.len() > types.len() {
+                return Err(wrong(&format!("at most {} items", types.len())));
+            }
+            let parts = items
+                .iter()
+                .zip(types)
+                .map(|(v, t)| cql_literal_for(t, v, udts))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("({})", parts.join(", ")))
+        }
+        CqlType::Map(kt, vt) => {
+            let owned;
+            let obj = match val {
+                Value::Object(o) => o,
+                _ => {
+                    owned = json_from_text(val).ok_or_else(|| wrong("a JSON object"))?;
+                    owned.as_object().ok_or_else(|| wrong("a JSON object"))?
+                }
+            };
+            let parts = obj
+                .iter()
+                .map(|(k, v)| {
+                    Ok(format!(
+                        "{}: {}",
+                        cql_literal_for(kt, &Value::String(k.clone()), udts)?,
+                        cql_literal_for(vt, v, udts)?
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("{{{}}}", parts.join(", ")))
+        }
+        CqlType::Udt(name) => {
+            let owned;
+            let obj = match val {
+                Value::Object(o) => o,
+                _ => {
+                    owned = json_from_text(val).ok_or_else(|| wrong("a JSON object"))?;
+                    owned.as_object().ok_or_else(|| wrong("a JSON object"))?
+                }
+            };
+            let fields = udts.get(name);
+            let parts = obj
+                .iter()
+                .map(|(k, v)| {
+                    let field_ty = fields
+                        .and_then(|f| f.iter().find(|(n, _)| n == k))
+                        .map(|(_, t)| t);
+                    let lit = match field_ty {
+                        Some(t) => cql_literal_for(t, v, udts)?,
+                        None => json_to_cql_literal(v),
+                    };
+                    Ok(format!("{}: {}", quote_ident(k), lit))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("{{{}}}", parts.join(", ")))
+        }
+    }
+}
+
+fn cql_type_name(ty: &CqlType) -> String {
+    match ty {
+        CqlType::Native(n) => n.clone(),
+        CqlType::List(e) => format!("list<{}>", cql_type_name(e)),
+        CqlType::Set(e) => format!("set<{}>", cql_type_name(e)),
+        CqlType::Map(k, v) => format!("map<{}, {}>", cql_type_name(k), cql_type_name(v)),
+        CqlType::Tuple(t) => format!(
+            "tuple<{}>",
+            t.iter().map(cql_type_name).collect::<Vec<_>>().join(", ")
+        ),
+        CqlType::Udt(n) => n.clone(),
+    }
+}
+
+fn native_cql_literal(name: &str, val: &serde_json::Value) -> Result<String> {
+    use serde_json::Value;
+    let Value::String(s) = val else {
+        // A number / boolean typed into a text-like column is text.
+        if matches!(name, "text" | "varchar" | "ascii" | "inet")
+            && !val.is_object()
+            && !val.is_array()
+        {
+            return Ok(json_to_cql_literal(&Value::String(val.to_string())));
+        }
+        return Ok(json_to_cql_literal(val));
+    };
+    let t = s.trim();
+    match name {
+        "int" | "bigint" | "smallint" | "tinyint" | "varint" | "decimal" | "counter" => {
+            if let Some(n) = crate::util::sql::numeric_literal(t) {
+                return Ok(n.to_string());
+            }
+        }
+        "float" | "double" => {
+            if let Some(n) = crate::util::sql::numeric_literal(t) {
+                return Ok(n.to_string());
+            }
+            match t {
+                "NaN" => return Ok("NaN".to_string()),
+                "Infinity" | "+Infinity" => return Ok("Infinity".to_string()),
+                "-Infinity" => return Ok("-Infinity".to_string()),
+                _ => {}
+            }
+        }
+        "boolean" => {
+            if t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("false") {
+                return Ok(t.to_ascii_lowercase());
+            }
+        }
+        "uuid" | "timeuuid" => {
+            if is_canonical_uuid(t) {
+                return Ok(t.to_ascii_lowercase());
+            }
+            anyhow::bail!("Invalid {} value {:?}", name, s);
+        }
+        "blob" => {
+            let hex =
+                crate::util::values::binary_value_hex(s, crate::util::values::HexDisplay::ZeroX)
+                    .map_err(|e| anyhow!(e))?;
+            return Ok(format!("0x{}", hex));
+        }
+        "duration" => {
+            if is_cql_duration_literal(t) {
+                return Ok(t.to_string());
+            }
+            anyhow::bail!(
+                "Invalid duration {:?}: expected e.g. 1h30m, 2d or ISO 8601 (P1DT2H)",
+                s
+            );
+        }
+        _ => {}
+    }
+    Ok(json_to_cql_literal(val))
+}
+
+/// Literal for a value written to a column whose `system_schema` type is
+/// `data_type` (unknown columns fall back to the untyped rendering).
+fn typed_cql_literal(
+    data_type: Option<&str>,
+    val: &serde_json::Value,
+    udts: &UdtDefs,
+) -> Result<String> {
+    match data_type {
+        Some(t) => cql_literal_for(&parse_cql_type(t), val, udts),
+        None => Ok(json_to_cql_literal(val)),
+    }
+}
+
+/// True when a parsed type mentions a user-defined type anywhere.
+fn mentions_udt(ty: &CqlType) -> bool {
+    match ty {
+        CqlType::Native(_) => false,
+        CqlType::Udt(_) => true,
+        CqlType::List(e) | CqlType::Set(e) => mentions_udt(e),
+        CqlType::Map(k, v) => mentions_udt(k) || mentions_udt(v),
+        CqlType::Tuple(t) => t.iter().any(mentions_udt),
+    }
+}
+
+/// The signed change to apply to a counter edited from `old` to `new`
+/// (CQL counters can only be incremented / decremented).
+fn counter_delta(old: &serde_json::Value, new: &serde_json::Value) -> Result<i64> {
+    let as_i64 = |v: &serde_json::Value| -> Option<i64> {
+        match v {
+            serde_json::Value::Null => Some(0),
+            serde_json::Value::Number(n) => n.as_i64(),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    };
+    let (Some(o), Some(n)) = (as_i64(old), as_i64(new)) else {
+        anyhow::bail!("Invalid counter value {}: expected an integer", new);
+    };
+    n.checked_sub(o)
+        .ok_or_else(|| anyhow!("Counter change from {} to {} overflows", o, n))
+}
+
+/// `"c" = "c" + 5` / `"c" = "c" - 5`.
+fn counter_assignment(col: &str, delta: i64) -> String {
+    let q = quote_ident(col);
+    if delta < 0 {
+        format!("{q} = {q} - {}", delta.unsigned_abs())
+    } else {
+        format!("{q} = {q} + {delta}")
+    }
 }
 
 fn quote_ident(name: &str) -> String {
@@ -949,9 +1410,19 @@ impl DatabaseDriver for CassandraDriver {
             .iter()
             .map(|c| (c.name.clone(), c.data_type.clone()))
             .collect();
-        let lit = |col: &str, val: &serde_json::Value| -> String {
-            typed_cql_literal(col_types.get(col).map(String::as_str), val)
+        let udts = if col_types.values().any(|t| mentions_udt(&parse_cql_type(t))) {
+            self.load_udt_defs(ks).await.unwrap_or_default()
+        } else {
+            UdtDefs::new()
         };
+        let lit = |col: &str, val: &serde_json::Value| -> Result<String> {
+            typed_cql_literal(col_types.get(col).map(String::as_str), val, &udts)
+        };
+        // Counter columns can only be incremented, so an edit becomes
+        // `c = c + (new - old)`; a counter table's statements cannot
+        // share a batch with anything else, so they run one by one.
+        let is_counter = |col: &str| col_types.get(col).map(String::as_str) == Some("counter");
+        let counter_table = col_types.values().any(|t| t == "counter");
 
         if let Some(row) = single_row_edit(changes, &columns) {
             return self
@@ -968,21 +1439,65 @@ impl DatabaseDriver for CassandraDriver {
             let pk_clause: Vec<String> = update
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| format!("{} = {}", quote_ident(col), lit(col, val)))
-                .collect();
+                .map(|(col, val)| Ok(format!("{} = {}", quote_ident(col), lit(col, val)?)))
+                .collect::<Result<_>>()?;
+            let assignment = if is_counter(&update.column_name) {
+                counter_assignment(
+                    &update.column_name,
+                    counter_delta(&update.old_value, &update.new_value)?,
+                )
+            } else {
+                format!(
+                    "{} = {}",
+                    quote_ident(&update.column_name),
+                    lit(&update.column_name, &update.new_value)?
+                )
+            };
             stmts.push(format!(
-                "UPDATE {} SET {} = {} WHERE {}",
+                "UPDATE {} SET {} WHERE {}",
                 qualified,
-                quote_ident(&update.column_name),
-                lit(&update.column_name, &update.new_value),
+                assignment,
                 pk_clause.join(" AND ")
             ));
         }
 
         for insert in &changes.inserts {
+            if counter_table {
+                // A counter row is created by incrementing it.
+                let (counters, keys): (Vec<_>, Vec<_>) =
+                    insert.values.iter().partition(|(c, _)| is_counter(c));
+                let sets: Vec<String> = counters
+                    .iter()
+                    .filter(|(_, v)| !v.is_null())
+                    .map(|(c, v)| {
+                        Ok(counter_assignment(
+                            c,
+                            counter_delta(&serde_json::Value::Null, v)?,
+                        ))
+                    })
+                    .collect::<Result<_>>()?;
+                if sets.is_empty() {
+                    anyhow::bail!("Cannot insert into a counter table without a counter value");
+                }
+                let pk_clause: Vec<String> = keys
+                    .iter()
+                    .map(|(col, val)| Ok(format!("{} = {}", quote_ident(col), lit(col, val)?)))
+                    .collect::<Result<_>>()?;
+                stmts.push(format!(
+                    "UPDATE {} SET {} WHERE {}",
+                    qualified,
+                    sets.join(", "),
+                    pk_clause.join(" AND ")
+                ));
+                continue;
+            }
             let col_names: Vec<String> =
                 insert.values.iter().map(|(c, _)| quote_ident(c)).collect();
-            let vals: Vec<String> = insert.values.iter().map(|(c, v)| lit(c, v)).collect();
+            let vals: Vec<String> = insert
+                .values
+                .iter()
+                .map(|(c, v)| lit(c, v))
+                .collect::<Result<_>>()?;
             stmts.push(format!(
                 "INSERT INTO {} ({}) VALUES ({})",
                 qualified,
@@ -998,8 +1513,8 @@ impl DatabaseDriver for CassandraDriver {
             let pk_clause: Vec<String> = delete
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| format!("{} = {}", quote_ident(col), lit(col, val)))
-                .collect();
+                .map(|(col, val)| Ok(format!("{} = {}", quote_ident(col), lit(col, val)?)))
+                .collect::<Result<_>>()?;
             stmts.push(format!(
                 "DELETE FROM {} WHERE {}",
                 qualified,
@@ -1011,7 +1526,14 @@ impl DatabaseDriver for CassandraDriver {
             return Ok(());
         }
 
-        if stmts.len() == 1 {
+        if counter_table {
+            for stmt in &stmts {
+                self.session
+                    .query_unpaged(stmt.as_str(), &[])
+                    .await
+                    .map_err(|e| anyhow!("{}", e))?;
+            }
+        } else if stmts.len() == 1 {
             self.session
                 .query_unpaged(stmts[0].as_str(), &[])
                 .await
@@ -1577,5 +2099,124 @@ mod tests {
             &CqlValue::List(vec![CqlValue::Int(1), CqlValue::Int(2)]),
         );
         assert_eq!(val, serde_json::json!([1, 2]));
+    }
+}
+
+#[cfg(test)]
+mod value_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn lit(t: &str, v: serde_json::Value) -> String {
+        typed_cql_literal(Some(t), &v, &UdtDefs::new()).unwrap()
+    }
+
+    #[test]
+    fn parses_cql_types() {
+        assert_eq!(
+            parse_cql_type("frozen<map<int, frozen<set<uuid>>>>"),
+            CqlType::Map(
+                Box::new(CqlType::Native("int".into())),
+                Box::new(CqlType::Set(Box::new(CqlType::Native("uuid".into()))))
+            )
+        );
+        assert_eq!(
+            parse_cql_type("frozen<tuple<int, text>>"),
+            CqlType::Tuple(vec![
+                CqlType::Native("int".into()),
+                CqlType::Native("text".into())
+            ])
+        );
+        assert_eq!(parse_cql_type("frozen<addr>"), CqlType::Udt("addr".into()));
+        assert_eq!(
+            parse_cql_type("vector<float, 3>"),
+            CqlType::List(Box::new(CqlType::Native("float".into())))
+        );
+    }
+
+    #[test]
+    fn literals_follow_the_column_type() {
+        let u = "6f1c0f3e-3b8a-4e4f-9a51-0c9d2b7a1e11";
+        assert_eq!(lit("uuid", json!(u)), u);
+        assert_eq!(lit("timeuuid", json!(u)), u);
+        assert!(typed_cql_literal(Some("uuid"), &json!("x'); DROP"), &UdtDefs::new()).is_err());
+        assert_eq!(lit("blob", json!("0x00FF")), "0x00ff");
+        assert_eq!(lit("set<int>", json!([1, 2])), "{1, 2}");
+        assert_eq!(lit("set<int>", json!("[3]")), "{3}");
+        assert_eq!(lit("list<text>", json!(["a'b"])), "['a''b']");
+        assert_eq!(lit("map<int, text>", json!({"1": "one"})), "{1: 'one'}");
+        assert_eq!(lit("frozen<tuple<int, text>>", json!([7, "x"])), "(7, 'x')");
+        assert_eq!(lit("duration", json!("1mo2d3h")), "1mo2d3h");
+        assert!(typed_cql_literal(Some("duration"), &json!("1 hour"), &UdtDefs::new()).is_err());
+        assert_eq!(lit("double", json!("NaN")), "NaN");
+        assert_eq!(lit("float", json!("-Infinity")), "-Infinity");
+        assert_eq!(lit("text", json!(5)), "'5'");
+        assert!(typed_cql_literal(Some("set<int>"), &json!("nope"), &UdtDefs::new()).is_err());
+    }
+
+    #[test]
+    fn udt_literals_use_field_types() {
+        let mut udts = UdtDefs::new();
+        udts.insert(
+            "addr".into(),
+            vec![
+                ("street".into(), CqlType::Native("text".into())),
+                ("id".into(), CqlType::Native("uuid".into())),
+            ],
+        );
+        let u = "6f1c0f3e-3b8a-4e4f-9a51-0c9d2b7a1e11";
+        assert_eq!(
+            typed_cql_literal(
+                Some("frozen<addr>"),
+                &json!({"id": u, "street": "Main"}),
+                &udts
+            )
+            .unwrap(),
+            format!("{{\"id\": {u}, \"street\": 'Main'}}")
+        );
+    }
+
+    #[test]
+    fn temporal_and_duration_text() {
+        assert_eq!(cql_date_text(1u32 << 31), "1970-01-01");
+        assert_eq!(cql_date_text((1u32 << 31) + 19_782), "2024-02-29");
+        assert_eq!(cql_time_text(0), "00:00:00");
+        assert_eq!(cql_time_text(29_574_123_000_000), "08:12:54.123");
+        assert_eq!(cql_timestamp_text(0), "1970-01-01 00:00:00.000Z");
+        assert_eq!(
+            cql_duration_text(14, 2, 3_600_000_000_000 + 6_000_000),
+            "1y2mo2d1h6ms"
+        );
+        assert_eq!(cql_duration_text(0, 0, -7_200_000_000_000), "-2h");
+        assert_eq!(cql_duration_text(0, 0, 0), "0s");
+        assert!(is_cql_duration_literal("1y2mo3w4d5h6m7s8ms9us10ns"));
+        assert!(is_cql_duration_literal("P1DT2H"));
+        assert!(!is_cql_duration_literal("1h; DROP"));
+        assert!(!is_cql_duration_literal(""));
+    }
+
+    #[test]
+    fn non_finite_and_float4_values() {
+        use scylla::value::CqlValue;
+        assert_eq!(cql_value_to_json("", &CqlValue::Float(0.1)), json!(0.1));
+        assert_eq!(
+            cql_value_to_json("", &CqlValue::Double(f64::NAN)),
+            json!("NaN")
+        );
+        assert_eq!(
+            cql_value_to_json(
+                "",
+                &CqlValue::Map(vec![(CqlValue::Int(1), CqlValue::Int(2))])
+            ),
+            json!({"1": 2})
+        );
+    }
+
+    #[test]
+    fn counter_deltas() {
+        assert_eq!(counter_delta(&json!(5), &json!(12)).unwrap(), 7);
+        assert_eq!(counter_delta(&json!(null), &json!("3")).unwrap(), 3);
+        assert!(counter_delta(&json!(1), &json!("x")).is_err());
+        assert_eq!(counter_assignment("c", -2), "\"c\" = \"c\" - 2");
     }
 }
