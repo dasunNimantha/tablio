@@ -102,36 +102,18 @@ export function buildWhereClause(
     return `${col} ${c.operator} ${stringLiteral(dbType, value)}`;
   };
 
-  if (valid.length === 1) return toClause(valid[0]);
-
-  const groups: { join: JoinType; clauses: string[] }[] = [];
-  let currentGroup: { join: JoinType; clauses: string[] } = {
-    join: valid[0].join,
-    clauses: [toClause(valid[0])],
-  };
-
+  // Conditions combine strictly left to right, the way the bar reads:
+  // whenever the join changes, everything so far is parenthesised, so
+  // "a OR b AND c" means "(a OR b) AND c" (SQL precedence would
+  // otherwise bind it as "a OR (b AND c)"). The first condition's own
+  // join is never shown and is ignored.
+  let expr = toClause(valid[0]);
+  let prevJoin: JoinType | null = null;
   for (let i = 1; i < valid.length; i++) {
-    if (valid[i].join === currentGroup.join) {
-      currentGroup.clauses.push(toClause(valid[i]));
-    } else {
-      groups.push(currentGroup);
-      currentGroup = { join: valid[i].join, clauses: [toClause(valid[i])] };
-    }
+    const join = valid[i].join;
+    if (prevJoin !== null && join !== prevJoin) expr = `(${expr})`;
+    expr = `${expr} ${join} ${toClause(valid[i])}`;
+    prevJoin = join;
   }
-  groups.push(currentGroup);
-
-  if (groups.length === 1) {
-    return groups[0].clauses.join(` ${groups[0].join} `);
-  }
-
-  const wrap = (g: { join: JoinType; clauses: string[] }) =>
-    g.clauses.length > 1
-      ? `(${g.clauses.join(` ${g.join} `)})`
-      : g.clauses[0];
-
-  let result = wrap(groups[0]);
-  for (let i = 1; i < groups.length; i++) {
-    result = `${result} ${groups[i].join} ${wrap(groups[i])}`;
-  }
-  return result;
+  return expr;
 }
