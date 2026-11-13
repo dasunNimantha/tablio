@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { Modal } from "./Modal/Modal";
 import { Trash2, ShieldCheck, X, AlertCircle, RefreshCw } from "lucide-react";
 import { api, type KnownHostEntry } from "../lib/tauri";
 import "./KnownHostsDialog.css";
@@ -43,14 +43,7 @@ export function KnownHostsDialog({ open, onClose }: KnownHostsDialogProps) {
     void refresh();
   }, [open, refresh]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  const titleId = useId();
 
   const forget = useCallback(
     async (entry: KnownHostEntry) => {
@@ -84,20 +77,17 @@ export function KnownHostsDialog({ open, onClose }: KnownHostsDialogProps) {
 
   if (!open) return null;
 
-  return createPortal(
-    <div
-      className="known-hosts-overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-label="SSH known hosts"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+  return (
+    <Modal
+      portal
+      onClose={onClose}
+      overlayClassName="known-hosts-overlay"
+      className="known-hosts-dialog"
+      labelledBy={titleId}
     >
-      <div className="known-hosts-dialog">
         <header className="known-hosts-dialog__header">
-          <div className="known-hosts-dialog__title">
-            <ShieldCheck size={16} />
+          <div className="known-hosts-dialog__title" id={titleId}>
+            <ShieldCheck size={16} aria-hidden="true" />
             <span>SSH known hosts</span>
           </div>
           <button
@@ -200,9 +190,7 @@ export function KnownHostsDialog({ open, onClose }: KnownHostsDialogProps) {
             Close
           </button>
         </footer>
-      </div>
-    </div>,
-    document.body,
+    </Modal>
   );
 }
 

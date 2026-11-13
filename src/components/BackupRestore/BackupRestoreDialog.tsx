@@ -1,4 +1,6 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useState, useCallback, useEffect, useId, useMemo, useRef } from "react";
+import { Modal } from "../Modal/Modal";
+import { CopyableError } from "../CopyableError/CopyableError";
 import { api, BackupRequest, RestoreRequest } from "../../lib/tauri";
 import {
   useConnectionStore,
@@ -78,7 +80,11 @@ function CustomFormatSelect({
       }
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onOpenChange(false);
+      if (e.key === "Escape") {
+        // Mark it handled so the enclosing dialog stays open.
+        e.preventDefault();
+        onOpenChange(false);
+      }
     };
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
@@ -292,15 +298,15 @@ export function BackupRestoreDialog({
     resetResult();
   };
 
+  const ids = useId();
   const canBackup = outputPath.trim().length > 0 && !loading;
   const canRestore = inputPath.trim().length > 0 && !loading;
 
   return (
-    <div className="dialog-overlay" onClick={loading ? undefined : onClose}>
-      <div className="dialog br-dialog" onClick={(e) => e.stopPropagation()}>
+    <Modal onClose={onClose} busy={loading} className="dialog br-dialog" labelledBy={`${ids}-title`}>
         <div className="dialog-header">
-          <h2>Backup &amp; Restore</h2>
-          <button className="btn-icon" onClick={onClose} disabled={loading}>
+          <h2 id={`${ids}-title`}>Backup &amp; Restore</h2>
+          <button className="btn-icon" onClick={onClose} disabled={loading} aria-label="Close" title="Close">
             <X size={16} />
           </button>
         </div>
@@ -308,7 +314,7 @@ export function BackupRestoreDialog({
         <div className="dialog-body">
           {/* Database read-only field */}
           <div className="form-group">
-            <label>Source database</label>
+            <span className="form-label">Source database</span>
             <div className="dr-readonly-field">
               <span className="dr-dot" style={{ background: sourceConn?.color || "#6d9eff" }} />
               <span className="dr-source-name" title={sourceConn?.name}>{sourceConn?.name || "Connection"}</span>
@@ -321,10 +327,11 @@ export function BackupRestoreDialog({
           </div>
 
           <div className="form-group">
-            <label>Operation</label>
-            <div className="br-tabs">
+            <span className="form-label" id={`${ids}-op`}>Operation</span>
+            <div className="br-tabs" role="group" aria-labelledby={`${ids}-op`}>
               <button
                 type="button"
+                aria-pressed={tab === "backup"}
                 className={`br-tab ${tab === "backup" ? "br-tab--active" : ""}`}
                 onClick={() => handleTabChange("backup")}
                 disabled={loading}
@@ -334,6 +341,7 @@ export function BackupRestoreDialog({
               </button>
               <button
                 type="button"
+                aria-pressed={tab === "restore"}
                 className={`br-tab ${tab === "restore" ? "br-tab--active" : ""}`}
                 onClick={() => handleTabChange("restore")}
                 disabled={loading}
@@ -348,9 +356,10 @@ export function BackupRestoreDialog({
           {tab === "backup" && (
             <>
               <div className="form-group">
-                <label>Output file path</label>
+                <label htmlFor={`${ids}-out`}>Output file path</label>
                 <div className="br-path-row">
                   <input
+                    id={`${ids}-out`}
                     type="text"
                     value={outputPath}
                     onChange={(e) => {
@@ -367,6 +376,7 @@ export function BackupRestoreDialog({
                     onClick={handleBrowseOutput}
                     disabled={loading}
                     title="Browse..."
+                    aria-label="Browse for the output file"
                   >
                     <FolderOpen size={18} />
                   </button>
@@ -412,9 +422,10 @@ export function BackupRestoreDialog({
           {tab === "restore" && (
             <>
               <div className="form-group">
-                <label>Input file path</label>
+                <label htmlFor={`${ids}-in`}>Input file path</label>
                 <div className="br-path-row">
                   <input
+                    id={`${ids}-in`}
                     type="text"
                     value={inputPath}
                     onChange={(e) => {
@@ -431,6 +442,7 @@ export function BackupRestoreDialog({
                     onClick={handleBrowseInput}
                     disabled={loading}
                     title="Browse..."
+                    aria-label="Browse for the backup file"
                   >
                     <FolderOpen size={18} />
                   </button>
@@ -466,7 +478,7 @@ export function BackupRestoreDialog({
 
           {/* Status banners */}
           {result && !loading && (
-            <div className="dr-banner dr-banner--success">
+            <div className="dr-banner dr-banner--success" role="status">
               <CheckCircle2 size={14} />
               <div>
                 <strong>{tab === "backup" ? "Backup complete" : "Restore complete"}</strong>
@@ -475,11 +487,11 @@ export function BackupRestoreDialog({
             </div>
           )}
           {error && !loading && (
-            <div className="dr-banner dr-banner--error">
-              <XCircle size={14} />
-              <div>
+            <div className="dr-banner dr-banner--error" role="alert">
+              <XCircle size={14} aria-hidden="true" />
+              <div className="dr-banner-body">
                 <strong>{tab === "backup" ? "Backup failed" : "Restore failed"}</strong>
-                <p className="dr-banner-sub">{error}</p>
+                <CopyableError message={error} />
               </div>
             </div>
           )}
@@ -509,7 +521,6 @@ export function BackupRestoreDialog({
             </button>
           )}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

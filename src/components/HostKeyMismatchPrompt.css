@@ -9,7 +9,7 @@
 }
 
 .host-mismatch-prompt {
-  width: min(480px, calc(100vw - 48px));
+  width: min(480px, calc(100 * var(--vw) - 48px));
   background: var(--bg-secondary);
   border: 1px solid var(--danger, #dc2626);
   border-radius: var(--radius-lg);

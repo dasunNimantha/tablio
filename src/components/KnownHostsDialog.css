@@ -9,8 +9,8 @@
 }
 
 .known-hosts-dialog {
-  width: min(720px, calc(100vw - 48px));
-  max-height: calc(100vh - 80px);
+  width: min(720px, calc(100 * var(--vw) - 48px));
+  max-height: calc(100 * var(--vh) - 80px);
   display: flex;
   flex-direction: column;
   background: var(--bg-secondary);

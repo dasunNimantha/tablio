@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useId, useRef, useState } from "react";
+import { Modal } from "./Modal/Modal";
 import { Key, X } from "lucide-react";
 import { useConnectionStore } from "../stores/connectionStore";
 import "./PassphrasePrompt.css";
@@ -17,25 +17,11 @@ export function PassphrasePrompt() {
   const [value, setValue] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
 
+  const titleId = useId();
+
   // Reset the field whenever a new prompt is shown.
   useEffect(() => {
-    if (pending) {
-      setValue("");
-      // Defer focus to next tick so the input exists in the DOM.
-      requestAnimationFrame(() => inputRef.current?.focus());
-    }
-  }, [pending]);
-
-  // Close on Escape.
-  useEffect(() => {
-    if (!pending) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        pending.reject(new Error("Passphrase prompt cancelled"));
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    if (pending) setValue("");
   }, [pending]);
 
   if (!pending) return null;
@@ -49,13 +35,24 @@ export function PassphrasePrompt() {
     pending.reject(new Error("Passphrase prompt cancelled"));
   };
 
-  return createPortal(
-    <div className="passphrase-prompt-overlay" role="dialog" aria-modal="true">
-      <form className="passphrase-prompt" onSubmit={submit}>
+  const isPassword = pending.kind === "password";
+
+  return (
+    <Modal
+      portal
+      as="form"
+      onSubmit={submit}
+      onClose={cancel}
+      closeOnOverlayClick={false}
+      overlayClassName="passphrase-prompt-overlay"
+      className="passphrase-prompt"
+      labelledBy={titleId}
+      initialFocusRef={inputRef}
+    >
         <div className="passphrase-prompt__header">
-          <div className="passphrase-prompt__title">
-            <Key size={16} />
-            <span>SSH key passphrase</span>
+          <div className="passphrase-prompt__title" id={titleId}>
+            <Key size={16} aria-hidden="true" />
+            <span>{isPassword ? "SSH password" : "SSH key passphrase"}</span>
           </div>
           <button
             type="button"
@@ -68,13 +65,24 @@ export function PassphrasePrompt() {
         </div>
         <div className="passphrase-prompt__body">
           <p className="passphrase-prompt__lead">
-            Enter the passphrase for this connection's SSH identity file.
+            {isPassword
+              ? "Enter the SSH password for this connection's tunnel. It is not saved."
+              : "Enter the passphrase for this connection's SSH identity file."}
           </p>
           <dl className="passphrase-prompt__meta">
             <dt>Connection</dt>
             <dd>{pending.connectionName || "(unnamed)"}</dd>
-            <dt>Identity file</dt>
-            <dd className="passphrase-prompt__path">{pending.keyPath || "(unspecified)"}</dd>
+            {isPassword ? (
+              <>
+                <dt>SSH login</dt>
+                <dd className="passphrase-prompt__path">{pending.sshTarget || "(unspecified)"}</dd>
+              </>
+            ) : (
+              <>
+                <dt>Identity file</dt>
+                <dd className="passphrase-prompt__path">{pending.keyPath || "(unspecified)"}</dd>
+              </>
+            )}
           </dl>
           <input
             ref={inputRef}
@@ -82,7 +90,8 @@ export function PassphrasePrompt() {
             type="password"
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            placeholder="Passphrase (leave blank if the key is unencrypted)"
+            placeholder={isPassword ? "Password" : "Passphrase (leave blank if the key is unencrypted)"}
+            aria-label={isPassword ? "SSH password" : "Key passphrase"}
             autoComplete="off"
           />
         </div>
@@ -94,8 +103,6 @@ export function PassphrasePrompt() {
             Continue
           </button>
         </div>
-      </form>
-    </div>,
-    document.body,
+    </Modal>
   );
 }

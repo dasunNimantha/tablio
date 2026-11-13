@@ -52,3 +52,17 @@ export function readZoomFactor(): number {
   const n = parseFloat(raw || "100");
   return Number.isFinite(n) && n > 0 ? n / 100 : 1;
 }
+
+/**
+ * Default UI zoom for this platform, in percent. Windows already ships a
+ * 125% OS scale on most 1080p laptops, so layering our 110% default on top
+ * compounds to ~137%; it defaults to 100% there and 110% elsewhere. Used
+ * for the initial zoom and for Ctrl+0 / clicking the zoom indicator.
+ */
+export function defaultZoomPercent(
+  nav: Pick<Navigator, "userAgent" | "platform"> | undefined = typeof navigator === "undefined" ? undefined : navigator,
+): number {
+  if (!nav) return 110;
+  const isWindows = /Windows/i.test(nav.userAgent) || /^Win/i.test(nav.platform);
+  return isWindows ? 100 : 110;
+}

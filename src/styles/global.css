@@ -209,6 +209,21 @@ body.zoom-compensated {
   height: max(100%, calc(100% / var(--app-zoom, 1)));
 }
 
+/* Viewport units that stay correct under the Chromium body-zoom path.
+   There `vh`/`vw` resolve against the unscaled viewport and are then
+   multiplied by the zoom, so a `86vh` dialog at 150% is 129% of the
+   window and its footer is unreachable. Dialogs size with
+   `calc(N * var(--vh))` instead, which divides the zoom back out on
+   Chromium and is plain `1vh` on WebKit (which auto-compensates). */
+:root {
+  --vh: 1vh;
+  --vw: 1vw;
+}
+body.zoom-compensated {
+  --vh: calc(1vh / var(--app-zoom, 1));
+  --vw: calc(1vw / var(--app-zoom, 1));
+}
+
 ::-webkit-scrollbar {
   width: 7px;
   height: 7px;
@@ -533,6 +548,8 @@ body.zoom-compensated .app-root {
 }
 
 .zoom-indicator {
+  border: none;
+  font-family: inherit;
   font-size: 13px;
   color: var(--text-secondary);
   padding: 2px 8px;
@@ -708,7 +725,8 @@ textarea,
   cursor: pointer;
 }
 
-.theme-picker-item:hover {
+.theme-picker-item:hover,
+.theme-picker-item:focus-visible {
   background: var(--bg-hover);
   color: var(--text-primary);
 }

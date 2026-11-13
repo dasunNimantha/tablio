@@ -26,6 +26,10 @@ interface Props {
    * positioning that every existing call site relies on.
    */
   portal?: boolean;
+  /** Forwarded to the trigger button so a visible label can name it. */
+  id?: string;
+  "aria-label"?: string;
+  "aria-labelledby"?: string;
 }
 
 /** Computed { top, left, width } for the portalised dropdown,
@@ -49,6 +53,9 @@ export function CustomSelect({
   searchable,
   placeholder,
   portal,
+  id,
+  "aria-label": ariaLabel,
+  "aria-labelledby": ariaLabelledBy,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -175,6 +182,9 @@ export function CustomSelect({
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Escape") {
+                // Close only the dropdown, not an enclosing modal.
+                e.preventDefault();
+                e.stopPropagation();
                 setOpen(false);
               }
               if (e.key === "Enter" && filtered.length === 1) {
@@ -206,10 +216,26 @@ export function CustomSelect({
   );
 
   return (
-    <div className={`cs-wrapper ${className || ""}`} ref={ref}>
+    <div
+      className={`cs-wrapper ${className || ""}`}
+      ref={ref}
+      onKeyDown={(e) => {
+        if (e.key === "Escape" && open) {
+          // Close the dropdown only, not an enclosing dialog.
+          e.preventDefault();
+          e.stopPropagation();
+          setOpen(false);
+        }
+      }}
+    >
       <button
         type="button"
         className="cs-trigger"
+        id={id}
+        aria-label={ariaLabel}
+        aria-labelledby={ariaLabelledBy}
+        aria-haspopup="listbox"
+        aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
         <span
@@ -218,6 +244,7 @@ export function CustomSelect({
           {selected?.label ?? placeholder ?? value}
         </span>
         <svg
+          aria-hidden="true"
           className="cs-chevron"
           width="10"
           height="10"

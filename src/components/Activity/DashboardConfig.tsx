@@ -119,6 +119,7 @@ export function DashboardConfig({ connectionId }: Props) {
           <Search size={14} />
           <input
             type="text"
+            aria-label="Search settings"
             placeholder="Search settings..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}

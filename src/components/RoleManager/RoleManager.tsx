@@ -1,4 +1,5 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useId, useState, useCallback, useRef } from "react";
+import { Modal } from "../Modal/Modal";
 import {
   api,
   RoleInfo,
@@ -17,6 +18,13 @@ import {
   Users,
 } from "lucide-react";
 import "./RoleManager.css";
+
+/** Passwords are sent exactly as typed: leading / trailing spaces are part
+ *  of the secret. Only an empty field means "no password" (create) or
+ *  "keep the current one" (edit). */
+export function rolePasswordValue(raw: string): string | null {
+  return raw === "" ? null : raw;
+}
 
 interface Props {
   connectionId: string;
@@ -55,6 +63,7 @@ function roleToForm(role: RoleInfo): RoleFormState {
 }
 
 export function RoleManager({ connectionId }: Props) {
+  const formIds = useId();
   const [roles, setRoles] = useState<RoleInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -99,7 +108,7 @@ export function RoleManager({ connectionId }: Props) {
       const request: CreateRoleRequest = {
         connection_id: connectionId,
         name: form.name.trim(),
-        password: form.password.trim() || null,
+        password: rolePasswordValue(form.password),
         is_superuser: form.is_superuser,
         can_login: form.can_login,
         can_create_db: form.can_create_db,
@@ -130,7 +139,7 @@ export function RoleManager({ connectionId }: Props) {
       const request: AlterRoleRequest = {
         connection_id: connectionId,
         name: editingRole.name,
-        password: form.password.trim() || undefined,
+        password: rolePasswordValue(form.password) ?? undefined,
         is_superuser: form.is_superuser,
         can_login: form.can_login,
         can_create_db: form.can_create_db,
@@ -157,12 +166,12 @@ export function RoleManager({ connectionId }: Props) {
         connection_id: connectionId,
         name: dropTarget.name,
       });
-      setDropTarget(null);
-      fetchRoles();
     } catch (e) {
-      setError(String(e));
-      setDropTarget(null);
+      // ConfirmDialog keeps itself open and shows this inline.
+      throw new Error(`Couldn't drop role "${dropTarget.name}": ${e instanceof Error ? e.message : String(e)}`);
     }
+    setDropTarget(null);
+    fetchRoles();
   };
 
   const openCreateForm = () => {
@@ -276,6 +285,7 @@ export function RoleManager({ connectionId }: Props) {
                         className="btn-icon"
                         onClick={() => openEditForm(role)}
                         title="Edit"
+                        aria-label={`Edit role ${role.name}`}
                       >
                         <Edit size={14} />
                       </button>
@@ -283,6 +293,7 @@ export function RoleManager({ connectionId }: Props) {
                         className="btn-icon"
                         onClick={() => setDropTarget(role)}
                         title="Drop"
+                        aria-label={`Drop role ${role.name}`}
                       >
                         <Trash2 size={14} />
                       </button>
@@ -296,21 +307,27 @@ export function RoleManager({ connectionId }: Props) {
       </div>
 
       {showForm && (
-        <div className="dialog-overlay" onClick={closeForm}>
-          <div className="dialog role-form" onClick={(e) => e.stopPropagation()}>
+        <Modal
+          onClose={closeForm}
+          busy={submitting}
+          closeOnOverlayClick={false}
+          className="dialog role-form"
+          labelledBy={`${formIds}-title`}
+        >
             <div className="dialog-header">
-              <h2>{editingRole ? "Edit Role" : "Create Role"}</h2>
-              <button className="btn-icon" onClick={closeForm}>
+              <h2 id={`${formIds}-title`}>{editingRole ? "Edit Role" : "Create Role"}</h2>
+              <button className="btn-icon" onClick={closeForm} aria-label="Close" title="Close" disabled={submitting}>
                 <X size={18} />
               </button>
             </div>
             <div className="dialog-body">
               {formError && (
-                <div className="role-form-error">{formError}</div>
+                <div className="role-form-error" role="alert">{formError}</div>
               )}
               <div className="form-group">
-                <label>Name</label>
+                <label htmlFor={`${formIds}-name`}>Name</label>
                 <input
+                  id={`${formIds}-name`}
                   type="text"
                   value={form.name}
                   onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
@@ -319,8 +336,9 @@ export function RoleManager({ connectionId }: Props) {
                 />
               </div>
               <div className="form-group">
-                <label>Password {editingRole && "(leave blank to keep current)"}</label>
+                <label htmlFor={`${formIds}-password`}>Password {editingRole && "(leave blank to keep current)"}</label>
                 <input
+                  id={`${formIds}-password`}
                   type="password"
                   value={form.password}
                   onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
@@ -370,8 +388,9 @@ export function RoleManager({ connectionId }: Props) {
                 </label>
               </div>
               <div className="form-group">
-                <label>Connection Limit (-1 = no limit)</label>
+                <label htmlFor={`${formIds}-limit`}>Connection Limit (-1 = no limit)</label>
                 <input
+                  id={`${formIds}-limit`}
                   type="number"
                   value={form.connection_limit < 0 ? "" : form.connection_limit}
                   onChange={(e) => {
@@ -407,8 +426,7 @@ export function RoleManager({ connectionId }: Props) {
                 </button>
               </div>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {dropTarget && (

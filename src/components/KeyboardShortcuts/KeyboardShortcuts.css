@@ -49,3 +49,22 @@
 .keyboard-key:first-child {
   margin-left: 0;
 }
+
+.keyboard-shortcuts-table + .keyboard-shortcuts-table {
+  margin-top: 14px;
+}
+
+.keyboard-shortcuts-group {
+  caption-side: top;
+  text-align: left;
+  padding-bottom: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.keyboard-shortcuts-body {
+  overflow-y: auto;
+}

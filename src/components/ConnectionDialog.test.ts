@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   normalizeConnectionForm,
+  parsePortText,
   validateConnectionForm,
 } from "./ConnectionDialog";
 import type { ConnectionConfig } from "../lib/tauri";
@@ -103,7 +104,7 @@ describe("normalizeConnectionForm — SSH fields", () => {
     expect(out.ssh_prompt_passphrase).toBe(true);
   });
 
-  it("ignores prompt-for-passphrase when auth = password", () => {
+  it("keeps ask-when-connecting for password auth and drops the stored password", () => {
     const out = normalizeConnectionForm({
       ...baseConfig,
       ssh_enabled: true,
@@ -113,8 +114,20 @@ describe("normalizeConnectionForm — SSH fields", () => {
       ssh_auth_method: "password",
       ssh_prompt_passphrase: true,
     });
+    expect(out.ssh_prompt_passphrase).toBe(true);
+    expect(out.ssh_password).toBe("");
+  });
+
+  it("ignores prompt-for-passphrase when auth = agent", () => {
+    const out = normalizeConnectionForm({
+      ...baseConfig,
+      ssh_enabled: true,
+      ssh_host: "h",
+      ssh_user: "u",
+      ssh_auth_method: "agent",
+      ssh_prompt_passphrase: true,
+    });
     expect(out.ssh_prompt_passphrase).toBe(false);
-    expect(out.ssh_password).toBe("secret-bastion-password");
   });
 
   it("falls back to ssh_port = 22 when missing", () => {
@@ -234,5 +247,57 @@ describe("validateConnectionForm — SSH rules", () => {
     expect(errors.user).toBeTruthy();
     expect(errors.ssh_host).toBeTruthy();
     expect(errors.ssh_user).toBeTruthy();
+  });
+});
+
+describe("parsePortText", () => {
+  it("parses plain integers", () => {
+    expect(parsePortText("5432")).toBe(5432);
+    expect(parsePortText(" 22 ")).toBe(22);
+  });
+
+  it("returns NaN for empty, negative, fractional or non-numeric text", () => {
+    for (const t of ["", "-1", "5432.5", "54a", "1e3", "123456"]) {
+      expect(parsePortText(t)).toBeNaN();
+    }
+  });
+});
+
+describe("validateConnectionForm — host and port", () => {
+  it("reports a port that isn't a whole number in range", () => {
+    for (const port of [NaN, 0, -1, 5432.5, 65536]) {
+      const errors = validateConnectionForm({ ...baseConfig, port }, []);
+      expect(errors.port).toMatch(/whole number from 1 to 65535/);
+    }
+    expect(validateConnectionForm({ ...baseConfig, port: 65535 }, []).port).toBeUndefined();
+  });
+
+  it("rejects hosts containing whitespace", () => {
+    expect(validateConnectionForm({ ...baseConfig, host: "db example.com" }, []).host).toMatch(/spaces/);
+    expect(validateConnectionForm({ ...baseConfig, db_type: "cassandra", host: "a b" }, []).host).toMatch(/spaces/);
+  });
+
+  it("rejects SSH hosts containing whitespace", () => {
+    const errors = validateConnectionForm(
+      { ...baseConfig, ssh_enabled: true, ssh_host: "bas tion", ssh_user: "u", ssh_password: "p" },
+      [],
+    );
+    expect(errors.ssh_host).toMatch(/spaces/);
+  });
+
+  it("doesn't require a stored SSH password when asking at connect time", () => {
+    const errors = validateConnectionForm(
+      {
+        ...baseConfig,
+        ssh_enabled: true,
+        ssh_host: "h",
+        ssh_user: "u",
+        ssh_password: "",
+        ssh_auth_method: "password",
+        ssh_prompt_passphrase: true,
+      },
+      [],
+    );
+    expect(errors.ssh_password).toBeUndefined();
   });
 });

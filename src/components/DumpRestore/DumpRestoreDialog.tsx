@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useEffect, useId, useMemo, useRef, useState, useCallback } from "react";
+import { Modal } from "../Modal/Modal";
+import { CopyableError } from "../CopyableError/CopyableError";
 import { listen } from "@tauri-apps/api/event";
 import { api, DumpRestoreRequest } from "../../lib/tauri";
 import {
@@ -170,6 +172,8 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
     }
   };
 
+  const ids = useId();
+
   const handleBack = () => {
     setStep("select");
     setResult(null);
@@ -177,11 +181,18 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
   };
 
   return (
-    <div className="dialog-overlay">
-      <div className="dialog dr-dialog">
+    <Modal
+      onClose={onClose}
+      busy={step === "running"}
+      // Backdrop clicks were ignored before; keep it that way for a
+      // multi-step destructive flow.
+      closeOnOverlayClick={false}
+      className="dialog dr-dialog"
+      labelledBy={`${ids}-title`}
+    >
         <div className="dialog-header">
-          <h2>Dump &amp; Restore</h2>
-          <button className="btn-icon" onClick={onClose} disabled={step === "running"}>
+          <h2 id={`${ids}-title`}>Dump &amp; Restore</h2>
+          <button className="btn-icon" onClick={onClose} disabled={step === "running"} aria-label="Close" title="Close">
             <X size={18} />
           </button>
         </div>
@@ -192,7 +203,7 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
             <>
               {/* Source info - simple read-only row */}
               <div className="form-group">
-                <label>Source database</label>
+                <span className="form-label">Source database</span>
                 <div className="dr-readonly-field">
                   <span className="dr-dot" style={{ background: sourceConn?.color || "#6d9eff" }} />
                   <span className="dr-source-name" title={sourceConn?.name}>{sourceConn?.name}</span>
@@ -206,7 +217,7 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
 
               {/* Target selection */}
               <div className="form-group">
-                <label>Restore to</label>
+                <span className="form-label" id={`${ids}-targets`}>Restore to</span>
                 {loadingTargets ? (
                   <div className="dr-placeholder">
                     <Loader2 size={16} className="spin" />
@@ -220,16 +231,17 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
                   <div className="dr-target-list">
                     {targets.length > 6 && (
                       <div className="dr-filter">
-                        <Search size={14} />
+                        <Search size={14} aria-hidden="true" />
                         <input
                           type="text"
+                          aria-label="Filter databases"
                           placeholder="Filter databases…"
                           value={filter}
                           onChange={(e) => setFilter(e.target.value)}
                         />
                       </div>
                     )}
-                    <div className="dr-target-scroll">
+                    <div className="dr-target-scroll" role="group" aria-labelledby={`${ids}-targets`}>
                       {filteredTargets.length === 0 ? (
                         <div className="dr-no-match">No matching databases</div>
                       ) : (
@@ -241,6 +253,7 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
                               key={key}
                               type="button"
                               className={`dr-target-item ${active ? "dr-target-item--active" : ""}`}
+                              aria-pressed={active}
                               onClick={() => {
                                 setSelectedTarget(key);
                                 setStep("select");
@@ -315,8 +328,8 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
 
           {/* ── Step 3: Done ── */}
           {step === "done" && result && (
-            <div className="dr-banner dr-banner--success">
-              <CheckCircle size={18} />
+            <div className="dr-banner dr-banner--success" role="status">
+              <CheckCircle size={18} aria-hidden="true" />
               <div>
                 <strong>Restore complete</strong>
                 <p className="dr-banner-sub">{result}</p>
@@ -324,11 +337,11 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
             </div>
           )}
           {step === "done" && error && (
-            <div className="dr-banner dr-banner--error">
-              <XCircle size={18} />
-              <div>
+            <div className="dr-banner dr-banner--error" role="alert">
+              <XCircle size={18} aria-hidden="true" />
+              <div className="dr-banner-body">
                 <strong>Restore failed</strong>
-                <p className="dr-banner-sub">{error}</p>
+                <CopyableError message={error} />
               </div>
             </div>
           )}
@@ -339,6 +352,7 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
               <button
                 type="button"
                 className="dr-logs-toggle"
+                aria-expanded={logsOpen}
                 onClick={() => setLogsOpen((v) => !v)}
               >
                 <span>Logs</span>
@@ -387,7 +401,6 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
             </>
           )}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

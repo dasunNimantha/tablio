@@ -4,7 +4,7 @@
   border-radius: var(--radius-xl);
   padding: 28px;
   width: 380px;
-  max-width: 90vw;
+  max-width: calc(90 * var(--vw));
   text-align: center;
   box-shadow: var(--shadow-lg);
   animation: fadeIn 0.18s ease;
@@ -44,4 +44,27 @@
   min-width: 90px;
   height: 34px;
   font-size: 13px;
+}
+
+.confirm-dialog-error {
+  margin: -8px 0 16px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--error) 40%, var(--border));
+  background: color-mix(in srgb, var(--error) 10%, var(--bg-surface));
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.confirm-dialog-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }

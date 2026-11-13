@@ -4,14 +4,14 @@
  * left-rail nav + section-card layout matches; only the dialog-
  * level width and a few preferences-specific controls live here. */
 
-/* Connection dialog ships at min(840px, 100vw-32px) which is too
+/* Connection dialog ships at min(840px, 100vw - 32px) which is too
  * roomy for the two-row preferences content. Cap a bit tighter and
  * let the height auto-fit the active section so the empty space
  * doesn't dominate. */
 .preferences-dialog.connection-dialog {
-  width: min(720px, calc(100vw - 32px));
-  min-width: min(640px, calc(100vw - 32px));
-  height: min(72vh, 540px);
+  width: min(720px, calc(100 * var(--vw) - 32px));
+  min-width: min(640px, calc(100 * var(--vw) - 32px));
+  height: min(calc(72 * var(--vh)), 540px);
 }
 
 /* CustomSelect → match the height + typography of the size-input

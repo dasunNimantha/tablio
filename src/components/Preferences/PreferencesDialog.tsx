@@ -1,4 +1,5 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
+import { Modal } from "../Modal/Modal";
 import { X, RotateCcw, Type, FileCode } from "lucide-react";
 import { CustomSelect } from "../CustomSelect/CustomSelect";
 import {
@@ -66,10 +67,13 @@ function FontFamilyField({
   value: string | null;
   onChange: (family: string | null) => void;
 }) {
+  const id = useId();
   return (
     <div className="form-group">
-      <label>Font family</label>
+      <label id={`${id}-label`} htmlFor={`${id}-trigger`}>Font family</label>
       <CustomSelect
+        id={`${id}-trigger`}
+        aria-labelledby={`${id}-label ${id}-trigger`}
         className="preferences-font-select"
         // CustomSelect identifies the active option by `value`, so
         // map `null` → the sentinel literal it can match.
@@ -99,10 +103,12 @@ function FontSizeField({
   max: number;
   onChange: (size: number) => void;
 }) {
+  const id = useId();
   return (
     <div className="form-group preferences-size-group">
-      <label>Font size</label>
+      <label htmlFor={id}>Font size</label>
       <input
+        id={id}
         className="preferences-size-input"
         type="number"
         min={min}
@@ -169,6 +175,7 @@ export function PreferencesDialog({ onClose }: Props) {
   const resetToDefaults = useUserSettingsStore((s) => s.resetToDefaults);
 
   const [activeSection, setActiveSection] = useState<SectionId>("interface");
+  const titleId = useId();
 
   // Probe what's installed once per mount. Bundled fonts + the
   // "System default" sentinel always pass through.
@@ -182,13 +189,10 @@ export function PreferencesDialog({ onClose }: Props) {
   );
 
   return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div
-        className="dialog connection-dialog preferences-dialog"
-        onClick={(e) => e.stopPropagation()}
-      >
+    // Settings apply live, so closing (Esc / backdrop) never loses work.
+    <Modal onClose={onClose} className="dialog connection-dialog preferences-dialog" labelledBy={titleId}>
         <div className="dialog-header">
-          <h2>Preferences</h2>
+          <h2 id={titleId}>Preferences</h2>
           <button
             className="btn-icon"
             onClick={onClose}
@@ -216,7 +220,7 @@ export function PreferencesDialog({ onClose }: Props) {
                 data-section={section.id}
                 data-testid={`preferences-nav-${section.id}`}
               >
-                <span className="connection-nav-item__icon">
+                <span className="connection-nav-item__icon" aria-hidden="true">
                   {section.icon}
                 </span>
                 <span className="connection-nav-item__text">
@@ -295,7 +299,6 @@ export function PreferencesDialog({ onClose }: Props) {
             </button>
           </div>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

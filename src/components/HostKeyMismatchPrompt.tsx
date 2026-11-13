@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { createPortal } from "react-dom";
+import { useId, useRef } from "react";
+import { Modal } from "./Modal/Modal";
 import { ShieldAlert, X } from "lucide-react";
 import { useConnectionStore } from "../stores/connectionStore";
 import "./HostKeyMismatchPrompt.css";
@@ -18,29 +18,27 @@ import "./HostKeyMismatchPrompt.css";
 export function HostKeyMismatchPrompt() {
   const pending = useConnectionStore((s) => s.pendingHostKeyMismatch);
 
-  useEffect(() => {
-    if (!pending) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") pending.resolve(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [pending]);
+  const titleId = useId();
+  const cancelRef = useRef<HTMLButtonElement>(null);
 
   if (!pending) return null;
 
   const { info, connectionName } = pending;
 
-  return createPortal(
-    <div
-      className="host-mismatch-overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-label="SSH host key changed"
+  return (
+    <Modal
+      portal
+      role="alertdialog"
+      onClose={() => pending.resolve(false)}
+      closeOnOverlayClick={false}
+      overlayClassName="host-mismatch-overlay"
+      className="host-mismatch-prompt"
+      labelledBy={titleId}
+      // Default-deny: start on Cancel, never on the destructive action.
+      initialFocusRef={cancelRef}
     >
-      <div className="host-mismatch-prompt">
         <header className="host-mismatch-prompt__header">
-          <div className="host-mismatch-prompt__title">
+          <div className="host-mismatch-prompt__title" id={titleId}>
             <ShieldAlert size={16} />
             <span>SSH host key changed</span>
           </div>
@@ -74,6 +72,7 @@ export function HostKeyMismatchPrompt() {
 
         <footer className="host-mismatch-prompt__footer">
           <button
+            ref={cancelRef}
             type="button"
             className="btn-secondary"
             onClick={() => pending.resolve(false)}
@@ -88,8 +87,6 @@ export function HostKeyMismatchPrompt() {
             Forget &amp; retry
           </button>
         </footer>
-      </div>
-    </div>,
-    document.body,
+    </Modal>
   );
 }
