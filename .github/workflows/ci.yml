@@ -1007,7 +1007,7 @@ jobs:
     name: Build
     needs: [changes, test-frontend, test-e2e, fmt-and-clippy, test-postgres, test-mysql, test-mariadb, test-cockroachdb, test-tidb, test-sqlite, test-ssh-tunnel, test-cassandra, test-scylladb]
     if: ${{ !failure() && !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
