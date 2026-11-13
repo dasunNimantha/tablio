@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { generateQueryResult } from "./mockData";
 import {
   api,
   parseSshHostKeyMismatch,
@@ -90,5 +91,12 @@ describe("xlsx mock-mode commands", () => {
     const first = payload.rows[0] as unknown[];
     expect(typeof first[0]).toBe("number");
     expect(typeof first[2]).toBe("boolean");
+  });
+});
+
+describe("console result mock contract", () => {
+  it("reports notices for session-changing scripts only", () => {
+    expect(generateQueryResult("SET statement_timeout = 5").notices?.length).toBe(1);
+    expect(generateQueryResult("SELECT 1").notices).toBeUndefined();
   });
 });

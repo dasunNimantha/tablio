@@ -202,7 +202,7 @@ pub fn split_sql_statements_for(sql: &str, dialect: SqlDialect) -> Vec<String> {
         // Line comment: scan until newline. The newline itself is
         // kept on the current statement so subsequent line-based
         // diagnostics still resolve correctly.
-        if c == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
+        if starts_line_comment(&chars, i, dialect) {
             while i < chars.len() && chars[i] != '\n' {
                 current.push(chars[i]);
                 i += 1;
@@ -411,6 +411,24 @@ pub fn split_sql_statements_for(sql: &str, dialect: SqlDialect) -> Vec<String> {
     }
 
     statements
+}
+
+/// Whether a line comment starts at `chars[pos]`.
+///
+/// `--` starts one everywhere except that MySQL requires whitespace (or
+/// a control character / end of input) after it: `SELECT 1--1` is
+/// `1 - (-1)` there. MySQL also treats `#` as a line comment.
+fn starts_line_comment(chars: &[char], pos: usize, dialect: SqlDialect) -> bool {
+    match chars[pos] {
+        '-' if pos + 1 < chars.len() && chars[pos + 1] == '-' => {
+            dialect != SqlDialect::MySql
+                || chars
+                    .get(pos + 2)
+                    .is_none_or(|c| c.is_whitespace() || c.is_control())
+        }
+        '#' => dialect == SqlDialect::MySql,
+        _ => false,
+    }
 }
 
 /// Returns true when `chars[pos]` is the start of an identifier-like
@@ -833,7 +851,9 @@ pub fn statement_is_select_like(sql: &str, select_keywords: &[&str]) -> bool {
 fn strip_leading_comments(mut s: &str) -> &str {
     loop {
         s = s.trim_start();
-        if let Some(rest) = s.strip_prefix("--") {
+        // `#` only starts a comment on MySQL, but no engine's statement
+        // can begin with one, so stripping it everywhere is safe.
+        if let Some(rest) = s.strip_prefix("--").or_else(|| s.strip_prefix('#')) {
             // Skip until newline.
             match rest.find('\n') {
                 Some(idx) => s = &rest[idx + 1..],
@@ -849,6 +869,302 @@ fn strip_leading_comments(mut s: &str) -> &str {
             return s;
         }
     }
+}
+
+/// The first `n` words of `stmt` (after leading comments), upper-cased
+/// and joined by single spaces.
+pub fn leading_words(stmt: &str, n: usize) -> String {
+    strip_leading_comments(stmt)
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ';')
+        .filter(|w| !w.is_empty())
+        .take(n)
+        .map(|w| w.to_ascii_uppercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether a console script changes state that outlives the statement
+/// on its (pooled) connection: session settings (`SET`, `RESET`,
+/// `SET ROLE`, `set_config(...)`), temporary tables, prepared
+/// statements, cursors, `LISTEN`, session-level locks.
+///
+/// Such a connection must not go back to the pool, or the next
+/// borrower (another console tab, the data grid) silently inherits a
+/// `statement_timeout`, `search_path`, `sql_mode`, role, ...
+pub fn script_changes_session(statements: &[String]) -> bool {
+    statements.iter().any(|stmt| {
+        let words = leading_words(stmt, 3);
+        let mut it = words.split(' ');
+        let first = it.next().unwrap_or("");
+        let second = it.next().unwrap_or("");
+        let third = it.next().unwrap_or("");
+        let by_keyword = match first {
+            "SET" | "RESET" | "PREPARE" | "LISTEN" | "LOAD" | "XA" | "LOCK" | "HANDLER" => true,
+            // `DECLARE c CURSOR WITH HOLD` survives the transaction.
+            "DECLARE" => true,
+            "CREATE" => {
+                matches!(second, "TEMP" | "TEMPORARY")
+                    || (matches!(second, "LOCAL" | "GLOBAL")
+                        && matches!(third, "TEMP" | "TEMPORARY"))
+            }
+            _ => false,
+        };
+        if by_keyword {
+            return true;
+        }
+        // Function calls that change session state from inside any
+        // statement (`SELECT set_config('search_path', ...)`).
+        let lower = mask_quoted_contents(stmt, SqlDialect::Generic)
+            .unwrap_or_else(|| stmt.clone())
+            .to_ascii_lowercase();
+        [
+            "set_config(",
+            "set_config (",
+            "pg_advisory_lock(",
+            "pg_advisory_lock_shared(",
+            "get_lock(",
+        ]
+        .iter()
+        .any(|f| lower.contains(f))
+    })
+}
+
+/// Split a T-SQL script into batches on `GO` separator lines, like
+/// `sqlcmd` / SSMS do. `GO` is only a separator on a line of its own
+/// (optionally followed by a repeat count and a `--` comment), matched
+/// case-insensitively, and not inside a string, quoted identifier or
+/// block comment that spans lines. Each batch comes with its repeat
+/// count (`GO 3` runs the batch three times). Empty batches are
+/// dropped.
+pub fn split_tsql_batches(sql: &str) -> Vec<(String, u32)> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum St {
+        Code,
+        Single,
+        Double,
+        Bracket,
+        Block,
+    }
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut st = St::Code;
+    for line in sql.split_inclusive('\n') {
+        if st == St::Code {
+            if let Some(count) = go_separator(line) {
+                let batch = current.trim();
+                if !batch.is_empty() && count > 0 {
+                    out.push((batch.to_string(), count));
+                }
+                current.clear();
+                continue;
+            }
+        }
+        // Track multi-line constructs so a `GO` inside them is content.
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            let next = chars.get(i + 1).copied();
+            match st {
+                St::Code => match c {
+                    '-' if next == Some('-') => break,
+                    '/' if next == Some('*') => {
+                        st = St::Block;
+                        i += 1;
+                    }
+                    '\'' => st = St::Single,
+                    '"' => st = St::Double,
+                    '[' => st = St::Bracket,
+                    _ => {}
+                },
+                St::Single if c == '\'' => {
+                    if next == Some('\'') {
+                        i += 1;
+                    } else {
+                        st = St::Code;
+                    }
+                }
+                St::Double if c == '"' => {
+                    if next == Some('"') {
+                        i += 1;
+                    } else {
+                        st = St::Code;
+                    }
+                }
+                St::Bracket if c == ']' => {
+                    if next == Some(']') {
+                        i += 1;
+                    } else {
+                        st = St::Code;
+                    }
+                }
+                St::Block if c == '*' && next == Some('/') => {
+                    st = St::Code;
+                    i += 1;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        current.push_str(line);
+    }
+    let batch = current.trim();
+    if !batch.is_empty() {
+        out.push((batch.to_string(), 1));
+    }
+    out
+}
+
+/// Whether `stmt` creates or alters an object that T-SQL requires to be
+/// the only statement of its batch (`CREATE VIEW`, `PROCEDURE`,
+/// `FUNCTION`, `TRIGGER`, `SCHEMA`, `CREATE OR ALTER ...`, `ALTER VIEW`
+/// ...).
+fn is_tsql_batch_only_ddl(stmt: &str) -> bool {
+    let words = leading_words(stmt, 4);
+    let w: Vec<&str> = words.split(' ').collect();
+    let object_at = match (w.first().copied(), w.get(1).copied(), w.get(2).copied()) {
+        (Some("CREATE"), Some("OR"), Some("ALTER")) => 3,
+        (Some("CREATE") | Some("ALTER"), _, _) => 1,
+        _ => return false,
+    };
+    let is_schema = w.first() == Some(&"CREATE") && w.get(object_at) == Some(&"SCHEMA");
+    is_schema
+        || matches!(
+            w.get(object_at).copied(),
+            Some("VIEW" | "PROC" | "PROCEDURE" | "FUNCTION" | "TRIGGER")
+        )
+}
+
+/// Split one T-SQL batch further only where the server demands it.
+///
+/// A batch is normally sent as written, so variables, `IF ... BEGIN ...
+/// END` blocks and `SET` options span its statements. But `CREATE VIEW
+/// v ...; SELECT * FROM v` in one batch is rejected ("must be the only
+/// statement in the batch"), so each such statement runs as a batch of
+/// its own and the statements around it are grouped into batches
+/// between them. Without such a statement the batch is returned as is.
+pub fn split_tsql_batch_only_ddl(batch: &str) -> Vec<String> {
+    let statements = split_sql_statements(batch);
+    if !statements.iter().any(|s| is_tsql_batch_only_ddl(s)) {
+        return vec![batch.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut group: Vec<String> = Vec::new();
+    for stmt in statements {
+        if is_tsql_batch_only_ddl(&stmt) {
+            if !group.is_empty() {
+                out.push(group.join(";\n"));
+                group.clear();
+            }
+            out.push(stmt);
+        } else {
+            group.push(stmt);
+        }
+    }
+    if !group.is_empty() {
+        out.push(group.join(";\n"));
+    }
+    out
+}
+
+/// The batches a T-SQL console script runs as, in order: split on `GO`
+/// lines (repeated `GO n` times) and around statements that must be
+/// alone in their batch.
+pub fn tsql_execution_batches(sql: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (batch, repeat) in split_tsql_batches(sql) {
+        let parts = split_tsql_batch_only_ddl(&batch);
+        for _ in 0..repeat {
+            out.extend(parts.iter().cloned());
+        }
+    }
+    out
+}
+
+/// `Some(repeat count)` when `line` is a `GO [count] [-- comment]`
+/// batch separator.
+fn go_separator(line: &str) -> Option<u32> {
+    let code = match line.find("--") {
+        Some(idx) => &line[..idx],
+        None => line,
+    };
+    let mut words = code.split_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("GO") {
+        return None;
+    }
+    let count = match words.next() {
+        None => 1,
+        Some(n) => n.parse::<u32>().ok()?,
+    };
+    if words.next().is_some() {
+        return None;
+    }
+    Some(count)
+}
+
+/// T-SQL `SET` options that change the session (as opposed to the
+/// `SET` of an `UPDATE` or a variable assignment `SET @x = ...`).
+const TSQL_SET_OPTIONS: &[&str] = &[
+    "ANSI_DEFAULTS",
+    "ANSI_NULL_DFLT_OFF",
+    "ANSI_NULL_DFLT_ON",
+    "ANSI_NULLS",
+    "ANSI_PADDING",
+    "ANSI_WARNINGS",
+    "ARITHABORT",
+    "ARITHIGNORE",
+    "CONCAT_NULL_YIELDS_NULL",
+    "CONTEXT_INFO",
+    "CURSOR_CLOSE_ON_COMMIT",
+    "DATEFIRST",
+    "DATEFORMAT",
+    "DEADLOCK_PRIORITY",
+    "FIPS_FLAGGER",
+    "FMTONLY",
+    "FORCEPLAN",
+    "IDENTITY_INSERT",
+    "IMPLICIT_TRANSACTIONS",
+    "LANGUAGE",
+    "LOCK_TIMEOUT",
+    "NOCOUNT",
+    "NOEXEC",
+    "NUMERIC_ROUNDABORT",
+    "OFFSETS",
+    "PARSEONLY",
+    "QUERY_GOVERNOR_COST_LIMIT",
+    "QUOTED_IDENTIFIER",
+    "REMOTE_PROC_TRANSACTIONS",
+    "ROWCOUNT",
+    "SHOWPLAN_ALL",
+    "SHOWPLAN_TEXT",
+    "SHOWPLAN_XML",
+    "STATISTICS",
+    "TEXTSIZE",
+    "TRANSACTION",
+    "XACT_ABORT",
+];
+
+/// Whether a T-SQL batch changes session state that would leak into
+/// later work on the same connection: `SET <option>`, impersonation
+/// (`EXECUTE AS`, `SETUSER`) or session context. Strings and quoted
+/// identifiers are ignored; a false positive only costs a reconnect.
+pub fn tsql_changes_session(batch: &str) -> bool {
+    let masked = mask_quoted_contents(batch, SqlDialect::Generic)
+        .unwrap_or_else(|| batch.to_string())
+        .to_ascii_uppercase();
+    let words: Vec<&str> = masked
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '@'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.iter().enumerate().any(|(i, w)| {
+        let next = words.get(i + 1).copied().unwrap_or("");
+        match *w {
+            "SET" => TSQL_SET_OPTIONS.contains(&next),
+            "EXECUTE" | "EXEC" => next == "AS",
+            "SETUSER" | "SP_SET_SESSION_CONTEXT" => true,
+            _ => false,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1384,5 +1700,154 @@ mod tests {
         );
         // On MySQL the same input is one unterminated literal.
         assert!(filter_unsafe_reason_for(r"a = 'x\'; DROP TABLE t", SqlDialect::MySql).is_some());
+    }
+
+    #[test]
+    fn split_mysql_hash_comment_hides_semicolon() {
+        let out = split_sql_statements_for("SELECT 1 # c ;\n, 2", SqlDialect::MySql);
+        assert_eq!(out, vec!["SELECT 1 # c ;\n, 2"]);
+        // Not a comment elsewhere.
+        assert_eq!(
+            split_sql_statements_for("SELECT 1 # c ;\n, 2", SqlDialect::Postgres).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn split_mysql_double_dash_needs_whitespace() {
+        // `1--1` is arithmetic on MySQL, so the `;` still separates.
+        let out = split_sql_statements_for("SELECT 1--1; SELECT 2", SqlDialect::MySql);
+        assert_eq!(out, vec!["SELECT 1--1", "SELECT 2"]);
+        let out = split_sql_statements_for("SELECT 1 -- c; x\n; SELECT 2", SqlDialect::MySql);
+        assert_eq!(out, vec!["SELECT 1 -- c; x", "SELECT 2"]);
+        let out = split_sql_statements_for("SELECT 1 --\n; SELECT 2", SqlDialect::MySql);
+        assert_eq!(out, vec!["SELECT 1 --", "SELECT 2"]);
+    }
+
+    #[test]
+    fn select_like_strips_hash_comments() {
+        assert!(statement_is_select_like("# note\nSELECT 1", &["SELECT"]));
+    }
+
+    #[test]
+    fn session_changing_scripts_are_detected() {
+        let s = |v: &[&str]| -> Vec<String> { v.iter().map(|x| x.to_string()).collect() };
+        assert!(script_changes_session(&s(&["SET statement_timeout = 50"])));
+        assert!(script_changes_session(&s(&[
+            "-- c\nset search_path to x",
+            "SELECT 1"
+        ])));
+        assert!(script_changes_session(&s(&["RESET ALL"])));
+        assert!(script_changes_session(&s(&[
+            "SET SESSION sql_mode='ANSI_QUOTES'"
+        ])));
+        assert!(script_changes_session(&s(&["CREATE TEMP TABLE t (a int)"])));
+        assert!(script_changes_session(&s(&[
+            "create local temporary table t (a int)"
+        ])));
+        assert!(script_changes_session(&s(&[
+            "CREATE TEMPORARY TABLE t (a int)"
+        ])));
+        assert!(script_changes_session(&s(&[
+            "SELECT set_config('search_path', 'x', false)"
+        ])));
+        assert!(script_changes_session(&s(&["SELECT pg_advisory_lock(1)"])));
+        assert!(script_changes_session(&s(&["PREPARE p AS SELECT 1"])));
+        assert!(!script_changes_session(&s(&[
+            "SELECT 1",
+            "UPDATE t SET a = 1"
+        ])));
+        assert!(!script_changes_session(&s(&[
+            "CREATE TABLE settings (a int)"
+        ])));
+        assert!(!script_changes_session(&s(&["SELECT 'set_config(' AS s"])));
+    }
+
+    #[test]
+    fn tsql_batches_split_on_go_lines() {
+        let out = split_tsql_batches("SELECT 1\nGO\nselect 2\n  go  \nSELECT 3");
+        assert_eq!(
+            out,
+            vec![
+                ("SELECT 1".to_string(), 1),
+                ("select 2".to_string(), 1),
+                ("SELECT 3".to_string(), 1)
+            ]
+        );
+        // Repeat count and trailing comment.
+        assert_eq!(
+            split_tsql_batches("INSERT INTO t DEFAULT VALUES\nGO 3 -- thrice\n"),
+            vec![("INSERT INTO t DEFAULT VALUES".to_string(), 3)]
+        );
+        // Not a separator: part of a statement, inside a string or a
+        // block comment spanning lines, or an identifier named go.
+        let script = "SELECT 'a\nGO\nb' AS s\n/*\nGO\n*/\nSELECT go FROM t\nGO";
+        assert_eq!(
+            split_tsql_batches(script),
+            vec![(
+                "SELECT 'a\nGO\nb' AS s\n/*\nGO\n*/\nSELECT go FROM t".to_string(),
+                1
+            )]
+        );
+        // A `--` comment does not open a multi-line construct.
+        assert_eq!(
+            split_tsql_batches("SELECT 1 -- it's\nGO\nSELECT 2").len(),
+            2
+        );
+        assert!(split_tsql_batches("GO\n  \nGO").is_empty());
+        // Semicolons do not split.
+        assert_eq!(split_tsql_batches("SELECT 1; SELECT 2").len(), 1);
+    }
+
+    #[test]
+    fn tsql_session_changes_are_detected() {
+        assert!(tsql_changes_session("SET LOCK_TIMEOUT 1000; SELECT 1"));
+        assert!(tsql_changes_session("set implicit_transactions on"));
+        assert!(tsql_changes_session("IF 1=1 BEGIN SET XACT_ABORT ON END"));
+        assert!(tsql_changes_session("EXECUTE AS USER = 'x'"));
+        assert!(tsql_changes_session(
+            "SET TRANSACTION ISOLATION LEVEL SNAPSHOT"
+        ));
+        assert!(!tsql_changes_session("UPDATE t SET a = 1"));
+        assert!(!tsql_changes_session(
+            "DECLARE @n int; SET @n = 1; SELECT @n"
+        ));
+        assert!(!tsql_changes_session("SELECT 'SET NOCOUNT ON' AS s"));
+    }
+
+    #[test]
+    fn tsql_create_view_runs_in_its_own_batch() {
+        let out = split_tsql_batch_only_ddl(
+            "CREATE TABLE t (x int); CREATE VIEW v AS SELECT x FROM t; SELECT * FROM v",
+        );
+        assert_eq!(
+            out,
+            vec![
+                "CREATE TABLE t (x int)",
+                "CREATE VIEW v AS SELECT x FROM t",
+                "SELECT * FROM v"
+            ]
+        );
+        let out = split_tsql_batch_only_ddl(
+            "create or alter procedure p as begin select 1; select 2; end; exec p",
+        );
+        assert_eq!(
+            out,
+            vec![
+                "create or alter procedure p as begin select 1; select 2; end",
+                "exec p"
+            ]
+        );
+        // Without such a statement the batch is kept verbatim.
+        let script = "DECLARE @t TABLE(a int); INSERT INTO @t VALUES(1);\nSELECT * FROM @t";
+        assert_eq!(split_tsql_batch_only_ddl(script), vec![script]);
+        assert_eq!(
+            split_tsql_batch_only_ddl("IF 1=1 BEGIN SELECT 1 AS v; END"),
+            vec!["IF 1=1 BEGIN SELECT 1 AS v; END"]
+        );
+        assert_eq!(
+            tsql_execution_batches("SELECT 1\nGO 2\nCREATE SCHEMA s; SELECT 2"),
+            vec!["SELECT 1", "SELECT 1", "CREATE SCHEMA s", "SELECT 2"]
+        );
     }
 }

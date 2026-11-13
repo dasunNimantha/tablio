@@ -152,13 +152,21 @@ pub struct TableData {
     pub limit: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
     pub rows_affected: u64,
     pub execution_time_ms: u64,
+    /// The result is a row set (possibly with zero rows, in which case
+    /// `columns` still names its columns) rather than a row count.
     pub is_select: bool,
+    /// Informational messages about the run the console shows next to
+    /// the result: e.g. that a script returned several result sets and
+    /// only the last is shown, or that session settings it changed
+    /// were discarded afterwards. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

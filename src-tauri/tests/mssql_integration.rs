@@ -3133,3 +3133,383 @@ async fn mssql_hierarchyid_shows_as_text_and_saves() {
     assert_eq!(sorted.rows.len(), 2);
     driver.drop_object(&db, "dbo", &tbl, "TABLE").await.unwrap();
 }
+
+// ===========================================================================
+// Console: whole-batch execution, result sets, session cleanup
+// ===========================================================================
+
+fn as_i64(v: &serde_json::Value) -> Option<i64> {
+    v.as_i64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+#[tokio::test]
+async fn mssql_console_runs_script_as_one_batch() {
+    let (driver, db) = mssql_driver!();
+    // Table variables and control flow span the statements of a batch.
+    let r = driver
+        .execute_query(
+            &db,
+            "DECLARE @t TABLE(a int); INSERT INTO @t VALUES(1); SELECT * FROM @t",
+        )
+        .await
+        .expect("table variable script");
+    assert!(r.is_select);
+    assert_eq!(r.columns, vec!["a"]);
+    assert_eq!(r.rows.len(), 1);
+
+    let r = driver
+        .execute_query(&db, "IF 1=1 BEGIN SELECT 1 AS v; END")
+        .await
+        .expect("IF block");
+    assert_eq!(r.columns, vec!["v"]);
+    assert_eq!(as_i64(&r.rows[0][0]), Some(1));
+
+    // GO separates batches; variables don't cross them, rows do.
+    let r = driver
+        .execute_query(
+            &db,
+            "CREATE TABLE #go_t (a int)\nGO\nINSERT INTO #go_t VALUES (1)\nGO 2\nSELECT COUNT(*) AS n FROM #go_t",
+        )
+        .await
+        .expect("GO batches");
+    assert_eq!(as_i64(&r.rows[0][0]), Some(2));
+}
+
+#[tokio::test]
+async fn mssql_console_set_applies_to_the_run_only() {
+    let (driver, db) = mssql_driver!();
+    let r = driver
+        .execute_query(&db, "SET LOCK_TIMEOUT 1000; SELECT @@LOCK_TIMEOUT AS lt")
+        .await
+        .unwrap();
+    assert_eq!(
+        as_i64(&r.rows[0][0]),
+        Some(1000),
+        "SET applies to the batch"
+    );
+    assert!(
+        r.notices.iter().any(|n| n.contains("session state")),
+        "{:?}",
+        r.notices
+    );
+    // ...but not to later work on the shared connection.
+    let r = driver
+        .execute_query(&db, "SELECT @@LOCK_TIMEOUT AS lt")
+        .await
+        .unwrap();
+    assert_eq!(as_i64(&r.rows[0][0]), Some(-1));
+    assert!(r.notices.is_empty());
+}
+
+#[tokio::test]
+async fn mssql_console_open_transaction_is_rolled_back() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_tx");
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE [dbo].[{tbl}] (id INT PRIMARY KEY, v INT)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO [dbo].[{tbl}] VALUES (1, 1)"))
+        .await
+        .unwrap();
+
+    let err = driver
+        .execute_query(
+            &db,
+            &format!("BEGIN TRAN; INSERT INTO [dbo].[{tbl}] VALUES (2, 2)"),
+        )
+        .await
+        .expect_err("open transaction must be reported");
+    assert!(err.to_string().contains("left a transaction open"), "{err}");
+    let r = driver
+        .execute_query(
+            &db,
+            &format!("SELECT @@TRANCOUNT AS tc, (SELECT COUNT(*) FROM [dbo].[{tbl}]) AS n"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(as_i64(&r.rows[0][0]), Some(0), "no transaction left open");
+    assert_eq!(as_i64(&r.rows[0][1]), Some(1), "insert rolled back");
+
+    // A grid save afterwards really commits.
+    driver
+        .apply_changes(&DataChanges {
+            connection_id: "test".into(),
+            database: db.clone(),
+            schema: SCHEMA.into(),
+            table: tbl.clone(),
+            updates: vec![CellChange {
+                row_index: 0,
+                column_name: "v".into(),
+                old_value: serde_json::json!(1),
+                new_value: serde_json::json!(5),
+                primary_key_values: vec![("id".into(), serde_json::json!(1))],
+            }],
+            inserts: vec![],
+            deletes: vec![],
+        })
+        .await
+        .unwrap();
+    // Seen from a separate connection.
+    let (other, _) = mssql_driver!();
+    let r = other
+        .execute_query(&db, &format!("SELECT v FROM [dbo].[{tbl}] WHERE id = 1"))
+        .await
+        .unwrap();
+    assert_eq!(as_i64(&r.rows[0][0]), Some(5));
+
+    // A balanced transaction is fine.
+    driver
+        .execute_query(
+            &db,
+            &format!("BEGIN TRAN; UPDATE [dbo].[{tbl}] SET v = 6 WHERE id = 1; COMMIT"),
+        )
+        .await
+        .unwrap();
+
+    driver
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mssql_console_shows_rows_of_any_statement() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_rows");
+    let proc = unique_table("ms_proc");
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE [dbo].[{tbl}] (id INT IDENTITY(1,1) PRIMARY KEY, v INT)"),
+        )
+        .await
+        .unwrap();
+
+    // INSERT ... OUTPUT returns rows.
+    let r = driver
+        .execute_query(
+            &db,
+            &format!(
+                "INSERT INTO [dbo].[{tbl}] (v) OUTPUT inserted.id, inserted.v VALUES (10), (20)"
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.columns, vec!["id", "v"]);
+    assert_eq!(r.rows.len(), 2);
+
+    // Several result sets: the last is shown, with a notice.
+    let r = driver
+        .execute_query(&db, "SELECT 1 AS a SELECT 2 AS b")
+        .await
+        .unwrap();
+    assert_eq!(r.columns, vec!["b"]);
+    assert_eq!(as_i64(&r.rows[0][0]), Some(2));
+    assert!(
+        r.notices.iter().any(|n| n.contains("2 result sets")),
+        "{:?}",
+        r.notices
+    );
+
+    // A procedure's result set.
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE PROCEDURE [dbo].[{proc}] AS SELECT v FROM [dbo].[{tbl}] ORDER BY v"),
+        )
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(&db, &format!("EXEC [dbo].[{proc}]"))
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.columns, vec!["v"]);
+    assert_eq!(r.rows.len(), 2);
+
+    // An empty result keeps its header.
+    let r = driver
+        .execute_query(&db, "SELECT 1 AS a, 2 AS b WHERE 1 = 0")
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.columns, vec!["a", "b"]);
+    assert!(r.rows.is_empty());
+
+    // Rows affected of a plain statement.
+    let r = driver
+        .execute_query(&db, &format!("UPDATE [dbo].[{tbl}] SET v = v + 1"))
+        .await
+        .unwrap();
+    assert!(!r.is_select);
+    assert_eq!(r.rows_affected, 2);
+
+    driver
+        .execute_query(&db, &format!("DROP PROCEDURE [dbo].[{proc}]"))
+        .await
+        .unwrap();
+    driver
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mssql_grid_save_ignored_by_instead_of_trigger_fails() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_iot");
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE [dbo].[{tbl}] (id INT PRIMARY KEY, v INT)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO [dbo].[{tbl}] VALUES (1, 1)"))
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TRIGGER [dbo].[{tbl}_noop] ON [dbo].[{tbl}] INSTEAD OF UPDATE, DELETE \
+                 AS BEGIN SET NOCOUNT ON; END"
+            ),
+        )
+        .await
+        .unwrap();
+    let changes = |updates: Vec<CellChange>, deletes: Vec<DeleteRow>| DataChanges {
+        connection_id: "test".into(),
+        database: db.clone(),
+        schema: SCHEMA.into(),
+        table: tbl.clone(),
+        updates,
+        inserts: vec![],
+        deletes,
+    };
+    let key = vec![("id".to_string(), serde_json::json!(1))];
+    let err = driver
+        .apply_changes(&changes(
+            vec![CellChange {
+                row_index: 0,
+                column_name: "v".into(),
+                old_value: serde_json::json!(1),
+                new_value: serde_json::json!(9),
+                primary_key_values: key.clone(),
+            }],
+            vec![],
+        ))
+        .await
+        .expect_err("an update the trigger ignored must not report success");
+    assert!(err.to_string().contains("INSTEAD OF UPDATE"), "{err}");
+    let err = driver
+        .apply_changes(&changes(
+            vec![],
+            vec![DeleteRow {
+                primary_key_values: key.clone(),
+            }],
+        ))
+        .await
+        .expect_err("a delete the trigger ignored must not report success");
+    assert!(err.to_string().contains("INSTEAD OF DELETE"), "{err}");
+
+    // A trigger that does apply the change passes.
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "ALTER TRIGGER [dbo].[{tbl}_noop] ON [dbo].[{tbl}] INSTEAD OF UPDATE, DELETE \
+                 AS BEGIN SET NOCOUNT ON; UPDATE t SET v = i.v FROM [dbo].[{tbl}] t \
+                 JOIN inserted i ON i.id = t.id; END"
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .apply_changes(&changes(
+            vec![CellChange {
+                row_index: 0,
+                column_name: "v".into(),
+                old_value: serde_json::json!(1),
+                new_value: serde_json::json!(9),
+                primary_key_values: key,
+            }],
+            vec![],
+        ))
+        .await
+        .unwrap();
+
+    driver
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mssql_sorting_lob_columns_works_or_explains() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_lobsort");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE [dbo].[{tbl}] (id INT PRIMARY KEY, t TEXT, nt NTEXT, g GEOGRAPHY)"
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            &db,
+            &format!("INSERT INTO [dbo].[{tbl}] (id, t, nt) VALUES (1, 'b', N'y'), (2, 'a', N'z')"),
+        )
+        .await
+        .unwrap();
+    let sort = |col: &str| {
+        vec![SortSpec {
+            column: col.into(),
+            direction: SortDirection::Asc,
+        }]
+    };
+    let data = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, sort("t"), None)
+        .await
+        .expect("text column sorts");
+    assert_eq!(as_i64(&data.rows[0][0]), Some(2));
+    let data = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, sort("nt"), None)
+        .await
+        .expect("ntext column sorts");
+    assert_eq!(as_i64(&data.rows[0][0]), Some(1));
+    let err = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, sort("g"), None)
+        .await
+        .expect_err("spatial sort is refused");
+    assert!(err.to_string().contains("can't be sorted"), "{err}");
+
+    driver
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+/// Takes over 30 s, so it is opt-in: `cargo test -- --ignored`.
+#[tokio::test]
+#[ignore]
+async fn mssql_console_query_longer_than_30s_keeps_the_connection() {
+    let (driver, db) = mssql_driver!();
+    let r = driver
+        .execute_query(&db, "WAITFOR DELAY '00:00:32'; SELECT 1 AS v")
+        .await
+        .expect("long query must not hit a client-side timeout");
+    assert_eq!(as_i64(&r.rows[0][0]), Some(1));
+    driver.execute_query(&db, "SELECT 1").await.unwrap();
+}
