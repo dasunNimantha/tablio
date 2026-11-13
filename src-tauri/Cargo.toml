@@ -64,6 +64,18 @@ rust_xlsxwriter = { version = "0.102", features = ["chrono"] }
 calamine = { version = "0.38", features = ["dates"] }
 # Private (0600) temp files for dumps and atomic config writes.
 tempfile = "3"
+# Connection passwords live in the OS credential store: macOS Keychain,
+# Windows Credential Manager, Secret Service on Linux. The Linux backend
+# is the zbus-based one (pure Rust, no libdbus needed at build or run
+# time) driven by zbus' own async-io executor, so it never touches the
+# tokio runtime.
+keyring = { version = "3.6", features = [
+    "apple-native",
+    "windows-native",
+    "async-secret-service",
+    "async-io",
+    "crypto-rust",
+] }
 
 # Windows-only direct dep so we can name `pageant::PageantStream` in the
 # return type of `connect_agent()` on Windows. russh 0.60 already pulls
