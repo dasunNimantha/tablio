@@ -48,12 +48,12 @@ tauri-plugin-dialog = "2.6.0"
 # Pin sysinfo to the latest version that still supports our MSRV
 # (rustc 1.93). 0.39.x bumped the rust-version metadata to 1.95.
 # Bumping our toolchain is out of scope for this fix release.
-sysinfo = "0.39"
+sysinfo = "0.40"
 scylla = "1.5"
 tiberius = { version = "0.13.0", default-features = false, features = ["tokio", "rustls", "tds73"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 urlencoding = "2.1.3"
-russh = "0.62"
+russh = "0.65"
 # Used to match hashed (`|1|salt|hash`) hostnames in known_hosts files;
 # same versions russh already depends on.
 hmac = "0.13"
