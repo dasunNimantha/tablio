@@ -1419,7 +1419,7 @@ export function DataGrid({
               className="result-updatable-badge readonly grid-readonly-badge"
               title="Read-only: table has no primary key, so rows can't be addressed for updates or deletes"
             >
-              <Lock size={12} /> <span className="btn-label">Read-only: no primary key</span>
+              <Lock size={12} /> Read-only<span className="btn-label">: no primary key</span>
             </span>
           )}
           <button
