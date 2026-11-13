@@ -8,6 +8,40 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return mockInvoke<T>(cmd, args);
 }
 
+/** Message the backend's cancelled console runs reject with. */
+export const QUERY_CANCELLED_MESSAGE = "Query cancelled";
+
+/**
+ * Mock runs that are still "executing", keyed by request id, so the
+ * mock `cancel_execution` can end them the way the backend does.
+ */
+const mockRunning = new Map<string, () => void>();
+const mockEarlyCancels = new Set<string>();
+
+/** A mock query that only ends when cancelled (or after 30 s). */
+const MOCK_SLOW_QUERY = /\b(pg_sleep|sleep|waitfor)\b/i;
+
+function mockSlowQuery<T>(requestId: string | undefined, result: T): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (requestId && mockEarlyCancels.delete(requestId)) {
+      reject(QUERY_CANCELLED_MESSAGE);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (requestId) mockRunning.delete(requestId);
+      resolve(result);
+    }, 30_000);
+    if (requestId) {
+      mockRunning.set(requestId, () => {
+        clearTimeout(timer);
+        mockRunning.delete(requestId);
+        // Tauri rejects with the command's error string.
+        reject(QUERY_CANCELLED_MESSAGE);
+      });
+    }
+  });
+}
+
 async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   await new Promise((r) => setTimeout(r, Math.random() * 200 + 50));
 
@@ -45,7 +79,19 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
     }
     case "execute_query": {
       const req = args?.request as any;
-      return mock.generateQueryResult(req?.sql || "SELECT 1") as T;
+      const result = mock.generateQueryResult(req?.sql || "SELECT 1") as T;
+      if (MOCK_SLOW_QUERY.test(req?.sql || "")) return mockSlowQuery(req?.request_id, result);
+      return result;
+    }
+    case "cancel_execution": {
+      const id = args?.requestId as string;
+      const stop = mockRunning.get(id);
+      if (stop) {
+        stop();
+        return true as T;
+      }
+      mockEarlyCancels.add(id);
+      return false as T;
     }
     case "explain_query":
       return mock.generateExplainResult() as T;
@@ -177,6 +223,8 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
           ],
           total_data_rows: 2,
           inferred_types: ["number", "string", "bool"],
+          error_cells: [],
+          error_cell_count: 0,
         },
       } as T;
     case "parse_xlsx_sheet":
@@ -188,6 +236,8 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
           [2, "Bob", false],
         ],
         inferred_types: ["number", "string", "bool"],
+        error_cells: [],
+        error_cell_count: 0,
       } as T;
     default:
       throw new Error(`Unknown mock command: ${cmd}`);
@@ -328,6 +378,8 @@ export interface ExecuteQueryRequest {
   connection_id: string;
   database: string;
   sql: string;
+  /** Lets `cancelExecution` stop this run while it is in flight. */
+  request_id?: string;
 }
 
 export interface ValidationError {
@@ -609,6 +661,10 @@ export interface XlsxSheetPreview {
   preview_rows: unknown[][];
   total_data_rows: number;
   inferred_types: XlsxColumnType[];
+  /** First few data cells holding an Excel error, as `"B5: #N/A"`. */
+  error_cells: string[];
+  /** Total number of error cells (imported as NULL). */
+  error_cell_count: number;
 }
 
 export interface XlsxWorkbookPreview {
@@ -627,6 +683,9 @@ export interface XlsxSheetPayload {
   headers: string[];
   rows: unknown[][];
   inferred_types: XlsxColumnType[];
+  /** See {@link XlsxSheetPreview.error_cells}. */
+  error_cells: string[];
+  error_cell_count: number;
 }
 
 export interface SavedQuery {
@@ -810,6 +869,14 @@ export const api = {
 
   executeQuery: (request: ExecuteQueryRequest): Promise<QueryResult> =>
     invoke("execute_query", { request }),
+
+  /**
+   * Cancel the console run started with `requestId`. Resolves to
+   * whether it was still running; the `executeQuery` call then rejects
+   * with {@link QUERY_CANCELLED_MESSAGE}.
+   */
+  cancelExecution: (requestId: string): Promise<boolean> =>
+    invoke("cancel_execution", { requestId }),
 
   applyChanges: (changes: DataChanges): Promise<void> =>
     invoke("apply_changes", { changes }),

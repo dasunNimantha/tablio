@@ -22,10 +22,12 @@ use std::sync::Arc;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let pool_manager = Arc::new(PoolManager::new());
+    let cancel_registry = Arc::new(db::cancel::CancelRegistry::new());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(pool_manager)
+        .manage(cancel_registry)
         .invoke_handler(tauri::generate_handler![
             test_connection,
             connect,
@@ -44,6 +46,7 @@ pub fn run() {
             list_triggers,
             get_table_stats,
             execute_query,
+            cancel_execution,
             explain_query,
             validate_query,
             fetch_rows,

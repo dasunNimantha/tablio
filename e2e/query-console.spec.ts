@@ -319,3 +319,57 @@ test.describe("Query console — split handle", () => {
     await expect(page.locator(".query-split-handle")).toBeVisible();
   });
 });
+
+test.describe("Query console — stop running query", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/");
+    await openQueryConsole(page);
+    await page.locator(".query-console").waitFor({ timeout: 8000 });
+  });
+
+  /** Replace the editor text; the mock backend runs `pg_sleep` until cancelled. */
+  async function setSql(page: import("@playwright/test").Page, sql: string) {
+    await page.locator(".query-editor-wrapper .monaco-editor").click();
+    await page.keyboard.press("ControlOrMeta+A");
+    await page.keyboard.insertText(sql);
+  }
+
+  test("no Stop button while idle", async ({ page }) => {
+    await expect(page.locator("[data-testid='stop-query-btn']")).toHaveCount(0);
+  });
+
+  test("Stop cancels a running query and shows a cancelled notice", async ({ page }) => {
+    await setSql(page, "SELECT pg_sleep(30)");
+    await page.locator(".query-toolbar .btn-primary", { hasText: "Execute" }).click();
+
+    const stop = page.locator("[data-testid='stop-query-btn']");
+    await expect(stop).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".query-toolbar .btn-primary", { hasText: "Execute" })).toBeDisabled();
+
+    await stop.click();
+
+    await expect(page.locator("[data-testid='query-cancelled']")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator("[data-testid='query-cancelled']")).toContainText("Query cancelled");
+    await expect(stop).toHaveCount(0);
+    // Not reported as an error, and no error toast.
+    await expect(page.locator(".query-error")).toHaveCount(0);
+    await expect(page.locator(".toast.error, .toast-error")).toHaveCount(0);
+
+    // The console is usable again.
+    await setSql(page, "SELECT 1");
+    await page.locator(".query-toolbar .btn-primary", { hasText: "Execute" }).click();
+    await expect(page.locator(".query-result-info")).toContainText("rows returned", { timeout: 5000 });
+    await expect(page.locator("[data-testid='query-cancelled']")).toHaveCount(0);
+  });
+
+  test("Escape in the editor stops a running query", async ({ page }) => {
+    await setSql(page, "SELECT pg_sleep(30)");
+    await page.locator(".query-toolbar .btn-primary", { hasText: "Execute" }).click();
+    await expect(page.locator("[data-testid='stop-query-btn']")).toBeVisible({ timeout: 5000 });
+
+    await page.locator(".query-editor-wrapper .monaco-editor").click();
+    await page.keyboard.press("Escape");
+
+    await expect(page.locator("[data-testid='query-cancelled']")).toBeVisible({ timeout: 5000 });
+  });
+});

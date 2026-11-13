@@ -1,3 +1,4 @@
+pub mod cancel;
 pub mod cassandra;
 pub mod cockroachdb;
 pub mod mariadb;
@@ -86,6 +87,20 @@ pub trait DatabaseDriver: Send + Sync {
         filter: Option<String>,
     ) -> Result<TableData>;
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult>;
+    /// Like [`execute_query`](Self::execute_query), but stops early when
+    /// `cancel` fires and then resolves to
+    /// [`cancel::QueryCancelled`]. The default drops the in-flight
+    /// future, which is only safe for drivers whose connections survive
+    /// that; drivers with a server-side cancel (or connection state that
+    /// must be repaired) override it. See `db::cancel`.
+    async fn execute_query_cancellable(
+        &self,
+        database: &str,
+        sql: &str,
+        cancel: cancel::CancellationToken,
+    ) -> Result<QueryResult> {
+        cancel::run_abortable(self.execute_query(database, sql), &cancel).await
+    }
     async fn explain_query(&self, database: &str, sql: &str) -> Result<ExplainResult>;
     async fn validate_query(&self, database: &str, sql: &str) -> Result<Option<ValidationError>>;
     async fn get_ddl(

@@ -161,3 +161,24 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+
+.import-error-cells {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.import-error-cells > svg {
+  color: var(--warning);
+  margin-top: 1px;
+}

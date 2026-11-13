@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+use crate::db::cancel::CancellationToken;
 use crate::db::pg_common::*;
 use crate::db::DatabaseDriver;
 use crate::models::*;
@@ -164,6 +165,22 @@ impl DatabaseDriver for CockroachdbDriver {
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult> {
         let pool = self.get_pool(database).await?;
         pg_execute_query(&pool, database, sql).await
+    }
+    async fn execute_query_cancellable(
+        &self,
+        database: &str,
+        sql: &str,
+        cancel: CancellationToken,
+    ) -> Result<QueryResult> {
+        let pool = self.get_pool(database).await?;
+        pg_execute_query_cancellable(
+            &pool,
+            database,
+            sql,
+            Some(PgCancelFlavor::Cockroach),
+            cancel,
+        )
+        .await
     }
     async fn get_ddl(
         &self,

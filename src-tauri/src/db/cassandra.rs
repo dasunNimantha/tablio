@@ -43,7 +43,137 @@ const SYSTEM_KEYSPACES: &[&str] = &[
     "system_virtual_schema",
 ];
 
+/// The primary key of the one row that `changes` edits, when the edit
+/// qualifies for [`CassandraDriver::apply_single_row_edit`]: only updates
+/// or only deletes (no inserts), all keyed by the same complete primary
+/// key, on a table without counter columns (CQL rejects conditional
+/// updates on counter tables). Anything else keeps the plain batch.
+fn single_row_edit<'a>(
+    changes: &'a DataChanges,
+    columns: &[ColumnInfo],
+) -> Option<&'a [(String, serde_json::Value)]> {
+    if !changes.inserts.is_empty() || changes.updates.is_empty() == changes.deletes.is_empty() {
+        return None;
+    }
+    if columns.iter().any(|c| c.data_type == "counter") {
+        return None;
+    }
+    let mut pk_cols: Vec<&str> = columns
+        .iter()
+        .filter(|c| c.is_primary_key)
+        .map(|c| c.name.as_str())
+        .collect();
+    if pk_cols.is_empty() {
+        return None;
+    }
+    pk_cols.sort_unstable();
+    let normalized = |key: &[(String, serde_json::Value)]| {
+        let mut k: Vec<(String, String)> = key
+            .iter()
+            .map(|(c, v)| (c.clone(), v.to_string()))
+            .collect();
+        k.sort();
+        k
+    };
+    let mut keys = changes
+        .updates
+        .iter()
+        .map(|u| u.primary_key_values.as_slice())
+        .chain(
+            changes
+                .deletes
+                .iter()
+                .map(|d| d.primary_key_values.as_slice()),
+        );
+    let first = keys.next()?;
+    let first_norm = normalized(first);
+    let key_cols: Vec<&str> = first_norm.iter().map(|(c, _)| c.as_str()).collect();
+    if key_cols != pk_cols {
+        return None;
+    }
+    keys.all(|k| normalized(k) == first_norm).then_some(first)
+}
+
 impl CassandraDriver {
+    /// Apply grid edits that all target one row, identified by its full
+    /// primary key, as a lightweight transaction (`IF EXISTS`).
+    ///
+    /// A plain CQL `UPDATE` is an upsert and `DELETE` of a missing row is
+    /// a no-op, so without the condition editing a row someone else just
+    /// deleted would silently re-create it (with only the edited cells)
+    /// and a delete would report success. The LWT result's `[applied]`
+    /// column tells us whether the row was still there.
+    async fn apply_single_row_edit(
+        &self,
+        qualified: &str,
+        changes: &DataChanges,
+        row: &[(String, serde_json::Value)],
+        lit: &(dyn Fn(&str, &serde_json::Value) -> String + Sync),
+    ) -> Result<()> {
+        let pk_clause = row
+            .iter()
+            .map(|(col, val)| format!("{} = {}", quote_ident(col), lit(col, val)))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let (action, cql) = if changes.deletes.is_empty() {
+            // Every edited cell of the row in one statement; a column
+            // edited twice keeps its last value.
+            let mut sets: Vec<(&str, &serde_json::Value)> = Vec::new();
+            for u in &changes.updates {
+                match sets.iter_mut().find(|(c, _)| *c == u.column_name) {
+                    Some(slot) => slot.1 = &u.new_value,
+                    None => sets.push((u.column_name.as_str(), &u.new_value)),
+                }
+            }
+            let set_clause = sets
+                .iter()
+                .map(|(c, v)| format!("{} = {}", quote_ident(c), lit(c, v)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (
+                "update",
+                format!("UPDATE {qualified} SET {set_clause} WHERE {pk_clause} IF EXISTS"),
+            )
+        } else {
+            (
+                "delete",
+                format!("DELETE FROM {qualified} WHERE {pk_clause} IF EXISTS"),
+            )
+        };
+        let result = self
+            .session
+            .query_unpaged(cql.as_str(), &[])
+            .await
+            .map_err(|e| anyhow!("{}", e))?
+            .into_rows_result()
+            .map_err(|e| anyhow!("{}", e))?;
+        // `[applied]` is always the first column of an LWT result.
+        let applied = result
+            .rows::<scylla::value::Row>()
+            .ok()
+            .and_then(|mut rows| rows.next())
+            .and_then(|r| r.ok())
+            .and_then(|r| r.columns.into_iter().next().flatten())
+            .map(|v| matches!(v, scylla::value::CqlValue::Boolean(true)));
+        match applied {
+            Some(true) => Ok(()),
+            Some(false) => {
+                let key = row
+                    .iter()
+                    .map(|(c, v)| format!("{} = {}", c, v))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!(
+                    "Cannot {action} row ({key}): the row no longer exists. It may have been \
+                     deleted concurrently; refresh and try again. No changes were saved."
+                )
+            }
+            None => {
+                anyhow::bail!("Cannot {action} row: the server did not report whether it applied")
+            }
+        }
+    }
+
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
         // Bracket IPv6 literals so the port separator is unambiguous.
         let host = config.host.trim();
@@ -814,16 +944,20 @@ impl DatabaseDriver for CassandraDriver {
         // integers / exact decimals the frontend cannot hold as JS
         // numbers) be written as bare numeric literals: CQL rejects a
         // quoted string for bigint/varint/decimal columns.
-        let col_types: std::collections::HashMap<String, String> = self
-            .list_columns(ks, ks, tbl)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|c| (c.name, c.data_type))
+        let columns = self.list_columns(ks, ks, tbl).await.unwrap_or_default();
+        let col_types: std::collections::HashMap<String, String> = columns
+            .iter()
+            .map(|c| (c.name.clone(), c.data_type.clone()))
             .collect();
         let lit = |col: &str, val: &serde_json::Value| -> String {
             typed_cql_literal(col_types.get(col).map(String::as_str), val)
         };
+
+        if let Some(row) = single_row_edit(changes, &columns) {
+            return self
+                .apply_single_row_edit(&qualified, changes, row, &lit)
+                .await;
+        }
 
         let mut stmts = Vec::new();
 

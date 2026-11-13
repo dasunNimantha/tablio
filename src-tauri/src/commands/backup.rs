@@ -112,6 +112,73 @@ fn classify_pg_restore(code: Option<i32>, stderr: &[String]) -> PgRestoreOutcome
     }
 }
 
+/// Turn a failed `psql -v ON_ERROR_STOP=1 -f <file>` run into a short
+/// message for the UI: the first error with its line in the file plus
+/// psql's DETAIL / HINT lines, instead of the raw stderr dump.
+fn summarize_psql_failure(code: Option<i32>, stderr: &str) -> String {
+    let lines: Vec<&str> = stderr.lines().map(str::trim_end).collect();
+    let Some(idx) = lines.iter().position(|l| {
+        l.contains("ERROR:") || l.contains("FATAL:") || l.starts_with("psql: error:")
+    }) else {
+        let tail = lines
+            .iter()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.trim())
+            .unwrap_or("no error output");
+        return format!(
+            "psql restore failed (exit code {}): {}",
+            code.map_or_else(|| "none".to_string(), |c| c.to_string()),
+            tail
+        );
+    };
+    let line = lines[idx];
+    // Script errors look like `psql:/path/file.sql:12: ERROR:  message`.
+    // The path may itself contain ':', so locate the severity first and
+    // take the number right before it.
+    let (location, message) = match ["ERROR:", "FATAL:"].iter().find_map(|sev| line.find(sev)) {
+        Some(sev_at) if line.starts_with("psql:") => {
+            let head = line[..sev_at].trim_end().trim_end_matches(':');
+            let lineno = head
+                .rsplit_once(':')
+                .and_then(|(_, n)| n.trim().parse::<u64>().ok());
+            (lineno, line[sev_at..].to_string())
+        }
+        _ => (
+            None,
+            line.trim_start_matches("psql: error:").trim().to_string(),
+        ),
+    };
+    let message = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let extra: Vec<String> = lines[idx + 1..]
+        .iter()
+        .take_while(|l| !l.contains("ERROR:") && !l.starts_with("psql:"))
+        .map(|l| l.trim())
+        .filter(|l| l.starts_with("DETAIL:") || l.starts_with("HINT:"))
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    let mut out = match (code, location) {
+        // 3: a statement failed and ON_ERROR_STOP ended the script.
+        (Some(3), Some(n)) => format!(
+            "Restore stopped at line {n} of the SQL file: {message}. \
+             Statements before it were already applied; nothing after it ran."
+        ),
+        (Some(3), None) => format!(
+            "Restore stopped at the first error: {message}. \
+             Statements before it were already applied; nothing after it ran."
+        ),
+        // 2: the connection could not be opened or was lost.
+        (Some(2), _) => format!("psql could not connect to the database: {message}"),
+        (_, Some(n)) => format!("psql restore failed at line {n}: {message}"),
+        _ => format!("psql restore failed: {message}"),
+    };
+    for e in extra {
+        out.push(' ');
+        out.push_str(&e);
+    }
+    out
+}
+
 struct PgRestoreArgs<'a> {
     host: &'a str,
     port: u16,
@@ -450,7 +517,9 @@ async fn backup_postgres(config: &ConnectionConfig, req: &BackupRequest) -> Resu
     }
 }
 
-async fn restore_postgres(
+/// Restore a Postgres / CockroachDB database from `req.input_path`
+/// (`psql` for plain SQL, `pg_restore` for archives).
+pub async fn restore_postgres(
     config: &ConnectionConfig,
     req: &RestoreRequest,
 ) -> Result<String, String> {
@@ -469,6 +538,16 @@ async fn restore_postgres(
             .arg("-d")
             .arg(&req.database)
             .arg("--no-password")
+            // Ignore the user's ~/.psqlrc: it could change output or
+            // error handling (e.g. turn ON_ERROR_STOP back off).
+            .arg("-X")
+            // Without this psql logs a failed statement and carries on,
+            // exiting 0, so a broken restore would look successful and
+            // later statements would run against a half-built schema.
+            // Stopping at the first error (exit code 3) lets us report
+            // exactly which statement failed.
+            .arg("-v")
+            .arg("ON_ERROR_STOP=1")
             .arg("-f")
             .arg(&req.input_path);
         cmd.env("PGPASSWORD", &config.password);
@@ -476,13 +555,13 @@ async fn restore_postgres(
         let output = cmd
             .output()
             .await
-            .map_err(|e| format!("Failed to run psql: {}", e))?;
+            .map_err(|e| format!("Failed to run psql: {}. Is it installed?", e))?;
         drop(target);
         if output.status.success() {
             Ok("Restore completed".to_string())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!("psql restore failed: {}", stderr))
+            Err(summarize_psql_failure(output.status.code(), &stderr))
         }
     } else {
         let mut cmd = tokio::process::Command::new("pg_restore");
@@ -800,6 +879,47 @@ pub async fn restore_sqlite(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn psql_failure_reports_line_message_and_detail() {
+        let stderr = "psql:/tmp/my:dump.sql:7: ERROR:  relation \"missing\" does not exist\n\
+                      LINE 1: INSERT INTO missing VALUES (1);\n\
+                      \x20                   ^\n";
+        let msg = summarize_psql_failure(Some(3), stderr);
+        assert!(msg.starts_with("Restore stopped at line 7 of the SQL file: ERROR: relation \"missing\" does not exist."), "{msg}");
+        assert!(msg.contains("already applied"), "{msg}");
+        assert!(!msg.contains("LINE 1"), "{msg}");
+
+        let stderr =
+            "psql:dump.sql:3: ERROR:  duplicate key value violates unique constraint \"t_pkey\"\n\
+                      DETAIL:  Key (id)=(1) already exists.\n";
+        let msg = summarize_psql_failure(Some(3), stderr);
+        assert!(msg.contains("line 3"), "{msg}");
+        assert!(
+            msg.ends_with("DETAIL: Key (id)=(1) already exists."),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn psql_failure_connection_and_unknown_output() {
+        let stderr = "psql: error: connection to server at \"127.0.0.1\", port 1 failed: Connection refused\n";
+        let msg = summarize_psql_failure(Some(2), stderr);
+        assert!(
+            msg.starts_with("psql could not connect to the database: connection to server"),
+            "{msg}"
+        );
+
+        let msg = summarize_psql_failure(Some(1), "psql: could not open file\n");
+        assert_eq!(
+            msg,
+            "psql restore failed (exit code 1): psql: could not open file"
+        );
+        assert_eq!(
+            summarize_psql_failure(None, ""),
+            "psql restore failed (exit code none): no error output"
+        );
+    }
+
     use super::*;
 
     fn lines(v: &[&str]) -> Vec<String> {

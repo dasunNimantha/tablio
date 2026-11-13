@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
-import { ImportDialog } from "./ImportDialog";
+import { ImportDialog, MAX_XLSX_BYTES } from "./ImportDialog";
 import { api, type ColumnInfo, type XlsxWorkbookPreview, type XlsxSheetPayload } from "../../lib/tauri";
 
 const tableColumns: ColumnInfo[] = [
@@ -23,6 +23,8 @@ function makeWorkbookPreview(sheetCount: number): XlsxWorkbookPreview {
       ],
       total_data_rows: 2,
       inferred_types: ["number", "string", "bool"],
+      error_cells: [],
+      error_cell_count: 0,
     },
   };
 }
@@ -36,6 +38,8 @@ function makeSheetPayload(name: string): XlsxSheetPayload {
       [2, "Bob", false],
     ],
     inferred_types: ["number", "string", "bool"],
+    error_cells: [],
+    error_cell_count: 0,
   };
 }
 
@@ -233,5 +237,84 @@ describe("ImportDialog", () => {
     // Type badges aren't rendered for CSV (no inferred_types from the
     // legacy parser).
     expect(document.querySelectorAll(".import-mapping-type")).toHaveLength(0);
+  });
+
+  it("rejects an xlsx above the Excel limit before reading the file", async () => {
+    const parseSpy = vi
+      .spyOn(api, "parseXlsxWorkbook")
+      .mockResolvedValue(makeWorkbookPreview(1));
+    mount();
+    await screen.findByText("Import Data");
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File([new Uint8Array(0)], "big.xlsx", { type: "x" });
+    Object.defineProperty(file, "size", { value: MAX_XLSX_BYTES + 1 });
+    const readSpy = vi.spyOn(file, "arrayBuffer");
+    fireEvent.change(input, { target: { files: [file] } });
+    const msg = await screen.findByText(/file is too large/i);
+    expect(msg.textContent).toMatch(/Excel imports are limited to 25 MB/);
+    expect(msg.textContent).toMatch(/CSV/);
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(parseSpy).not.toHaveBeenCalled();
+  });
+
+  it("accepts a CSV larger than the Excel limit", async () => {
+    mount();
+    await screen.findByText("Import Data");
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const csv = new File(["id,name\n1,Alice"], "data.csv", { type: "text/csv" });
+    Object.defineProperty(csv, "size", { value: MAX_XLSX_BYTES + 1 });
+    fireEvent.change(input, { target: { files: [csv] } });
+    await waitFor(() => {
+      expect(screen.getByText(/column mapping/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/file is too large/i)).toBeNull();
+  });
+
+  it("warns about Excel error cells with the count and a few examples", async () => {
+    vi.spyOn(api, "parseXlsxWorkbook").mockResolvedValue(makeWorkbookPreview(1));
+    vi.spyOn(api, "parseXlsxSheet").mockResolvedValue({
+      ...makeSheetPayload("Sheet1"),
+      error_cells: ["B2: #N/A", "C3: #DIV/0!", "A4: #REF!", "B5: #VALUE!", "C6: #NAME?", "A7: #NUM!"],
+      error_cell_count: 42,
+    });
+    mount();
+    await screen.findByText("Import Data");
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [makeFile("data.xlsx", 1024)] } });
+    const warning = await screen.findByTestId("import-error-cells");
+    expect(warning.textContent).toContain("42 cells contain an Excel error");
+    expect(warning.textContent).toContain("imported as NULL");
+    expect(warning.textContent).toContain("B2: #N/A, C3: #DIV/0!, A4: #REF!, B5: #VALUE!, C6: #NAME?");
+    expect(warning.textContent).not.toContain("A7: #NUM!");
+    expect(warning.textContent).toContain("…");
+  });
+
+  it("uses the singular and no ellipsis for a single error cell", async () => {
+    vi.spyOn(api, "parseXlsxWorkbook").mockResolvedValue(makeWorkbookPreview(1));
+    vi.spyOn(api, "parseXlsxSheet").mockResolvedValue({
+      ...makeSheetPayload("Sheet1"),
+      error_cells: ["B2: #N/A"],
+      error_cell_count: 1,
+    });
+    mount();
+    await screen.findByText("Import Data");
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [makeFile("data.xlsx", 1024)] } });
+    const warning = await screen.findByTestId("import-error-cells");
+    expect(warning.textContent).toContain("1 cell contains an Excel error");
+    expect(warning.textContent).not.toContain("…");
+  });
+
+  it("shows no error-cell warning for a clean sheet", async () => {
+    vi.spyOn(api, "parseXlsxWorkbook").mockResolvedValue(makeWorkbookPreview(1));
+    vi.spyOn(api, "parseXlsxSheet").mockResolvedValue(makeSheetPayload("Sheet1"));
+    mount();
+    await screen.findByText("Import Data");
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [makeFile("data.xlsx", 1024)] } });
+    await waitFor(() => {
+      expect(screen.getByText(/column mapping/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("import-error-cells")).toBeNull();
   });
 });

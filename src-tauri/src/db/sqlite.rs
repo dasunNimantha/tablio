@@ -4,6 +4,9 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Column, Row, SqlitePool, TypeInfo};
 use std::time::{Duration, Instant};
 
+use crate::db::cancel::{
+    cancelled_error, finish, run_interruptible, unless_cancelled, CancellationToken, Interruptible,
+};
 use crate::db::DatabaseDriver;
 use crate::models::*;
 use crate::util::path::expand_tilde;
@@ -68,6 +71,95 @@ impl SqliteDriver {
                 }
             })?;
         Ok(Self { pool })
+    }
+
+    /// Console execution. With a `cancel` token, a progress handler is
+    /// installed for the run so a cancel interrupts the running statement
+    /// inside SQLite (`SQLITE_INTERRUPT`, the same mechanism as
+    /// `sqlite3_interrupt`). That leaves the connection usable, so unlike
+    /// the network drivers it is kept (an in-memory database lives only
+    /// as long as its connection).
+    async fn run_console(
+        &self,
+        sql: &str,
+        cancel: Option<CancellationToken>,
+    ) -> Result<QueryResult> {
+        let start = Instant::now();
+        let token = cancel.clone().unwrap_or_default();
+
+        // SQLite's `sqlite3_prepare_v2` compiles ONE statement per
+        // call, so the input is split into individual statements, run
+        // in sequence, and the result of the LAST one is returned (if
+        // it's SELECT-like) — what every SQL CLI does.
+        let statements = split_sql_statements(sql);
+
+        // Empty input or only comments / whitespace.
+        if statements.is_empty() {
+            return Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                rows_affected: 0,
+                execution_time_ms: start.elapsed().as_millis() as u64,
+                is_select: false,
+            });
+        }
+
+        // One pinned connection for the whole run, so BEGIN ... COMMIT
+        // and TEMP tables created by earlier statements are visible to
+        // later ones.
+        let mut conn = unless_cancelled(self.pool.acquire(), &token).await?;
+        if cancel.is_some() {
+            let t = token.clone();
+            let mut handle = conn.lock_handle().await?;
+            handle.set_progress_handler(SQLITE_PROGRESS_OPS, move || !t.is_cancelled());
+        }
+
+        let run = sqlite_run_statements(&mut conn, &statements, start, &token);
+        // The progress handler is the interrupt; nothing to send.
+        let outcome = match run_interruptible(run, &token, || async {}).await {
+            Interruptible::Done(r) | Interruptible::Interrupted(r) => r,
+            Interruptible::Abandoned => {
+                // Stuck outside the VM (e.g. waiting on a lock): the
+                // worker may still be using the connection.
+                conn.close_on_drop();
+                return Err(cancelled_error());
+            }
+        };
+        if cancel.is_some() {
+            let removed = match conn.lock_handle().await {
+                Ok(mut handle) => {
+                    handle.remove_progress_handler();
+                    true
+                }
+                Err(_) => false,
+            };
+            if !removed {
+                conn.close_on_drop();
+            }
+        }
+
+        // Never return the connection to the pool inside a transaction.
+        // An interrupted write may already have rolled the transaction
+        // back; "no transaction is active" below covers that.
+        let txn = script_transaction_state(&statements);
+        let left_open = outcome.is_ok() && txn == ScriptTxn::LeftOpen;
+        if txn != ScriptTxn::Untouched && (outcome.is_err() || left_open || token.is_cancelled()) {
+            if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+                // "cannot rollback - no transaction is active" means the
+                // connection is already clean.
+                if !e.to_string().contains("no transaction is active") {
+                    conn.close_on_drop();
+                }
+            }
+        }
+        let outcome = finish(outcome, &token);
+        if left_open && outcome.is_ok() {
+            anyhow::bail!(
+                "The script left a transaction open; it was rolled back. \
+                 Include COMMIT (or ROLLBACK) in the same run."
+            );
+        }
+        outcome
     }
 }
 
@@ -161,10 +253,15 @@ fn decode_dynamic_sqlite_cell(row: &sqlx::sqlite::SqliteRow, i: usize) -> serde_
     serde_json::Value::Null
 }
 
+/// VM instructions between progress-handler calls: frequent enough
+/// for a prompt cancel, rare enough to cost nothing measurable.
+const SQLITE_PROGRESS_OPS: i32 = 1000;
+
 async fn sqlite_run_statements(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
     statements: &[String],
     start: Instant,
+    token: &CancellationToken,
 ) -> Result<QueryResult> {
     let Some((last, leading)) = statements.split_last() else {
         anyhow::bail!("Query is empty");
@@ -175,10 +272,17 @@ async fn sqlite_run_statements(
     // rowsets — only the last statement's output is shown.
     let mut total_affected: u64 = 0;
     for stmt in leading {
+        if token.is_cancelled() {
+            return Err(cancelled_error());
+        }
         let result = sqlx::query(sqlx::AssertSqlSafe(stmt.clone()))
             .execute(&mut **conn)
             .await?;
         total_affected = total_affected.saturating_add(result.rows_affected());
+    }
+
+    if token.is_cancelled() {
+        return Err(cancelled_error());
     }
 
     // SELECT / WITH / PRAGMA / EXPLAIN return rows; everything else
@@ -540,50 +644,16 @@ impl DatabaseDriver for SqliteDriver {
     }
 
     async fn execute_query(&self, _database: &str, sql: &str) -> Result<QueryResult> {
-        let start = Instant::now();
+        self.run_console(sql, None).await
+    }
 
-        // SQLite's `sqlite3_prepare_v2` compiles ONE statement per
-        // call, so the input is split into individual statements, run
-        // in sequence, and the result of the LAST one is returned (if
-        // it's SELECT-like) — what every SQL CLI does.
-        let statements = split_sql_statements(sql);
-
-        // Empty input or only comments / whitespace.
-        if statements.is_empty() {
-            return Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                rows_affected: 0,
-                execution_time_ms: start.elapsed().as_millis() as u64,
-                is_select: false,
-            });
-        }
-
-        // One pinned connection for the whole run, so BEGIN ... COMMIT
-        // and TEMP tables created by earlier statements are visible to
-        // later ones.
-        let mut conn = self.pool.acquire().await?;
-        let outcome = sqlite_run_statements(&mut conn, &statements, start).await;
-
-        // Never return the connection to the pool inside a transaction.
-        let txn = script_transaction_state(&statements);
-        let left_open = outcome.is_ok() && txn == ScriptTxn::LeftOpen;
-        if txn != ScriptTxn::Untouched && (outcome.is_err() || left_open) {
-            if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
-                // "cannot rollback - no transaction is active" means the
-                // connection is already clean.
-                if !e.to_string().contains("no transaction is active") {
-                    conn.close_on_drop();
-                }
-            }
-        }
-        if left_open {
-            anyhow::bail!(
-                "The script left a transaction open; it was rolled back. \
-                 Include COMMIT (or ROLLBACK) in the same run."
-            );
-        }
-        outcome
+    async fn execute_query_cancellable(
+        &self,
+        _database: &str,
+        sql: &str,
+        cancel: CancellationToken,
+    ) -> Result<QueryResult> {
+        self.run_console(sql, Some(cancel)).await
     }
 
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {

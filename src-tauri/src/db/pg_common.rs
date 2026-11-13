@@ -2,6 +2,9 @@ use anyhow::Result;
 use sqlx::{Column, PgPool, Row, TypeInfo};
 use std::time::Instant;
 
+use crate::db::cancel::{
+    cancelled_error, run_interruptible, unless_cancelled, CancellationToken, Interruptible,
+};
 use crate::models::*;
 use crate::util::sql::{
     ensure_row_matched, script_transaction_state, split_sql_statements_for,
@@ -1002,7 +1005,75 @@ pub async fn pg_fetch_rows_impl(
     })
 }
 
-pub async fn pg_execute_query(pool: &PgPool, _database: &str, sql: &str) -> Result<QueryResult> {
+/// How the console asks a Postgres-protocol server to stop the
+/// statement running on its pinned connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgCancelFlavor {
+    /// `pg_cancel_backend(<backend pid>)` from another pooled connection.
+    Postgres,
+    /// CockroachDB has no `pg_cancel_backend`; cancel the session's
+    /// running queries with `CANCEL QUERIES` instead.
+    Cockroach,
+}
+
+/// Identifies the pinned connection's server session for a cancel.
+enum PgSessionKey {
+    Pid(i32),
+    CrdbSession(String),
+}
+
+async fn pg_session_key(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    flavor: PgCancelFlavor,
+) -> Result<PgSessionKey> {
+    Ok(match flavor {
+        PgCancelFlavor::Postgres => {
+            let row = sqlx::query("SELECT pg_backend_pid()")
+                .fetch_one(&mut **conn)
+                .await?;
+            PgSessionKey::Pid(row.try_get::<i32, _>(0)?)
+        }
+        PgCancelFlavor::Cockroach => {
+            let row = sqlx::raw_sql("SHOW session_id")
+                .fetch_one(&mut **conn)
+                .await?;
+            PgSessionKey::CrdbSession(row.try_get::<String, _>(0)?)
+        }
+    })
+}
+
+/// Ask the server to stop whatever `key`'s session is running. Runs on
+/// a different pooled connection; errors are ignored because the
+/// caller retries and finally discards the connection anyway.
+async fn pg_interrupt(pool: PgPool, key: &PgSessionKey) {
+    let _ = match key {
+        PgSessionKey::Pid(pid) => sqlx::query("SELECT pg_cancel_backend($1)")
+            .bind(*pid)
+            .execute(&pool)
+            .await
+            .map(|_| ()),
+        PgSessionKey::CrdbSession(id) => sqlx::query(
+            "CANCEL QUERIES IF EXISTS \
+             (SELECT query_id FROM [SHOW CLUSTER QUERIES] WHERE session_id = $1)",
+        )
+        .bind(id.as_str())
+        .execute(&pool)
+        .await
+        .map(|_| ()),
+    };
+}
+
+pub async fn pg_execute_query(pool: &PgPool, database: &str, sql: &str) -> Result<QueryResult> {
+    pg_execute_query_cancellable(pool, database, sql, None, CancellationToken::new()).await
+}
+
+pub async fn pg_execute_query_cancellable(
+    pool: &PgPool,
+    _database: &str,
+    sql: &str,
+    flavor: Option<PgCancelFlavor>,
+    token: CancellationToken,
+) -> Result<QueryResult> {
     let start = Instant::now();
 
     // Multi-statement support: split the input on top-level
@@ -1020,19 +1091,50 @@ pub async fn pg_execute_query(pool: &PgPool, _database: &str, sql: &str) -> Resu
         return Err(anyhow::anyhow!("Query is empty"));
     }
 
-    let mut conn = pool.acquire().await?;
-    let outcome = pg_run_statements(&mut conn, &statements, start).await;
+    let mut conn = unless_cancelled(pool.acquire(), &token).await?;
+    // Only a cancellable run needs the session key (one extra round
+    // trip, skipped for internal callers).
+    let key = match flavor {
+        Some(f) => Some(pg_session_key(&mut conn, f).await?),
+        None => None,
+    };
+
+    let run = pg_run_statements(&mut conn, &statements, start, &token);
+    let interrupt = || {
+        let pool = pool.clone();
+        let key = key.as_ref();
+        async move {
+            if let Some(key) = key {
+                pg_interrupt(pool, key).await;
+            }
+        }
+    };
+    let outcome = match run_interruptible(run, &token, interrupt).await {
+        Interruptible::Done(r) | Interruptible::Interrupted(r) => r,
+        Interruptible::Abandoned => {
+            // Dropped mid-protocol: the connection cannot be trusted.
+            conn.close_on_drop();
+            return Err(cancelled_error());
+        }
+    };
 
     // A pooled connection must never go back to the pool inside a
     // transaction (sqlx does not roll back a user-issued BEGIN), or
     // the next borrower inherits an open / aborted transaction.
     let txn = script_transaction_state(&statements);
     let left_open = outcome.is_ok() && txn == ScriptTxn::LeftOpen;
-    if txn != ScriptTxn::Untouched && (outcome.is_err() || left_open) {
+    if txn != ScriptTxn::Untouched && (outcome.is_err() || left_open || token.is_cancelled()) {
         // Outside a transaction this only raises a warning.
         if sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.is_err() {
             conn.close_on_drop();
         }
+    }
+    if token.is_cancelled() {
+        // A cancel request is delivered asynchronously; one that lands
+        // late could hit whatever the next borrower runs. Retire the
+        // connection instead of returning it to the pool.
+        conn.close_on_drop();
+        return Err(cancelled_error());
     }
     if left_open {
         anyhow::bail!(
@@ -1047,6 +1149,7 @@ async fn pg_run_statements(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
     statements: &[String],
     start: Instant,
+    token: &CancellationToken,
 ) -> Result<QueryResult> {
     let Some((last, leading)) = statements.split_last() else {
         return Err(anyhow::anyhow!("Query is empty"));
@@ -1054,10 +1157,17 @@ async fn pg_run_statements(
 
     // Execute all but the last statement as plain exec — we don't
     // care about rows from earlier statements, just side effects.
+    // A cancel between statements stops before the next one starts.
     for stmt in leading {
+        if token.is_cancelled() {
+            return Err(cancelled_error());
+        }
         sqlx::query(sqlx::AssertSqlSafe(stmt.as_str()))
             .execute(&mut **conn)
             .await?;
+    }
+    if token.is_cancelled() {
+        return Err(cancelled_error());
     }
 
     let last = last.as_str();

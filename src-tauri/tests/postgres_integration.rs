@@ -3743,3 +3743,230 @@ async fn pg_filter_accepts_semicolon_inside_string_literal() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Console cancel
+// ---------------------------------------------------------------------------
+
+/// A token that fires after `ms` milliseconds, like a user pressing Stop.
+fn cancel_after(ms: u64) -> tablio_lib::db::cancel::CancellationToken {
+    let token = tablio_lib::db::cancel::CancellationToken::new();
+    let t = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        t.cancel();
+    });
+    token
+}
+
+fn marker() -> String {
+    format!("cancel_{}", uuid::Uuid::new_v4().simple())
+}
+
+#[tokio::test]
+async fn pg_console_cancel_stops_running_query() {
+    let driver = pg_driver!();
+    let m = marker();
+    let start = std::time::Instant::now();
+    let err = driver
+        .execute_query_cancellable(
+            DB,
+            &format!("SELECT pg_sleep(30), '{m}'", m = m),
+            cancel_after(300),
+        )
+        .await
+        .expect_err("cancelled run must fail");
+    let elapsed = start.elapsed();
+    assert!(
+        tablio_lib::db::cancel::is_cancelled_error(&err),
+        "expected cancelled error, got: {err:#}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(2500),
+        "cancel took {elapsed:?}"
+    );
+    // The server really stopped the statement (not just the client).
+    let r = driver
+        .execute_query(DB, &format!("SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND query LIKE '%pg_sleep(30), ''{m}''%' AND pid <> pg_backend_pid()", m = m))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.rows[0][0]
+            .as_i64()
+            .or_else(|| r.rows[0][0].as_str().and_then(|s| s.parse().ok())),
+        Some(0),
+        "statement still running on the server"
+    );
+    // The connection(s) are usable afterwards: run more queries than the
+    // pool holds so a poisoned connection would be handed out.
+    for _ in 0..8 {
+        let r = driver.execute_query(DB, "SELECT 1").await.unwrap();
+        assert_eq!(r.rows.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn pg_console_cancel_rolls_back_script_transaction() {
+    let driver = pg_driver!();
+    let t = unique_table("cancel_txn");
+    driver
+        .execute_query(DB, &format!("CREATE TABLE {t} (id int)", t = t))
+        .await
+        .unwrap();
+    let m = marker();
+    let script = format!(
+        "BEGIN; INSERT INTO {t} VALUES (1); SELECT pg_sleep(30), '{m}'",
+        t = t,
+        m = m
+    );
+    let err = driver
+        .execute_query_cancellable(DB, &script, cancel_after(300))
+        .await
+        .expect_err("cancelled run must fail");
+    assert!(tablio_lib::db::cancel::is_cancelled_error(&err), "{err:#}");
+    for _ in 0..8 {
+        let r = driver
+            .execute_query(DB, &format!("SELECT count(*) FROM {t}", t = t))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.rows[0][0]
+                .as_i64()
+                .or_else(|| r.rows[0][0].as_str().and_then(|s| s.parse().ok())),
+            Some(0),
+            "insert from the cancelled script must be rolled back"
+        );
+    }
+    let _ = driver
+        .execute_query(DB, &format!("DROP TABLE {t}", t = t))
+        .await;
+}
+
+#[tokio::test]
+async fn pg_console_cancel_before_start_is_reported() {
+    let driver = pg_driver!();
+    let token = tablio_lib::db::cancel::CancellationToken::new();
+    token.cancel();
+    let err = driver
+        .execute_query_cancellable(DB, "SELECT 1", token)
+        .await
+        .expect_err("pre-cancelled run must fail");
+    assert!(tablio_lib::db::cancel::is_cancelled_error(&err));
+    driver.execute_query(DB, "SELECT 1").await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Plain SQL (psql) restore
+// ---------------------------------------------------------------------------
+
+/// Connection config for `TEST_POSTGRES16_URL` if set (psql is a client
+/// of the same major version there), else `TEST_POSTGRES_URL`.
+fn pg_restore_config() -> Option<ConnectionConfig> {
+    let url = ["TEST_POSTGRES16_URL", "TEST_POSTGRES_URL"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))?;
+    let parts = url
+        .strip_prefix("postgres://")
+        .or_else(|| url.strip_prefix("postgresql://"))?;
+    let (user_pass, rest) = parts.split_once('@')?;
+    let (user, password) = user_pass.split_once(':')?;
+    let (host_port, database) = rest.split_once('/')?;
+    let database = database.split('?').next()?;
+    let (host, port) = host_port.split_once(':')?;
+    Some(ConnectionConfig {
+        id: "restore-test".into(),
+        name: "restore-test".into(),
+        db_type: DbType::Postgres,
+        host: host.into(),
+        port: port.parse().ok()?,
+        user: user.into(),
+        password: password.into(),
+        database: database.into(),
+        color: "#000".into(),
+        ssl: false,
+        trust_server_cert: true,
+        group: None,
+        ssh_enabled: false,
+        ssh_host: String::new(),
+        ssh_port: 22,
+        ssh_user: String::new(),
+        ssh_password: String::new(),
+        ssh_key_path: String::new(),
+        ssh_auth_method: SshAuthMethod::default(),
+        ssh_prompt_passphrase: false,
+    })
+}
+
+#[tokio::test]
+async fn pg_psql_restore_stops_at_first_error_and_reports_it() {
+    use tablio_lib::commands::backup::restore_postgres;
+    use tablio_lib::db::postgres::PostgresDriver;
+
+    let Some(config) = pg_restore_config() else {
+        eprintln!("Skipping: TEST_POSTGRES_URL not set");
+        return;
+    };
+    if which::which("psql").is_err() {
+        eprintln!("Skipping: psql not on PATH");
+        return;
+    }
+    let before = unique_table("psql_ok");
+    let after = unique_table("psql_after");
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("restore.sql");
+    std::fs::write(
+        &file,
+        format!(
+            "CREATE TABLE {before} (id int);\n\
+             INSERT INTO {before} VALUES (1);\n\
+             INSERT INTO no_such_table_{before} VALUES (1);\n\
+             CREATE TABLE {after} (id int);\n"
+        ),
+    )
+    .unwrap();
+
+    let req = RestoreRequest {
+        connection_id: config.id.clone(),
+        database: config.database.clone(),
+        input_path: file.to_string_lossy().into_owned(),
+        format: "plain".into(),
+    };
+    let err = restore_postgres(&config, &req)
+        .await
+        .expect_err("a failing statement must fail the restore");
+    assert!(
+        err.starts_with("Restore stopped at line 3 of the SQL file: ERROR:"),
+        "{err}"
+    );
+    assert!(err.contains(&format!("no_such_table_{before}")), "{err}");
+
+    let driver = PostgresDriver::connect(&config).await.unwrap();
+    let db = config.database.clone();
+    let tables: Vec<String> = driver
+        .list_tables(&db, "public")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert!(tables.contains(&before), "statements before the error ran");
+    assert!(
+        !tables.contains(&after),
+        "ON_ERROR_STOP: nothing after the error may run"
+    );
+    driver
+        .execute_query(&db, &format!("DROP TABLE {before}"))
+        .await
+        .unwrap();
+
+    // A clean file still succeeds.
+    std::fs::write(&file, format!("CREATE TABLE {after} (id int);\n")).unwrap();
+    assert_eq!(
+        restore_postgres(&config, &req).await.unwrap(),
+        "Restore completed"
+    );
+    driver
+        .execute_query(&db, &format!("DROP TABLE {after}"))
+        .await
+        .unwrap();
+}
