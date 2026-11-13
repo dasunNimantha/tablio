@@ -34,6 +34,7 @@ type Step = "select" | "confirm" | "running" | "done";
 export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose }: Props) {
   const connections = useConnectionStore((s) => s.connections);
   const activeConnections = useConnectionStore((s) => s.activeConnections);
+  const invalidateSchema = useConnectionStore((s) => s.invalidateSchema);
   const [targets, setTargets] = useState<TargetOption[]>([]);
   const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
   const [loadingTargets, setLoadingTargets] = useState(true);
@@ -162,6 +163,10 @@ export function DumpRestoreDialog({ sourceConnectionId, sourceDatabase, onClose 
     } catch (e) {
       setError(String(e));
       setStep("done");
+    } finally {
+      // The target's objects were replaced (or partly, on failure):
+      // reload its schema tree and open table views.
+      invalidateSchema(selectedTargetInfo.connectionId);
     }
   };
 
