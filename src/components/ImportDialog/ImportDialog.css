@@ -1,11 +1,11 @@
 .import-dialog {
   width: 620px;
-  max-width: 90vw;
+  max-width: calc(90 * var(--vw));
 }
 
 .import-target-input {
   background: var(--bg-tertiary);
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: 13px;
 }
@@ -180,5 +180,28 @@
 
 .import-error-cells > svg {
   color: var(--warning);
+  margin-top: 1px;
+}
+
+.import-mapping-row--clash select {
+  border-color: var(--error);
+}
+
+.import-mapping-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border));
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.import-mapping-warning svg {
+  color: var(--warning);
+  flex-shrink: 0;
   margin-top: 1px;
 }

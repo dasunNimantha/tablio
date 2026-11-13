@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   api,
   ColumnInfo,
@@ -6,6 +6,8 @@ import {
   XlsxColumnType,
 } from "../../lib/tauri";
 import { X, FileSpreadsheet, Loader2, CheckCircle, AlertTriangle } from "lucide-react";
+import { Modal } from "../Modal/Modal";
+import { normalizeHeaders, parseCsv } from "../../lib/csv";
 import "./ImportDialog.css";
 
 interface Props {
@@ -14,7 +16,9 @@ interface Props {
   schema: string;
   tableName: string;
   onClose: () => void;
-  onImported: () => void;
+  /** Called after rows were written (the dialog stays open on its success
+   *  state until the user clicks Done). */
+  onImported: (rowCount: number) => void;
 }
 
 const MB = 1024 * 1024;
@@ -59,48 +63,24 @@ function detectKind(name: string): SourceKind | null {
   return null;
 }
 
-function parseCSV(text: string): { headers: string[]; rows: string[][] } {
-  const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
-  if (lines.length === 0) return { headers: [], rows: [] };
+type DelimiterChoice = "auto" | "," | ";" | "\t" | "|";
 
-  const parseRow = (line: string): string[] => {
-    const result: string[] = [];
-    let i = 0;
-    while (i < line.length) {
-      if (line[i] === '"') {
-        let value = "";
-        i++;
-        while (i < line.length) {
-          if (line[i] === '"') {
-            if (line[i + 1] === '"') {
-              value += '"';
-              i += 2;
-            } else {
-              i++;
-              break;
-            }
-          } else {
-            value += line[i];
-            i++;
-          }
-        }
-        result.push(value);
-      } else {
-        const comma = line.indexOf(",", i);
-        if (comma === -1) {
-          result.push(line.slice(i).trim());
-          break;
-        }
-        result.push(line.slice(i, comma).trim());
-        i = comma + 1;
-      }
-    }
-    return result;
-  };
+const DELIMITER_OPTIONS: { value: DelimiterChoice; label: string }[] = [
+  { value: "auto", label: "Detect automatically" },
+  { value: ",", label: "Comma (,)" },
+  { value: ";", label: "Semicolon (;)" },
+  { value: "\t", label: "Tab" },
+  { value: "|", label: "Pipe (|)" },
+];
 
-  const headers = parseRow(lines[0]);
-  const rows = lines.slice(1).map(parseRow);
-  return { headers, rows };
+/** Table columns that more than one source column is mapped to. */
+export function duplicateTargets(columnMap: Record<string, string>): string[] {
+  const seen = new Map<string, number>();
+  for (const target of Object.values(columnMap)) {
+    if (!target) continue;
+    seen.set(target, (seen.get(target) ?? 0) + 1);
+  }
+  return [...seen.entries()].filter(([, n]) => n > 1).map(([t]) => t);
 }
 
 export function ImportDialog({
@@ -127,6 +107,20 @@ export function ImportDialog({
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<number | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [delimiter, setDelimiter] = useState<DelimiterChoice>("auto");
+  const [csvText, setCsvText] = useState<string | null>(null);
+  const ids = useId();
+  const titleId = `${ids}-title`;
+  const doneRef = useRef<HTMLButtonElement>(null);
+  // The Import button disappears on success; move focus to Done.
+  useEffect(() => {
+    if (importResult != null) doneRef.current?.focus();
+  }, [importResult]);
+  const dupTargets = useMemo(() => duplicateTargets(columnMap), [columnMap]);
+  const busy = importing;
+  // Work in progress (a parsed file / mapping) shouldn't vanish on a stray
+  // backdrop click; after a successful import there's nothing to lose.
+  const dirty = !!sourceData && importResult == null;
 
   useEffect(() => {
     let cancelled = false;
@@ -188,6 +182,26 @@ export function ImportDialog({
     setImportResult(null);
     setImportError(null);
     setColumnMap({});
+    setCsvText(null);
+  };
+
+  const applyCsv = (text: string, choice: DelimiterChoice) => {
+    const { headers, rows } = parseCsv(text, choice === "auto" ? undefined : choice);
+    setSourceData({ headers, rows });
+    seedColumnMap(headers);
+  };
+
+  const handleDelimiterChange = (choice: DelimiterChoice) => {
+    setDelimiter(choice);
+    if (csvText == null) return;
+    setParseError(null);
+    setImportResult(null);
+    try {
+      applyCsv(csvText, choice);
+    } catch (err) {
+      setSourceData(null);
+      setParseError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -224,9 +238,8 @@ export function ImportDialog({
     try {
       if (kind === "csv") {
         const text = await file.text();
-        const { headers, rows } = parseCSV(text);
-        setSourceData({ headers, rows });
-        seedColumnMap(headers);
+        setCsvText(text);
+        applyCsv(text, delimiter);
       } else {
         const buf = new Uint8Array(await file.arrayBuffer());
         setWorkbookBytes(buf);
@@ -236,7 +249,7 @@ export function ImportDialog({
         await loadXlsxSheet(buf, preview.default_sheet);
       }
     } catch (err) {
-      setParseError(String(err));
+      setParseError(err instanceof Error ? err.message : String(err));
     } finally {
       setParsing(false);
     }
@@ -247,15 +260,17 @@ export function ImportDialog({
   // load and any sheet-picker change.
   const loadXlsxSheet = async (buf: Uint8Array, sheetName: string) => {
     const payload = await api.parseXlsxSheet(buf, sheetName);
+    // Blank / repeated header cells would collide as mapping keys.
+    const headers = normalizeHeaders(payload.headers);
     setSourceData({
-      headers: payload.headers,
+      headers,
       rows: payload.rows,
       inferredTypes: payload.inferred_types,
       totalRows: payload.rows.length,
       errorCells: payload.error_cells ?? [],
       errorCellCount: payload.error_cell_count ?? 0,
     });
-    seedColumnMap(payload.headers);
+    seedColumnMap(headers);
   };
 
   const handleSheetChange = async (sheetName: string) => {
@@ -275,20 +290,24 @@ export function ImportDialog({
   const handleImport = async () => {
     if (!sourceData) return;
 
-    const mappedCols = Object.entries(columnMap)
-      .filter(([, tableCol]) => tableCol)
-      .map(([, tableCol]) => tableCol);
+    // Pair each mapped source column (by position) with its target.
+    const mapped = sourceData.headers
+      .map((h, idx) => ({ idx, target: columnMap[h] }))
+      .filter((m): m is { idx: number; target: string } => !!m.target);
 
-    if (mappedCols.length === 0) {
+    if (mapped.length === 0) {
       setImportError("Map at least one source column to a table column");
       return;
     }
+    if (dupTargets.length > 0) {
+      setImportError(
+        `Each table column can only be filled from one source column: ${dupTargets.join(", ")}.`,
+      );
+      return;
+    }
 
-    const headers = sourceData.headers;
-    const colIndices = mappedCols.map((tc) => {
-      const sourceCol = Object.entries(columnMap).find(([, v]) => v === tc)?.[0];
-      return headers.indexOf(sourceCol!);
-    });
+    const mappedCols = mapped.map((m) => m.target);
+    const colIndices = mapped.map((m) => m.idx);
 
     // CSV rows always arrive as strings; XLSX rows already carry typed
     // values from the backend. Preserve those types here so numeric /
@@ -309,9 +328,9 @@ export function ImportDialog({
         rows,
       });
       setImportResult(count);
-      onImported();
+      onImported(count);
     } catch (e) {
-      setImportError(String(e));
+      setImportError(e instanceof Error ? e.message : String(e));
     } finally {
       setImporting(false);
     }
@@ -325,48 +344,72 @@ export function ImportDialog({
   };
 
   return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div
-        className="dialog import-dialog"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      busy={busy}
+      closeOnOverlayClick={!dirty}
+      className="dialog import-dialog"
+      labelledBy={titleId}
+    >
         <div className="dialog-header">
-          <h2>
-            <FileSpreadsheet size={18} />
+          <h2 id={titleId}>
+            <FileSpreadsheet size={18} aria-hidden="true" />
             Import Data
           </h2>
-          <button className="btn-icon" onClick={onClose}>
+          <button className="btn-icon" onClick={onClose} aria-label="Close" title="Close" disabled={busy}>
             <X size={18} />
           </button>
         </div>
 
         <div className="dialog-body">
           <div className="form-group">
-            <label>Target Table</label>
+            <label htmlFor={`${ids}-target`}>Target Table</label>
             <input
+              id={`${ids}-target`}
               value={`${schema}.${tableName}`}
-              disabled
+              readOnly
+              aria-readonly="true"
               className="import-target-input"
             />
           </div>
 
           <div className="form-group">
-            <label>Source File</label>
+            <span className="form-label" id={`${ids}-source-label`}>Source File</span>
             <div className="import-file-input">
               <input
                 type="file"
                 accept={ACCEPTED_EXTS.join(",")}
                 onChange={handleFileChange}
                 id="csv-file-input"
+                aria-describedby={`${ids}-file-hint`}
               />
               <label htmlFor="csv-file-input" className="import-file-label">
                 {sourceFile?.name ?? "Choose a .csv, .xlsx, or .xls file..."}
               </label>
             </div>
-            <p className="import-file-hint">
+            <p className="import-file-hint" id={`${ids}-file-hint`}>
               Supported: CSV (max {MAX_CSV_BYTES / MB} MB), Excel .xlsx / .xls (max {MAX_XLSX_BYTES / MB} MB).
             </p>
           </div>
+
+          {sourceKind === "csv" && (
+            <div className="form-group">
+              <label htmlFor={`${ids}-delimiter`}>Delimiter</label>
+              <select
+                id={`${ids}-delimiter`}
+                className="import-delimiter-select"
+                value={delimiter}
+                onChange={(e) => handleDelimiterChange(e.target.value as DelimiterChoice)}
+                disabled={parsing || importing}
+              >
+                {DELIMITER_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {parsing && (
             <div className="import-loading">
@@ -376,13 +419,14 @@ export function ImportDialog({
           )}
 
           {parseError && (
-            <div className="test-result error">{parseError}</div>
+            <div className="test-result error" role="alert">{parseError}</div>
           )}
 
           {workbook && workbook.sheet_names.length > 1 && (
             <div className="form-group">
-              <label>Sheet</label>
+              <label htmlFor={`${ids}-sheet`}>Sheet</label>
               <select
+                id={`${ids}-sheet`}
                 className="import-sheet-select"
                 value={activeSheet ?? workbook.default_sheet}
                 onChange={(e) => handleSheetChange(e.target.value)}
@@ -425,13 +469,15 @@ export function ImportDialog({
 
           {sourceData && !columnsLoading && (
             <>
-              <div className="form-group">
-                <label>Column Mapping</label>
+              <div className="form-group" role="group" aria-labelledby={`${ids}-mapping`}>
+                <span className="form-label" id={`${ids}-mapping`}>Column Mapping</span>
                 <div className="import-column-mapping">
                   {sourceData.headers.map((sourceCol) => {
                     const inferred = inferredFor(sourceCol);
+                    const target = columnMap[sourceCol] ?? "";
+                    const clash = !!target && dupTargets.includes(target);
                     return (
-                      <div key={sourceCol} className="import-mapping-row">
+                      <div key={sourceCol} className={`import-mapping-row${clash ? " import-mapping-row--clash" : ""}`}>
                         <span className="import-mapping-csv">
                           {sourceCol}
                           {inferred && (
@@ -440,9 +486,11 @@ export function ImportDialog({
                             </span>
                           )}
                         </span>
-                        <span className="import-mapping-arrow">→</span>
+                        <span className="import-mapping-arrow" aria-hidden="true">→</span>
                         <select
-                          value={columnMap[sourceCol] ?? ""}
+                          aria-label={`Table column for ${sourceCol}`}
+                          aria-invalid={clash || undefined}
+                          value={target}
                           onChange={(e) =>
                             setColumnMap((prev) => ({
                               ...prev,
@@ -461,10 +509,19 @@ export function ImportDialog({
                     );
                   })}
                 </div>
+                {dupTargets.length > 0 && (
+                  <div className="import-mapping-warning" role="alert">
+                    <AlertTriangle size={14} aria-hidden="true" />
+                    <span>
+                      More than one source column is mapped to{" "}
+                      {dupTargets.map((t) => `"${t}"`).join(", ")}. Map each table column once.
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="form-group">
-                <label>Preview (first 10 rows)</label>
+                <span className="form-label">Preview (first 10 rows)</span>
                 <div className="import-preview">
                   <table className="import-preview-table">
                     <thead>
@@ -490,32 +547,39 @@ export function ImportDialog({
           )}
 
           {importError && (
-            <div className="test-result error">{importError}</div>
+            <div className="test-result error" role="alert">{importError}</div>
           )}
 
           {importResult != null && (
-            <div className="test-result success">
-              <CheckCircle size={16} />
-              {importResult} rows imported successfully
+            <div className="test-result success" role="status" data-testid="import-success">
+              <CheckCircle size={16} aria-hidden="true" />
+              {importResult.toLocaleString()} {importResult === 1 ? "row" : "rows"} imported into {schema}.{tableName}
             </div>
           )}
         </div>
 
         <div className="dialog-footer">
-          <button className="btn-secondary" onClick={onClose}>
-            {importResult != null ? "Done" : "Cancel"}
-          </button>
-          <button
-            className="btn-primary"
-            onClick={handleImport}
-            disabled={!sourceData || importing}
-          >
-            {importing && <Loader2 size={14} className="spin" />}
-            Import
-          </button>
+          {importResult != null ? (
+            <button className="btn-primary" onClick={onClose} ref={doneRef}>
+              Done
+            </button>
+          ) : (
+            <>
+              <button className="btn-secondary" onClick={onClose} disabled={importing}>
+                Cancel
+              </button>
+              <button
+                className="btn-primary"
+                onClick={handleImport}
+                disabled={!sourceData || importing || dupTargets.length > 0}
+              >
+                {importing && <Loader2 size={14} className="spin" aria-hidden="true" />}
+                Import
+              </button>
+            </>
+          )}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 

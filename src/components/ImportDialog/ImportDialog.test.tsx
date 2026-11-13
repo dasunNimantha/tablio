@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
-import { ImportDialog, MAX_XLSX_BYTES } from "./ImportDialog";
+import { ImportDialog, MAX_XLSX_BYTES, duplicateTargets } from "./ImportDialog";
 import { api, type ColumnInfo, type XlsxWorkbookPreview, type XlsxSheetPayload } from "../../lib/tauri";
 
 const tableColumns: ColumnInfo[] = [
@@ -316,5 +316,74 @@ describe("ImportDialog", () => {
       expect(screen.getByText(/column mapping/i)).toBeInTheDocument();
     });
     expect(screen.queryByTestId("import-error-cells")).toBeNull();
+  });
+
+  async function loadCsv(text: string, props: Partial<Parameters<typeof ImportDialog>[0]> = {}) {
+    const onImported = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <ImportDialog
+        connectionId="test"
+        database="db"
+        schema="public"
+        tableName="users"
+        onClose={onClose}
+        onImported={onImported}
+        {...props}
+      />,
+    );
+    await screen.findByText("Import Data");
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [new File([text], "data.csv", { type: "text/csv" })] } });
+    await waitFor(() => expect(screen.getByText(/column mapping/i)).toBeInTheDocument());
+    return { onImported, onClose };
+  }
+
+  it("imports a quoted field containing a comma without shifting columns", async () => {
+    await loadCsv('id,name,active\n1,"Smith, John",true\n2,"multi\nline",false');
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(api.importData).toHaveBeenCalled());
+    expect(vi.mocked(api.importData).mock.calls[0][0]).toMatchObject({
+      columns: ["id", "name", "active"],
+      rows: [
+        ["1", "Smith, John", "true"],
+        ["2", "multi\nline", "false"],
+      ],
+    });
+  });
+
+  it("stays open on a success state with Done after importing", async () => {
+    const { onImported, onClose } = await loadCsv("id,name\n1,a\n2,b");
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    const ok = await screen.findByTestId("import-success");
+    expect(ok).toHaveTextContent("2 rows imported into public.users");
+    expect(onImported).toHaveBeenCalledWith(2);
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("blocks import when two source columns map to the same table column", async () => {
+    await loadCsv("id,name,Name\n1,a,b");
+    // "Name" was de-duplicated to "Name_2" and both match "name"? Only the
+    // exact (case-insensitive) match is seeded; map the second one by hand.
+    const selects = screen.getAllByRole("combobox", { name: /Table column for/ });
+    fireEvent.change(selects[2], { target: { value: "name" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent(/More than one source column is mapped to "name"/);
+    expect(screen.getByRole("button", { name: "Import" })).toBeDisabled();
+  });
+
+  it("uses the chosen delimiter and gives blank headers a name", async () => {
+    await loadCsv("id;;name\n1;x;y");
+    expect(screen.getByLabelText("Table column for column_2")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Delimiter"), { target: { value: "," } });
+    await waitFor(() => expect(screen.getByLabelText("Table column for id;;name")).toBeInTheDocument());
+  });
+});
+
+describe("duplicateTargets", () => {
+  it("lists table columns used more than once and ignores skipped ones", () => {
+    expect(duplicateTargets({ a: "id", b: "", c: "id", d: "name", e: "" })).toEqual(["id"]);
+    expect(duplicateTargets({ a: "id", b: "name" })).toEqual([]);
   });
 });
