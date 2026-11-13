@@ -31,7 +31,9 @@ use tokio::task::JoinHandle;
 
 use russh::client::{self, AuthResult, Handle};
 use russh::keys::known_hosts::{known_host_keys_path, learn_known_hosts_path};
-use russh::keys::{decode_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey};
+use russh::keys::{
+    decode_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate,
+};
 
 use crate::models::{ConnectionConfig, SshAuthMethod};
 
@@ -195,8 +197,12 @@ impl client::Handler for KnownHostsHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        // Tablio has no CA trust store, so a host certificate is treated like
+        // OpenSSH treats one signed by an unknown CA: the certified public key
+        // is pinned and verified against known_hosts exactly like a plain key.
+        let server_public_key = &server_key.public_key();
         let recorded = match known_host_keys_path(&self.host, self.port, &self.path) {
             Ok(entries) => entries.into_iter().map(|(_, k)| k).collect::<Vec<_>>(),
             Err(e) => {
@@ -757,11 +763,11 @@ CUrE7QRAvdVpD5e3zKH/MZjilWrMOm6cyI1LKBCssLztPyvOALtroLAPlp7WYWfu\n\
             "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ",
         )
         .unwrap();
-        let accepted = handler.check_server_key(&key).await.unwrap();
+        let accepted = handler.check_server_key(&key.clone().into()).await.unwrap();
         assert!(accepted, "first contact must be accepted (TOFU)");
         assert!(kh.exists(), "known_hosts file must be created");
         // Second call should match the now-recorded key.
-        let accepted_again = handler.check_server_key(&key).await.unwrap();
+        let accepted_again = handler.check_server_key(&key.clone().into()).await.unwrap();
         assert!(accepted_again, "matching key on reconnect must be accepted");
     }
 
@@ -779,13 +785,19 @@ CUrE7QRAvdVpD5e3zKH/MZjilWrMOm6cyI1LKBCssLztPyvOALtroLAPlp7WYWfu\n\
             "AAAAC3NzaC1lZDI1NTE5AAAAILIG2T/B0l0gaqj3puu510tu9N1OkQ4znY3LYuEm5zCF",
         )
         .unwrap();
-        assert!(handler.check_server_key(&key1).await.unwrap());
+        assert!(handler
+            .check_server_key(&key1.clone().into())
+            .await
+            .unwrap());
         assert!(
             mismatch_slot.lock().unwrap().is_none(),
             "no mismatch should be recorded on first contact"
         );
         // Now the same host hands us a different key — must be rejected.
-        let rejected = handler.check_server_key(&key2).await.unwrap();
+        let rejected = handler
+            .check_server_key(&key2.clone().into())
+            .await
+            .unwrap();
         assert!(!rejected, "changed host key must be rejected");
         let info = mismatch_slot
             .lock()
@@ -866,7 +878,10 @@ CUrE7QRAvdVpD5e3zKH/MZjilWrMOm6cyI1LKBCssLztPyvOALtroLAPlp7WYWfu\n\
         let mut handler = KnownHostsHandler::new(kh.clone(), "host.example".into(), 2222);
         let slot = handler.mismatch.clone();
 
-        let accepted = handler.check_server_key(&key(ECDSA_A)).await.unwrap();
+        let accepted = handler
+            .check_server_key(&key(ECDSA_A).into())
+            .await
+            .unwrap();
         assert!(!accepted, "algorithm switch must be treated as a mismatch");
         let info = slot.lock().unwrap().take().expect("mismatch recorded");
         assert_eq!(info.port, 2222);
@@ -882,7 +897,10 @@ CUrE7QRAvdVpD5e3zKH/MZjilWrMOm6cyI1LKBCssLztPyvOALtroLAPlp7WYWfu\n\
 
         // A different port of the same host is a separate entry: first contact.
         let mut other_port = KnownHostsHandler::new(kh.clone(), "host.example".into(), 22);
-        assert!(other_port.check_server_key(&key(ECDSA_A)).await.unwrap());
+        assert!(other_port
+            .check_server_key(&key(ECDSA_A).into())
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
