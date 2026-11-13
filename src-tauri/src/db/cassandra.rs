@@ -43,18 +43,26 @@ const SYSTEM_KEYSPACES: &[&str] = &[
     "system_virtual_schema",
 ];
 
-/// The primary key of the one row that `changes` edits, when the edit
-/// qualifies for [`CassandraDriver::apply_single_row_edit`]: only updates
-/// or only deletes (no inserts), all keyed by the same complete primary
-/// key, on a table without counter columns (CQL rejects conditional
-/// updates on counter tables). Anything else keeps the plain batch.
-fn single_row_edit<'a>(
+/// One row a grid save changes, identified by its complete primary key:
+/// either the cells to set (a column edited twice keeps its last value)
+/// or a delete.
+#[derive(Debug)]
+struct RowEdit<'a> {
+    key: &'a [(String, serde_json::Value)],
+    sets: Vec<(&'a str, &'a serde_json::Value)>,
+    delete: bool,
+}
+
+/// The updates and deletes of `changes` grouped per row, when every one
+/// of them is keyed by the table's complete primary key and the table
+/// has no counter columns (CQL rejects conditional updates on counter
+/// tables). Those rows are then written as lightweight transactions
+/// (`IF EXISTS`), one per row because a conditional batch can't span
+/// partitions. `None` keeps the plain batch.
+fn keyed_row_edits<'a>(
     changes: &'a DataChanges,
     columns: &[ColumnInfo],
-) -> Option<&'a [(String, serde_json::Value)]> {
-    if !changes.inserts.is_empty() || changes.updates.is_empty() == changes.deletes.is_empty() {
-        return None;
-    }
+) -> Option<Vec<RowEdit<'a>>> {
     if columns.iter().any(|c| c.data_type == "counter") {
         return None;
     }
@@ -75,101 +83,218 @@ fn single_row_edit<'a>(
         k.sort();
         k
     };
-    let mut keys = changes
-        .updates
-        .iter()
-        .map(|u| u.primary_key_values.as_slice())
-        .chain(
-            changes
-                .deletes
-                .iter()
-                .map(|d| d.primary_key_values.as_slice()),
-        );
-    let first = keys.next()?;
-    let first_norm = normalized(first);
-    let key_cols: Vec<&str> = first_norm.iter().map(|(c, _)| c.as_str()).collect();
-    if key_cols != pk_cols {
-        return None;
+    let is_full_pk = |norm: &[(String, String)]| {
+        norm.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>() == pk_cols
+    };
+    let mut edits: Vec<(Vec<(String, String)>, RowEdit<'a>)> = Vec::new();
+    for u in &changes.updates {
+        let norm = normalized(&u.primary_key_values);
+        if !is_full_pk(&norm) {
+            return None;
+        }
+        let idx = match edits.iter().position(|(k, _)| *k == norm) {
+            Some(i) => i,
+            None => {
+                edits.push((
+                    norm,
+                    RowEdit {
+                        key: &u.primary_key_values,
+                        sets: Vec::new(),
+                        delete: false,
+                    },
+                ));
+                edits.len() - 1
+            }
+        };
+        let sets = &mut edits[idx].1.sets;
+        match sets.iter_mut().find(|(c, _)| *c == u.column_name) {
+            Some(slot) => slot.1 = &u.new_value,
+            None => sets.push((u.column_name.as_str(), &u.new_value)),
+        }
     }
-    keys.all(|k| normalized(k) == first_norm).then_some(first)
+    for d in &changes.deletes {
+        let norm = normalized(&d.primary_key_values);
+        if !is_full_pk(&norm) {
+            return None;
+        }
+        match edits.iter_mut().find(|(k, _)| *k == norm) {
+            // Deleting a row that is also edited: the delete wins.
+            Some((_, e)) => {
+                e.delete = true;
+                e.sets.clear();
+            }
+            None => edits.push((
+                norm,
+                RowEdit {
+                    key: &d.primary_key_values,
+                    sets: Vec::new(),
+                    delete: true,
+                },
+            )),
+        }
+    }
+    Some(edits.into_iter().map(|(_, e)| e).collect())
+}
+
+fn describe_key(key: &[(String, serde_json::Value)]) -> String {
+    key.iter()
+        .map(|(c, v)| format!("{} = {}", c, v))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether an LWT result reports `[applied] = true` (always its first
+/// column).
+fn lwt_applied(result: &QueryRowsResult) -> Option<bool> {
+    result
+        .rows::<scylla::value::Row>()
+        .ok()
+        .and_then(|mut rows| rows.next())
+        .and_then(|r| r.ok())
+        .and_then(|r| r.columns.into_iter().next().flatten())
+        .map(|v| matches!(v, scylla::value::CqlValue::Boolean(true)))
 }
 
 impl CassandraDriver {
-    /// Apply grid edits that all target one row, identified by its full
-    /// primary key, as a lightweight transaction (`IF EXISTS`).
+    /// Apply grid edits keyed by full primary keys as lightweight
+    /// transactions (`IF EXISTS`), one per row.
     ///
     /// A plain CQL `UPDATE` is an upsert and `DELETE` of a missing row is
     /// a no-op, so without the condition editing a row someone else just
     /// deleted would silently re-create it (with only the edited cells)
-    /// and a delete would report success. The LWT result's `[applied]`
-    /// column tells us whether the row was still there.
-    async fn apply_single_row_edit(
+    /// and a delete would report success. The rows are first checked to
+    /// still exist, so the usual case of a stale grid fails with nothing
+    /// written. A row deleted between that check and its write is still
+    /// caught by its LWT; rows written before it stay written (Cassandra
+    /// has no multi-partition transactions) and the error says which.
+    async fn apply_keyed_edits(
         &self,
         qualified: &str,
-        changes: &DataChanges,
-        row: &[(String, serde_json::Value)],
+        edits: &[RowEdit<'_>],
+        inserts: &[String],
         lit: &(dyn Fn(&str, &serde_json::Value) -> String + Sync),
     ) -> Result<()> {
-        let pk_clause = row
-            .iter()
-            .map(|(col, val)| format!("{} = {}", quote_ident(col), lit(col, val)))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        let (action, cql) = if changes.deletes.is_empty() {
-            // Every edited cell of the row in one statement; a column
-            // edited twice keeps its last value.
-            let mut sets: Vec<(&str, &serde_json::Value)> = Vec::new();
-            for u in &changes.updates {
-                match sets.iter_mut().find(|(c, _)| *c == u.column_name) {
-                    Some(slot) => slot.1 = &u.new_value,
-                    None => sets.push((u.column_name.as_str(), &u.new_value)),
-                }
+        let pk_clause = |key: &[(String, serde_json::Value)]| {
+            key.iter()
+                .map(|(col, val)| format!("{} = {}", quote_ident(col), lit(col, val)))
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        };
+        let action = |e: &RowEdit| if e.delete { "delete" } else { "update" };
+
+        let mut missing = Vec::new();
+        for e in edits {
+            let (first_col, _) = &e.key[0];
+            let cql = format!(
+                "SELECT {} FROM {qualified} WHERE {} LIMIT 1",
+                quote_ident(first_col),
+                pk_clause(e.key)
+            );
+            let found = self
+                .session
+                .query_unpaged(cql.as_str(), &[])
+                .await
+                .map_err(|e| anyhow!("{}", e))?
+                .into_rows_result()
+                .map_err(|e| anyhow!("{}", e))?
+                .rows_num()
+                > 0;
+            if !found {
+                missing.push(e);
             }
-            let set_clause = sets
+        }
+        if let [only] = missing.as_slice() {
+            anyhow::bail!(
+                "Cannot {} row ({}): the row no longer exists. It may have been deleted \
+                 concurrently; refresh and try again. No changes were saved.",
+                action(only),
+                describe_key(only.key)
+            );
+        }
+        if !missing.is_empty() {
+            let keys = missing
                 .iter()
-                .map(|(c, v)| format!("{} = {}", quote_ident(c), lit(c, v)))
+                .map(|e| format!("({})", describe_key(e.key)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            (
-                "update",
-                format!("UPDATE {qualified} SET {set_clause} WHERE {pk_clause} IF EXISTS"),
-            )
-        } else {
-            (
-                "delete",
-                format!("DELETE FROM {qualified} WHERE {pk_clause} IF EXISTS"),
-            )
-        };
-        let result = self
-            .session
-            .query_unpaged(cql.as_str(), &[])
-            .await
-            .map_err(|e| anyhow!("{}", e))?
-            .into_rows_result()
-            .map_err(|e| anyhow!("{}", e))?;
-        // `[applied]` is always the first column of an LWT result.
-        let applied = result
-            .rows::<scylla::value::Row>()
-            .ok()
-            .and_then(|mut rows| rows.next())
-            .and_then(|r| r.ok())
-            .and_then(|r| r.columns.into_iter().next().flatten())
-            .map(|v| matches!(v, scylla::value::CqlValue::Boolean(true)));
-        match applied {
-            Some(true) => Ok(()),
-            Some(false) => {
-                let key = row
+            anyhow::bail!(
+                "Cannot save: {} edited rows no longer exist: {keys}. They may have been \
+                 deleted concurrently; refresh and try again. No changes were saved.",
+                missing.len()
+            );
+        }
+
+        let mut written = 0usize;
+        for e in edits {
+            let cql = if e.delete {
+                format!(
+                    "DELETE FROM {qualified} WHERE {} IF EXISTS",
+                    pk_clause(e.key)
+                )
+            } else {
+                let set_clause = e
+                    .sets
                     .iter()
-                    .map(|(c, v)| format!("{} = {}", c, v))
+                    .map(|(c, v)| format!("{} = {}", quote_ident(c), lit(c, v)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                anyhow::bail!(
-                    "Cannot {action} row ({key}): the row no longer exists. It may have been \
-                     deleted concurrently; refresh and try again. No changes were saved."
+                format!(
+                    "UPDATE {qualified} SET {set_clause} WHERE {} IF EXISTS",
+                    pk_clause(e.key)
                 )
+            };
+            let result = self
+                .session
+                .query_unpaged(cql.as_str(), &[])
+                .await
+                .map_err(|e| anyhow!("{}", e))?
+                .into_rows_result()
+                .map_err(|e| anyhow!("{}", e))?;
+            match lwt_applied(&result) {
+                Some(true) => written += 1,
+                Some(false) => {
+                    let saved = if written == 0 {
+                        "No changes were saved.".to_string()
+                    } else {
+                        format!(
+                            "{written} other row(s) were already saved; the remaining changes \
+                             were not."
+                        )
+                    };
+                    anyhow::bail!(
+                        "Cannot {} row ({}): the row no longer exists. It may have been \
+                         deleted concurrently; refresh and try again. {saved}",
+                        action(e),
+                        describe_key(e.key)
+                    )
+                }
+                None => anyhow::bail!(
+                    "Cannot {} row: the server did not report whether it applied",
+                    action(e)
+                ),
             }
-            None => {
-                anyhow::bail!("Cannot {action} row: the server did not report whether it applied")
+        }
+
+        self.run_plain(inserts).await
+    }
+
+    /// Run unconditional statements, as one batch when there are several.
+    async fn run_plain(&self, stmts: &[String]) -> Result<()> {
+        match stmts {
+            [] => Ok(()),
+            [one] => self
+                .session
+                .query_unpaged(one.as_str(), &[])
+                .await
+                .map(|_| ())
+                .map_err(|e| anyhow!("{}", e)),
+            many => {
+                let batch_cql = format!("BEGIN BATCH\n{}\nAPPLY BATCH", many.join(";\n"));
+                self.session
+                    .query_unpaged(batch_cql.as_str(), &[])
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| anyhow!("{}", e))
             }
         }
     }
@@ -939,18 +1064,42 @@ impl DatabaseDriver for CassandraDriver {
             typed_cql_literal(col_types.get(col).map(String::as_str), val)
         };
 
-        if let Some(row) = single_row_edit(changes, &columns) {
-            return self
-                .apply_single_row_edit(&qualified, changes, row, &lit)
-                .await;
-        }
-
-        let mut stmts = Vec::new();
-
+        let insert_stmts: Vec<String> = changes
+            .inserts
+            .iter()
+            .map(|insert| {
+                let col_names: Vec<String> =
+                    insert.values.iter().map(|(c, _)| quote_ident(c)).collect();
+                let vals: Vec<String> = insert.values.iter().map(|(c, v)| lit(c, v)).collect();
+                format!(
+                    "INSERT INTO {} ({}) VALUES ({})",
+                    qualified,
+                    col_names.join(", "),
+                    vals.join(", ")
+                )
+            })
+            .collect();
         for update in &changes.updates {
             if update.primary_key_values.is_empty() {
                 anyhow::bail!("Cannot update row: no primary key values provided");
             }
+        }
+        for delete in &changes.deletes {
+            if delete.primary_key_values.is_empty() {
+                anyhow::bail!("Cannot delete row: no primary key values provided");
+            }
+        }
+
+        if let Some(edits) = keyed_row_edits(changes, &columns) {
+            return self
+                .apply_keyed_edits(&qualified, &edits, &insert_stmts, &lit)
+                .await;
+        }
+
+        // Counter tables, or keys that aren't the complete primary key:
+        // plain (unconditional) statements.
+        let mut stmts = Vec::new();
+        for update in &changes.updates {
             let pk_clause: Vec<String> = update
                 .primary_key_values
                 .iter()
@@ -964,23 +1113,8 @@ impl DatabaseDriver for CassandraDriver {
                 pk_clause.join(" AND ")
             ));
         }
-
-        for insert in &changes.inserts {
-            let col_names: Vec<String> =
-                insert.values.iter().map(|(c, _)| quote_ident(c)).collect();
-            let vals: Vec<String> = insert.values.iter().map(|(c, v)| lit(c, v)).collect();
-            stmts.push(format!(
-                "INSERT INTO {} ({}) VALUES ({})",
-                qualified,
-                col_names.join(", "),
-                vals.join(", ")
-            ));
-        }
-
+        stmts.extend(insert_stmts);
         for delete in &changes.deletes {
-            if delete.primary_key_values.is_empty() {
-                anyhow::bail!("Cannot delete row: no primary key values provided");
-            }
             let pk_clause: Vec<String> = delete
                 .primary_key_values
                 .iter()
@@ -992,25 +1126,7 @@ impl DatabaseDriver for CassandraDriver {
                 pk_clause.join(" AND ")
             ));
         }
-
-        if stmts.is_empty() {
-            return Ok(());
-        }
-
-        if stmts.len() == 1 {
-            self.session
-                .query_unpaged(stmts[0].as_str(), &[])
-                .await
-                .map_err(|e| anyhow!("{}", e))?;
-        } else {
-            let batch_cql = format!("BEGIN BATCH\n{}\nAPPLY BATCH", stmts.join(";\n"));
-            self.session
-                .query_unpaged(batch_cql.as_str(), &[])
-                .await
-                .map_err(|e| anyhow!("{}", e))?;
-        }
-
-        Ok(())
+        self.run_plain(&stmts).await
     }
 
     async fn create_table(
@@ -1563,5 +1679,79 @@ mod tests {
             &CqlValue::List(vec![CqlValue::Int(1), CqlValue::Int(2)]),
         );
         assert_eq!(val, serde_json::json!([1, 2]));
+    }
+
+    fn col(name: &str, pk: bool, ty: &str) -> ColumnInfo {
+        ColumnInfo {
+            name: name.into(),
+            data_type: ty.into(),
+            is_nullable: !pk,
+            is_primary_key: pk,
+            default_value: None,
+            ordinal_position: 0,
+            is_auto_generated: false,
+        }
+    }
+
+    fn edit_changes(updates: Vec<(i64, &str)>, deletes: Vec<i64>) -> DataChanges {
+        DataChanges {
+            connection_id: "c".into(),
+            database: "ks".into(),
+            schema: "ks".into(),
+            table: "t".into(),
+            updates: updates
+                .into_iter()
+                .map(|(id, c)| CellChange {
+                    row_index: 0,
+                    column_name: c.into(),
+                    old_value: serde_json::Value::Null,
+                    new_value: serde_json::json!("x"),
+                    primary_key_values: vec![("id".into(), serde_json::json!(id))],
+                })
+                .collect(),
+            inserts: vec![],
+            deletes: deletes
+                .into_iter()
+                .map(|id| DeleteRow {
+                    primary_key_values: vec![("id".into(), serde_json::json!(id))],
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn multi_row_edits_are_grouped_per_row() {
+        let cols = [
+            col("id", true, "int"),
+            col("a", false, "text"),
+            col("b", false, "text"),
+        ];
+        let changes = edit_changes(vec![(1, "a"), (2, "a"), (1, "b")], vec![3]);
+        let edits = keyed_row_edits(&changes, &cols).expect("full keys");
+        assert_eq!(edits.len(), 3);
+        assert_eq!(edits[0].sets.len(), 2);
+        assert!(!edits[0].delete);
+        assert!(edits[2].delete);
+    }
+
+    #[test]
+    fn delete_of_an_edited_row_wins() {
+        let cols = [col("id", true, "int"), col("a", false, "text")];
+        let changes = edit_changes(vec![(1, "a")], vec![1]);
+        let edits = keyed_row_edits(&changes, &cols).unwrap();
+        assert_eq!(edits.len(), 1);
+        assert!(edits[0].delete && edits[0].sets.is_empty());
+    }
+
+    #[test]
+    fn counters_and_partial_keys_keep_plain_statements() {
+        let counter = [col("id", true, "int"), col("n", false, "counter")];
+        assert!(keyed_row_edits(&edit_changes(vec![(1, "n")], vec![]), &counter).is_none());
+        let compound = [
+            col("id", true, "int"),
+            col("ck", true, "int"),
+            col("a", false, "text"),
+        ];
+        assert!(keyed_row_edits(&edit_changes(vec![(1, "a")], vec![]), &compound).is_none());
     }
 }
