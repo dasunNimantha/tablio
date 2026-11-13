@@ -21,7 +21,20 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src": "'self' data: https://fonts.gstatic.com",
+        "img-src": "'self' data: blob:",
+        "worker-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost",
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "form-action": "'none'",
+        "frame-src": "'none'"
+      },
+      "dangerousDisableAssetCspModification": ["style-src"]
     }
   },
   "bundle": {
