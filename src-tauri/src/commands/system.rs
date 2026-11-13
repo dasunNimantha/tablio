@@ -58,7 +58,7 @@ pub async fn get_app_resource_usage() -> Result<AppResourceUsage, String> {
 /// [`System`] that is dropped on return — guaranteeing every
 /// `/proc/<pid>/...` handle sysinfo opens is released.
 fn read_memory_mb(pid: Pid) -> Result<f64, String> {
-    let mut sys = System::new();
+    let mut sys = System::new().map_err(|e| e.to_string())?;
     // `false` = do not also enumerate threads. We only need the
     // process-level memory total, and skipping the thread refresh
     // avoids opening one extra `/proc/<pid>/task/<tid>/stat` per
@@ -82,7 +82,9 @@ async fn read_cpu_percent(pid: Pid) -> f32 {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let mut sys = System::new();
+        let Ok(mut sys) = System::new() else {
+            return 0.0;
+        };
         sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             false,
