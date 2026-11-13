@@ -112,6 +112,21 @@ describe("editorInputToValue", () => {
     expect(editorInputToValue("", intNotNull).ok).toBe(false);
   });
 
+  it("sends edited JSON back as its exact text", () => {
+    const json = { data_type: "jsonb", is_nullable: true };
+    expect(editorInputToValue('{ "b": 1, "a": [1, 2] }', json))
+      .toEqual({ ok: true, value: '{ "b": 1, "a": [1, 2] }' });
+    expect(editorInputToValue("[1,\n 2]", json)).toEqual({ ok: true, value: "[1,\n 2]" });
+    expect(editorInputToValue("42", json)).toEqual({ ok: true, value: "42" });
+  });
+
+  it("rejects invalid JSON and never stores [object Object]", () => {
+    const json = { data_type: "json", is_nullable: true };
+    expect(editorInputToValue("[object Object]", json).ok).toBe(false);
+    expect(editorInputToValue("{a:1}", json)).toEqual({ ok: false, error: "Invalid JSON" });
+    expect(editorInputToValue("", json)).toEqual({ ok: true, value: null });
+  });
+
   it("rejects invalid numbers and keeps big integers exact", () => {
     expect(editorInputToValue("12abc", int).ok).toBe(false);
     expect(editorInputToValue("123456789012345678901", { data_type: "numeric", is_nullable: true }))
