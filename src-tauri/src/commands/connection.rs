@@ -3,6 +3,7 @@ use crate::models::*;
 use crate::util::json_store::{self, STORE_LOCK};
 use crate::util::secrets::{self, SecretField, SecretStore};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::State;
@@ -114,10 +115,70 @@ fn put_verified(store: &dyn SecretStore, id: &str, field: SecretField, value: &s
     }
 }
 
+/// Upper bound on concurrent credential-store reads during a load.
+const PARALLEL_SECRET_READS: usize = 8;
+
+/// Read every secret the file says lives in the credential store, in
+/// parallel. Each read is a full round-trip to the OS store (on Linux a new
+/// Secret Service session, ~100 ms), so reading them one by one made the
+/// connection list appear seconds after the window.
+fn prefetch_secrets(
+    entries: &[Value],
+    store: &dyn SecretStore,
+) -> HashMap<(String, SecretField), Result<Option<String>, String>> {
+    let wanted: Vec<(String, SecretField)> = entries
+        .iter()
+        .filter_map(|e| Some((e, e.get("id").and_then(Value::as_str)?)))
+        .flat_map(|(e, id)| {
+            SecretField::ALL
+                .into_iter()
+                .filter(move |f| marker_set(e, *f))
+                .map(move |f| (id.to_owned(), f))
+        })
+        .collect();
+    if wanted.is_empty() {
+        return HashMap::new();
+    }
+    let mut out = HashMap::new();
+    let mut wanted = wanted;
+    if let Some(mut bulk) = store.get_all() {
+        wanted.retain(|(id, f)| match bulk.remove(&f.account(id)) {
+            Some(v) => {
+                out.insert((id.clone(), *f), Ok(Some(v)));
+                false
+            }
+            None => true,
+        });
+        if wanted.is_empty() {
+            return out;
+        }
+    }
+    let chunk = wanted.len().div_ceil(PARALLEL_SECRET_READS);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = wanted
+            .chunks(chunk)
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .map(|(id, f)| ((id.clone(), *f), store.get(id, *f)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        out.extend(
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap_or_default()),
+        );
+    });
+    out
+}
+
 fn load_from(path: &Path, store: &dyn SecretStore) -> Result<Vec<ConnectionConfig>, String> {
     let mut entries = json_store::read_entries(path)?;
     let mut on_disk = entries.clone();
     let mut migrated = false;
+    let mut prefetched = prefetch_secrets(&on_disk, store);
 
     for (entry, disk) in entries.iter_mut().zip(on_disk.iter_mut()) {
         let Some(id) = entry.get("id").and_then(Value::as_str).map(str::to_owned) else {
@@ -133,7 +194,10 @@ fn load_from(path: &Path, store: &dyn SecretStore) -> Result<Vec<ConnectionConfi
             if disk.get(field.marker_key()).and_then(Value::as_bool) == Some(true) {
                 // Prefer the stored value; if it can't be read, whatever the
                 // file holds (normally blank) is all we have.
-                match store.get(&id, field) {
+                let read = prefetched
+                    .remove(&(id.clone(), field))
+                    .unwrap_or_else(|| store.get(&id, field));
+                match read {
                     Ok(Some(v)) => {
                         entry.insert(key.into(), Value::String(v));
                     }
@@ -268,6 +332,34 @@ pub async fn load_connections() -> Result<Vec<ConnectionConfig>, String> {
 mod tests {
     use super::*;
     use crate::util::secrets::MemoryStore;
+
+    #[test]
+    fn load_reads_many_stored_secrets_in_parallel() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new();
+        let p = dir.path().join(".tablio").join("connections.json");
+        for i in 0..20 {
+            let mut c = cfg(&format!("c{i}"), &format!("C{i}"));
+            c.password = format!("pw-{i}");
+            if i % 3 == 0 {
+                c.ssh_enabled = true;
+                c.ssh_password = format!("ssh-{i}");
+            }
+            save_to(&p, &c, &store).unwrap();
+        }
+        let all = load_from(&p, &store).unwrap();
+        assert_eq!(all.len(), 20);
+        for (i, c) in all.iter().enumerate() {
+            assert_eq!(c.id, format!("c{i}"));
+            assert_eq!(c.password, format!("pw-{i}"));
+            let ssh = if i % 3 == 0 {
+                format!("ssh-{i}")
+            } else {
+                String::new()
+            };
+            assert_eq!(c.ssh_password, ssh);
+        }
+    }
 
     fn cfg(id: &str, name: &str) -> ConnectionConfig {
         ConnectionConfig {

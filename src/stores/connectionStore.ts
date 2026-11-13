@@ -40,6 +40,8 @@ interface ConnectionState {
   connections: ConnectionConfig[];
   activeConnections: Set<string>;
   loading: boolean;
+  /** False until the first `loadConnections` finishes (successfully or not). */
+  connectionsLoaded: boolean;
   error: string | null;
   pendingPassphrasePrompt: PendingPassphrasePrompt | null;
   pendingHostKeyMismatch: PendingHostKeyMismatchPrompt | null;
@@ -75,6 +77,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connections: [],
   activeConnections: new Set(),
   loading: false,
+  connectionsLoaded: false,
   error: null,
   pendingPassphrasePrompt: null,
   pendingHostKeyMismatch: null,
@@ -84,9 +87,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const connections = await api.loadConnections();
-      set({ connections, loading: false });
+      set({ connections, loading: false, connectionsLoaded: true });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: String(e), loading: false, connectionsLoaded: true });
     }
   },
 
