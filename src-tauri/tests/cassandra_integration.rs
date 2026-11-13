@@ -1152,3 +1152,201 @@ async fn cassandra_console_cancel_aborts_and_session_recovers() {
         assert_eq!(r.rows.len(), 1);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Single-row grid edits: IF EXISTS
+// ---------------------------------------------------------------------------
+
+fn row_changes(
+    ks: &str,
+    tbl: &str,
+    updates: Vec<CellChange>,
+    deletes: Vec<DeleteRow>,
+) -> DataChanges {
+    DataChanges {
+        connection_id: "test".into(),
+        database: ks.into(),
+        schema: ks.into(),
+        table: tbl.into(),
+        updates,
+        inserts: vec![],
+        deletes,
+    }
+}
+
+async fn row_count(driver: &CassandraDriver, ks: &str, tbl: &str) -> usize {
+    driver
+        .execute_query("", &format!("SELECT * FROM {ks}.{tbl}"))
+        .await
+        .unwrap()
+        .rows
+        .len()
+}
+
+fn cell(pk: Vec<(String, serde_json::Value)>, col: &str, new: serde_json::Value) -> CellChange {
+    CellChange {
+        row_index: 0,
+        primary_key_values: pk,
+        column_name: col.into(),
+        old_value: serde_json::Value::Null,
+        new_value: new,
+    }
+}
+
+#[tokio::test]
+async fn cassandra_grid_edit_of_missing_row_reports_row_gone() {
+    let driver = create_driver().await;
+    let ks = setup_keyspace(&driver).await;
+    let tbl = unique_table("lwt");
+    driver
+        .execute_query(
+            "",
+            &format!(
+                "CREATE TABLE {ks}.{tbl} (pk int, ck int, a text, b int, PRIMARY KEY (pk, ck))"
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            "",
+            &format!("INSERT INTO {ks}.{tbl} (pk, ck, a, b) VALUES (1, 1, 'x', 1)"),
+        )
+        .await
+        .unwrap();
+    let key = |ck: i64| {
+        vec![
+            ("pk".to_string(), serde_json::json!(1)),
+            ("ck".to_string(), serde_json::json!(ck)),
+        ]
+    };
+    // Two cells of an existing row: applied, as one statement.
+    driver
+        .apply_changes(&row_changes(
+            &ks,
+            &tbl,
+            vec![
+                cell(key(1), "a", serde_json::json!("y")),
+                cell(key(1), "b", serde_json::json!(2)),
+            ],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(
+            "",
+            &format!("SELECT a, b FROM {ks}.{tbl} WHERE pk = 1 AND ck = 1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!("y"));
+    assert_eq!(r.rows[0][1], serde_json::json!(2));
+
+    // Updating a row that does not exist (deleted concurrently) must fail
+    // instead of upserting a partial row.
+    let err = driver
+        .apply_changes(&row_changes(
+            &ks,
+            &tbl,
+            vec![cell(key(2), "a", serde_json::json!("ghost"))],
+            vec![],
+        ))
+        .await
+        .expect_err("update of a missing row must fail");
+    assert!(err.to_string().contains("no longer exists"), "{err}");
+    assert_eq!(row_count(&driver, &ks, &tbl).await, 1, "no row re-created");
+
+    // Deleting a missing row reports the same.
+    let err = driver
+        .apply_changes(&row_changes(
+            &ks,
+            &tbl,
+            vec![],
+            vec![DeleteRow {
+                primary_key_values: key(2),
+            }],
+        ))
+        .await
+        .expect_err("delete of a missing row must fail");
+    assert!(err.to_string().contains("no longer exists"), "{err}");
+
+    // Deleting the existing row works.
+    driver
+        .apply_changes(&row_changes(
+            &ks,
+            &tbl,
+            vec![],
+            vec![DeleteRow {
+                primary_key_values: key(1),
+            }],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(row_count(&driver, &ks, &tbl).await, 0);
+
+    teardown_keyspace(&driver, &ks).await;
+}
+
+#[tokio::test]
+async fn cassandra_multi_row_edit_and_console_keep_plain_statements() {
+    let driver = create_driver().await;
+    let ks = setup_keyspace(&driver).await;
+    let tbl = unique_table("nolwt");
+    driver
+        .execute_query(
+            "",
+            &format!("CREATE TABLE {ks}.{tbl} (id int PRIMARY KEY, v text)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            "",
+            &format!("INSERT INTO {ks}.{tbl} (id, v) VALUES (1, 'a')"),
+        )
+        .await
+        .unwrap();
+
+    // Edits spanning rows stay a plain (unconditional) batch: a
+    // conditional batch cannot span partitions.
+    driver
+        .apply_changes(&row_changes(
+            &ks,
+            &tbl,
+            vec![
+                cell(
+                    vec![("id".into(), serde_json::json!(1))],
+                    "v",
+                    serde_json::json!("b"),
+                ),
+                cell(
+                    vec![("id".into(), serde_json::json!(2))],
+                    "v",
+                    serde_json::json!("c"),
+                ),
+            ],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query("", &format!("SELECT id FROM {ks}.{tbl}"))
+        .await
+        .unwrap();
+    assert_eq!(r.rows.len(), 2);
+
+    // Console statements are not rewritten: an UPDATE of a missing row is
+    // the usual CQL upsert.
+    driver
+        .execute_query("", &format!("UPDATE {ks}.{tbl} SET v = 'd' WHERE id = 3"))
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query("", &format!("SELECT id FROM {ks}.{tbl}"))
+        .await
+        .unwrap();
+    assert_eq!(r.rows.len(), 3);
+
+    teardown_keyspace(&driver, &ks).await;
+}
