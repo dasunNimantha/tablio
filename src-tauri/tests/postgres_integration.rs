@@ -3854,3 +3854,119 @@ async fn pg_console_cancel_before_start_is_reported() {
     assert!(tablio_lib::db::cancel::is_cancelled_error(&err));
     driver.execute_query(DB, "SELECT 1").await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Plain SQL (psql) restore
+// ---------------------------------------------------------------------------
+
+/// Connection config for `TEST_POSTGRES16_URL` if set (psql is a client
+/// of the same major version there), else `TEST_POSTGRES_URL`.
+fn pg_restore_config() -> Option<ConnectionConfig> {
+    let url = ["TEST_POSTGRES16_URL", "TEST_POSTGRES_URL"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))?;
+    let parts = url
+        .strip_prefix("postgres://")
+        .or_else(|| url.strip_prefix("postgresql://"))?;
+    let (user_pass, rest) = parts.split_once('@')?;
+    let (user, password) = user_pass.split_once(':')?;
+    let (host_port, database) = rest.split_once('/')?;
+    let database = database.split('?').next()?;
+    let (host, port) = host_port.split_once(':')?;
+    Some(ConnectionConfig {
+        id: "restore-test".into(),
+        name: "restore-test".into(),
+        db_type: DbType::Postgres,
+        host: host.into(),
+        port: port.parse().ok()?,
+        user: user.into(),
+        password: password.into(),
+        database: database.into(),
+        color: "#000".into(),
+        ssl: false,
+        trust_server_cert: true,
+        group: None,
+        ssh_enabled: false,
+        ssh_host: String::new(),
+        ssh_port: 22,
+        ssh_user: String::new(),
+        ssh_password: String::new(),
+        ssh_key_path: String::new(),
+        ssh_auth_method: SshAuthMethod::default(),
+        ssh_prompt_passphrase: false,
+    })
+}
+
+#[tokio::test]
+async fn pg_psql_restore_stops_at_first_error_and_reports_it() {
+    use tablio_lib::commands::backup::restore_postgres;
+    use tablio_lib::db::postgres::PostgresDriver;
+
+    let Some(config) = pg_restore_config() else {
+        eprintln!("Skipping: TEST_POSTGRES_URL not set");
+        return;
+    };
+    if which::which("psql").is_err() {
+        eprintln!("Skipping: psql not on PATH");
+        return;
+    }
+    let before = unique_table("psql_ok");
+    let after = unique_table("psql_after");
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("restore.sql");
+    std::fs::write(
+        &file,
+        format!(
+            "CREATE TABLE {before} (id int);\n\
+             INSERT INTO {before} VALUES (1);\n\
+             INSERT INTO no_such_table_{before} VALUES (1);\n\
+             CREATE TABLE {after} (id int);\n"
+        ),
+    )
+    .unwrap();
+
+    let req = RestoreRequest {
+        connection_id: config.id.clone(),
+        database: config.database.clone(),
+        input_path: file.to_string_lossy().into_owned(),
+        format: "plain".into(),
+    };
+    let err = restore_postgres(&config, &req)
+        .await
+        .expect_err("a failing statement must fail the restore");
+    assert!(
+        err.starts_with("Restore stopped at line 3 of the SQL file: ERROR:"),
+        "{err}"
+    );
+    assert!(err.contains(&format!("no_such_table_{before}")), "{err}");
+
+    let driver = PostgresDriver::connect(&config).await.unwrap();
+    let db = config.database.clone();
+    let tables: Vec<String> = driver
+        .list_tables(&db, "public")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert!(tables.contains(&before), "statements before the error ran");
+    assert!(
+        !tables.contains(&after),
+        "ON_ERROR_STOP: nothing after the error may run"
+    );
+    driver
+        .execute_query(&db, &format!("DROP TABLE {before}"))
+        .await
+        .unwrap();
+
+    // A clean file still succeeds.
+    std::fs::write(&file, format!("CREATE TABLE {after} (id int);\n")).unwrap();
+    assert_eq!(
+        restore_postgres(&config, &req).await.unwrap(),
+        "Restore completed"
+    );
+    driver
+        .execute_query(&db, &format!("DROP TABLE {after}"))
+        .await
+        .unwrap();
+}
