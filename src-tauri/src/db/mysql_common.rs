@@ -5,11 +5,15 @@ use std::time::Instant;
 use crate::db::cancel::{
     cancelled_error, run_interruptible, unless_cancelled, CancellationToken, Interruptible,
 };
+use crate::db::console::{console_result, ResultSet, SESSION_RESET_NOTICE};
 use crate::models::*;
 use crate::util::sql::{
-    ensure_row_matched, is_numeric_type_name, numeric_literal, script_transaction_state,
-    split_sql_statements_for, statement_is_select_like, ScriptTxn, SqlDialect,
+    ensure_row_matched, is_numeric_type_name, numeric_literal, script_changes_session,
+    script_transaction_state, split_sql_statements_for, statement_is_select_like, ScriptTxn,
+    SqlDialect,
 };
+use futures_util::TryStreamExt;
+use sqlx::{Executor, SqlSafeStr, Statement};
 
 /// Returns true when the server supports `ALTER TABLE ... RENAME COLUMN ... TO ...`.
 ///
@@ -770,25 +774,20 @@ pub async fn my_execute_query_cancellable(
     // (sqlx does not roll back a user-issued BEGIN / START TRANSACTION)
     // or with session state that changes how later queries behave.
     let txn = script_transaction_state(&statements);
+    let autocommit_pending = autocommit_left_pending(&statements);
     let left_open = outcome.is_ok() && txn == ScriptTxn::LeftOpen;
-    if txn != ScriptTxn::Untouched
-        && (outcome.is_err() || left_open || cancelled)
+    let uncommitted = outcome.is_ok() && autocommit_pending;
+    if (txn != ScriptTxn::Untouched || autocommit_pending)
+        && (outcome.is_err() || left_open || uncommitted || cancelled)
         && sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.is_err()
     {
         conn.close_on_drop();
     }
-    let dirty_session = statements.iter().any(|s| {
-        statement_is_select_like(
-            s,
-            &[
-                "SET AUTOCOMMIT",
-                "SET @@AUTOCOMMIT",
-                "SET SESSION AUTOCOMMIT",
-                "LOCK TABLE",
-                "XA ",
-            ],
-        )
-    });
+    // `SET` of any session variable (`sql_mode`, `autocommit`, time
+    // zone, `@user` variables), temporary tables, `LOCK TABLES`, `XA`:
+    // retire the connection so the change can't leak into the next
+    // query that borrows it from the pool.
+    let dirty_session = script_changes_session(&statements);
     if dirty_session {
         conn.close_on_drop();
     }
@@ -822,6 +821,18 @@ pub async fn my_execute_query_cancellable(
              Include COMMIT (or ROLLBACK) in the same run."
         );
     }
+    if uncommitted {
+        anyhow::bail!(
+            "The script turned autocommit off and left its changes uncommitted; they were \
+             rolled back. Include COMMIT in the same run."
+        );
+    }
+    let mut outcome = outcome;
+    if dirty_session {
+        if let Ok(r) = outcome.as_mut() {
+            r.notices.push(SESSION_RESET_NOTICE.to_string());
+        }
+    }
     outcome
 }
 
@@ -849,49 +860,115 @@ async fn my_run_statements(
     }
 
     let last = last.as_str();
-    let last_is_select = statement_is_select_like(
-        last,
-        &[
-            "SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "WITH", "TABLE", "VALUES",
-        ],
-    );
+    let select_like = statement_is_select_like(last, MY_SELECT_KEYWORDS);
 
-    if last_is_select {
-        // Text protocol: exact DECIMALs and server text for values the
-        // typed decoders cannot represent.
-        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(last))
-            .fetch_all(&mut **conn)
-            .await?;
-        let elapsed = start.elapsed().as_millis() as u64;
-        let columns: Vec<String> = rows
-            .first()
-            .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
-            .unwrap_or_default();
-        let col_count = columns.len();
-        let data_rows: Vec<Vec<serde_json::Value>> = rows
-            .iter()
-            .map(|r| mysql_row_to_json_values(r, col_count))
-            .collect();
-        Ok(QueryResult {
-            columns,
-            rows: data_rows,
-            rows_affected: 0,
-            execution_time_ms: elapsed,
-            is_select: true,
-        })
-    } else {
-        let result = sqlx::raw_sql(sqlx::AssertSqlSafe(last))
-            .execute(&mut **conn)
-            .await?;
-        let elapsed = start.elapsed().as_millis() as u64;
-        Ok(QueryResult {
-            columns: vec![],
-            rows: vec![],
-            rows_affected: result.rows_affected(),
-            execution_time_ms: elapsed,
-            is_select: false,
-        })
+    // Read every result the statement sends, so `CALL p()` (one result
+    // set per SELECT in the procedure) shows its rows. Text protocol:
+    // exact DECIMALs and server text for values the typed decoders
+    // cannot represent.
+    let mut sets: Vec<ResultSet> = Vec::new();
+    let mut in_set = false;
+    let mut affected: u64 = 0;
+    {
+        let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(last)).fetch_many(&mut **conn);
+        while let Some(item) = stream.try_next().await? {
+            match item {
+                sqlx::Either::Left(done) => {
+                    affected = affected.saturating_add(done.rows_affected());
+                    in_set = false;
+                }
+                sqlx::Either::Right(row) => {
+                    if !in_set {
+                        sets.push(ResultSet {
+                            columns: row.columns().iter().map(|c| c.name().to_string()).collect(),
+                            rows: Vec::new(),
+                        });
+                        in_set = true;
+                    }
+                    let set = sets.last_mut().expect("set was just opened");
+                    let values = mysql_row_to_json_values(&row, set.columns.len());
+                    set.rows.push(values);
+                }
+            }
+        }
     }
+
+    // A zero-row query still has a header: ask the server to describe
+    // the statement for its column names.
+    let mut fallback_columns = Vec::new();
+    if sets.is_empty() && select_like {
+        if let Ok(stmt) = (&mut **conn)
+            .prepare(sqlx::AssertSqlSafe(last).into_sql_str())
+            .await
+        {
+            fallback_columns = stmt
+                .columns()
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect();
+        }
+    }
+    let elapsed = start.elapsed().as_millis() as u64;
+    let rows_affected = if select_like { 0 } else { affected };
+    Ok(console_result(
+        sets,
+        select_like,
+        fallback_columns,
+        rows_affected,
+        elapsed,
+    ))
+}
+
+/// Leading keywords of statements the console shows as a row set even
+/// when they return no rows.
+const MY_SELECT_KEYWORDS: &[&str] = &[
+    "SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "WITH", "TABLE", "VALUES",
+];
+
+/// Whether the script turned `autocommit` off and then left writes
+/// uncommitted. Those would be rolled back silently when the connection
+/// is retired, so the run reports it like a transaction left open.
+fn autocommit_left_pending(statements: &[String]) -> bool {
+    let mut off = false;
+    let mut pending = false;
+    for stmt in statements {
+        let masked = crate::util::sql::mask_quoted_contents(stmt, SqlDialect::MySql)
+            .unwrap_or_else(|| stmt.clone())
+            .to_ascii_uppercase();
+        let compact: String = masked.chars().filter(|c| !c.is_whitespace()).collect();
+        let first = crate::util::sql::leading_words(stmt, 2);
+        let first_word = first.split(' ').next().unwrap_or("");
+        if first_word == "SET" {
+            if let Some(idx) = compact.find("AUTOCOMMIT=") {
+                let value: String = compact[idx + "AUTOCOMMIT=".len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                match value.as_str() {
+                    "0" | "OFF" | "FALSE" => off = true,
+                    // Turning autocommit back on commits.
+                    "1" | "ON" | "TRUE" => {
+                        off = false;
+                        pending = false;
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        if !off {
+            continue;
+        }
+        match first_word {
+            "COMMIT" => pending = false,
+            "ROLLBACK" if !first.starts_with("ROLLBACK TO") => pending = false,
+            // DDL commits implicitly.
+            "CREATE" | "ALTER" | "DROP" | "TRUNCATE" | "RENAME" => pending = false,
+            "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "CALL" | "LOAD" => pending = true,
+            _ => {}
+        }
+    }
+    off && pending
 }
 
 pub async fn my_get_ddl(

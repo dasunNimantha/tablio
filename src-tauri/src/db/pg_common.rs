@@ -5,11 +5,14 @@ use std::time::Instant;
 use crate::db::cancel::{
     cancelled_error, run_interruptible, unless_cancelled, CancellationToken, Interruptible,
 };
+use crate::db::console::{console_result, ResultSet, SESSION_RESET_NOTICE};
 use crate::models::*;
 use crate::util::sql::{
-    ensure_row_matched, script_transaction_state, split_sql_statements_for,
+    ensure_row_matched, script_changes_session, script_transaction_state, split_sql_statements_for,
     statement_is_select_like, ScriptTxn, SqlDialect,
 };
+use futures_util::TryStreamExt;
+use sqlx::{Executor, SqlSafeStr, Statement};
 
 /// Convert a Postgres row into JSON cells.
 ///
@@ -915,6 +918,28 @@ pub async fn pg_list_triggers(
         .collect())
 }
 
+/// `ORDER BY` expression for sorting the grid by `column`. `json` and
+/// `xml` have no ordering but sort fine by their text; the geometric
+/// types have none at all and get a clear error instead of the server's
+/// "could not identify an ordering operator".
+fn pg_sort_expr(column: &str, data_type: &str) -> Result<String> {
+    let base = data_type
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let col = quote_ident(column);
+    Ok(match base.as_str() {
+        "json" | "xml" => format!("{col}::text"),
+        "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle" => anyhow::bail!(
+            "Column '{column}' ({base}) can't be sorted: PostgreSQL has no ordering for \
+             geometric values."
+        ),
+        _ => col,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn pg_fetch_rows_impl(
     pool: &PgPool,
@@ -950,9 +975,14 @@ pub async fn pg_fetch_rows_impl(
                     SortDirection::Asc => "ASC",
                     SortDirection::Desc => "DESC",
                 };
-                format!("{} {}", quote_ident(&s.column), dir)
+                let data_type = columns
+                    .iter()
+                    .find(|c| c.name == s.column)
+                    .map(|c| c.data_type.as_str())
+                    .unwrap_or("");
+                Ok(format!("{} {}", pg_sort_expr(&s.column, data_type)?, dir))
             })
-            .collect();
+            .collect::<Result<_>>()?;
         format!("ORDER BY {}", parts.join(", "))
     } else {
         // No explicit sort — order by the PK columns so pagination
@@ -1097,6 +1127,9 @@ pub async fn pg_execute_query_cancellable(
     if statements.is_empty() {
         return Err(anyhow::anyhow!("Query is empty"));
     }
+    if let Some(e) = copy_stdio_error(&statements) {
+        return Err(e);
+    }
 
     let mut conn = unless_cancelled(pool.acquire(), &token).await?;
     // Only a cancellable run needs the session key (one extra round
@@ -1149,6 +1182,18 @@ pub async fn pg_execute_query_cancellable(
              Include COMMIT (or ROLLBACK) in the same run."
         );
     }
+    // Session settings (`SET statement_timeout`, `search_path`, roles,
+    // temp tables, ...) must not leak to the next borrower of the
+    // pooled connection. `DISCARD ALL` would also drop sqlx's cached
+    // prepared statements behind its back, so the connection is retired
+    // instead.
+    let mut outcome = outcome;
+    if script_changes_session(&statements) {
+        conn.close_on_drop();
+        if let Ok(r) = outcome.as_mut() {
+            r.notices.push(SESSION_RESET_NOTICE.to_string());
+        }
+    }
     outcome
 }
 
@@ -1178,51 +1223,98 @@ async fn pg_run_statements(
     }
 
     let last = last.as_str();
-    let last_is_select = statement_is_select_like(
-        last,
-        &["SELECT", "WITH", "SHOW", "EXPLAIN", "VALUES", "TABLE"],
-    );
+    let select_like = statement_is_select_like(last, PG_SELECT_KEYWORDS);
 
-    if last_is_select {
-        // Simple query protocol: every value arrives in text format, so
-        // types without a dedicated decoder still render exactly.
-        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(last))
-            .fetch_all(&mut **conn)
-            .await?;
-        let elapsed = start.elapsed().as_millis() as u64;
-
-        let columns: Vec<String> = rows
-            .first()
-            .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
-            .unwrap_or_default();
-
-        let col_count = columns.len();
-        let data_rows: Vec<Vec<serde_json::Value>> = rows
-            .iter()
-            .map(|r| pg_row_to_json_values(r, col_count))
-            .collect();
-
-        Ok(QueryResult {
-            columns,
-            rows: data_rows,
-            rows_affected: 0,
-            execution_time_ms: elapsed,
-            is_select: true,
-        })
-    } else {
-        let result = sqlx::query(sqlx::AssertSqlSafe(last))
-            .execute(&mut **conn)
-            .await?;
-        let elapsed = start.elapsed().as_millis() as u64;
-
-        Ok(QueryResult {
-            columns: vec![],
-            rows: vec![],
-            rows_affected: result.rows_affected(),
-            execution_time_ms: elapsed,
-            is_select: false,
-        })
+    // Read every result the statement sends: rows decide whether it is
+    // shown as a row set (so `INSERT ... RETURNING` shows its rows), not
+    // the leading keyword. Simple query protocol: every value arrives in
+    // text format, so types without a dedicated decoder still render
+    // exactly.
+    let mut sets: Vec<ResultSet> = Vec::new();
+    let mut in_set = false;
+    let mut affected: u64 = 0;
+    {
+        let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(last)).fetch_many(&mut **conn);
+        while let Some(item) = stream.try_next().await? {
+            match item {
+                sqlx::Either::Left(done) => {
+                    affected = affected.saturating_add(done.rows_affected());
+                    in_set = false;
+                }
+                sqlx::Either::Right(row) => {
+                    if !in_set {
+                        sets.push(ResultSet {
+                            columns: row.columns().iter().map(|c| c.name().to_string()).collect(),
+                            rows: Vec::new(),
+                        });
+                        in_set = true;
+                    }
+                    let set = sets.last_mut().expect("set was just opened");
+                    let values = pg_row_to_json_values(&row, set.columns.len());
+                    set.rows.push(values);
+                }
+            }
+        }
     }
+
+    // No row arrived, so nothing named the columns: ask the server to
+    // describe the statement (a zero-row SELECT still has a header).
+    let mut fallback_columns = Vec::new();
+    if sets.is_empty() && (select_like || has_word(last, "RETURNING")) {
+        if let Ok(stmt) = (&mut **conn)
+            .prepare(sqlx::AssertSqlSafe(last).into_sql_str())
+            .await
+        {
+            fallback_columns = stmt
+                .columns()
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect();
+        }
+    }
+    let select_like = select_like || !fallback_columns.is_empty();
+    let elapsed = start.elapsed().as_millis() as u64;
+    let rows_affected = if select_like { 0 } else { affected };
+    Ok(console_result(
+        sets,
+        select_like,
+        fallback_columns,
+        rows_affected,
+        elapsed,
+    ))
+}
+
+/// Leading keywords of statements the console shows as a row set even
+/// when they return no rows.
+const PG_SELECT_KEYWORDS: &[&str] = &["SELECT", "WITH", "SHOW", "EXPLAIN", "VALUES", "TABLE"];
+
+/// Whether `sql` contains `word` as a whole word outside quotes.
+fn has_word(sql: &str, word: &str) -> bool {
+    let masked = crate::util::sql::mask_quoted_contents(sql, SqlDialect::Postgres)
+        .unwrap_or_else(|| sql.to_string())
+        .to_ascii_uppercase();
+    masked
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|w| w == word)
+}
+
+/// `COPY ... FROM STDIN` / `TO STDOUT` need the client-side copy
+/// sub-protocol, which the console doesn't speak; without this check
+/// the user gets a cryptic protocol error. `COPY` to / from a server
+/// file still runs.
+fn copy_stdio_error(statements: &[String]) -> Option<anyhow::Error> {
+    statements.iter().find_map(|stmt| {
+        let first = crate::util::sql::leading_words(stmt, 1);
+        let is_meta = first.starts_with("\\COPY");
+        let stdio = first == "COPY" && (has_word(stmt, "STDIN") || has_word(stmt, "STDOUT"));
+        (is_meta || stdio).then(|| {
+            anyhow::anyhow!(
+                "COPY ... TO STDOUT / FROM STDIN (and psql's \\copy) aren't supported in the \
+                 Query Console. Use Export (table or result context menu) or Import instead, \
+                 or COPY to / from a file on the database server."
+            )
+        })
+    })
 }
 
 pub async fn pg_get_ddl(

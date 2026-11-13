@@ -1,6 +1,7 @@
 pub mod cancel;
 pub mod cassandra;
 pub mod cockroachdb;
+pub mod console;
 pub mod mariadb;
 pub mod mssql;
 pub mod mysql;

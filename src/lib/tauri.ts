@@ -144,11 +144,11 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
     case "export_table_data":
       return "id,email,username\n1,alice@example.com,alice\n2,bob@example.com,bob" as T;
     case "export_table_to_file":
-      return undefined as T;
+      return null as T;
     case "export_query_result":
       return "id,name,value\n1,Item 1,42.50\n2,Item 2,99.99" as T;
     case "export_query_result_to_file":
-      return undefined as T;
+      return null as T;
     case "alter_table":
       return undefined as T;
     case "list_functions":
@@ -340,11 +340,22 @@ export interface TableData {
 }
 
 export interface QueryResult {
+  /** Column names; present for a zero-row result too. */
   columns: string[];
   rows: unknown[][];
   rows_affected: number;
   execution_time_ms: number;
+  /**
+   * The statement produced a row set (any statement: SELECT, INSERT ...
+   * RETURNING / OUTPUT, CALL, EXEC). A script returning several result
+   * sets shows the last one, with a notice.
+   */
   is_select: boolean;
+  /**
+   * Informational messages about the run (several result sets, session
+   * settings that were discarded afterwards). Omitted when there are none.
+   */
+  notices?: string[];
 }
 
 export interface SortSpec {
@@ -966,13 +977,18 @@ export const api = {
   exportTableData: (request: ExportRequest): Promise<string> =>
     invoke("export_table_data", { request }),
 
-  exportTableToFile: (request: ExportRequest, filePath: string): Promise<void> =>
+  /**
+   * Resolves to a warning when the export had to alter data (XLSX cells
+   * cut to Excel's 32,767-character limit), otherwise `null`.
+   */
+  exportTableToFile: (request: ExportRequest, filePath: string): Promise<string | null> =>
     invoke("export_table_to_file", { request, filePath }),
 
   exportQueryResult: (request: ExportResultRequest): Promise<string> =>
     invoke("export_query_result", { request }),
 
-  exportQueryResultToFile: (request: ExportResultRequest, filePath: string): Promise<void> =>
+  /** Like `exportTableToFile`: resolves to a warning or `null`. */
+  exportQueryResultToFile: (request: ExportResultRequest, filePath: string): Promise<string | null> =>
     invoke("export_query_result_to_file", { request, filePath }),
 
   alterTable: (request: AlterTableRequest): Promise<void> =>

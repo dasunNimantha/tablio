@@ -52,6 +52,8 @@ sysinfo = "0.40"
 scylla = "1.5"
 tiberius = { version = "0.13.0", default-features = false, features = ["tokio", "rustls", "tds73"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
+# Stream helpers for reading every result set of a console query.
+futures-util = "0.3"
 urlencoding = "2.1.3"
 russh = "0.65"
 # Used to match hashed (`|1|salt|hash`) hostnames in known_hosts files;

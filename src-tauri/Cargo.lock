@@ -5558,6 +5558,7 @@ dependencies = [
  "chrono",
  "data-encoding",
  "dirs",
+ "futures-util",
  "hmac 0.13.0",
  "keyring",
  "log",

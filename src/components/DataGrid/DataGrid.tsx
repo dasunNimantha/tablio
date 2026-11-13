@@ -1036,7 +1036,7 @@ export function DataGrid({
       });
       if (!filePath) return;
 
-      await api.exportTableToFile({
+      const warning = await api.exportTableToFile({
         connection_id: connectionId,
         database,
         schema,
@@ -1045,6 +1045,7 @@ export function DataGrid({
         filter: activeFilter,
       }, filePath);
       addToast(`Exported ${table} as ${label}`);
+      if (warning) addToast(warning, "info");
     } catch (e) {
       addToast(String(e), "error");
     }
