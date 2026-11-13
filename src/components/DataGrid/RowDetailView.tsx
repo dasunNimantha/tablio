@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { X, ChevronDown, ChevronRight, Copy, Check, CheckCheck, Lock } from "lucide-react";
 import type { ColumnInfo } from "../../lib/tauri";
 import { isNumericLike, isNumericType, isTextLike, parseCellInput, valueCategory } from "../../lib/cellValues";
+import { cellEditText, restoreLineEndings, uniqueColumnKeys } from "../../lib/gridData";
 import "./RowDetailView.css";
 
 interface Props {
@@ -10,6 +11,17 @@ interface Props {
   rowIndex: number;
   onClose: () => void;
   onCellChange: (colIndex: number, newValue: unknown) => void;
+  /** View only: no inline editing (read-only results, tables without a
+   *  primary key, rows marked for deletion). */
+  readOnly?: boolean;
+}
+
+/** Length in characters as the database counts them (code points), so
+ *  an emoji counts once, not as two UTF-16 units. */
+export function codePointLength(s: string): number {
+  let n = 0;
+  for (const _ of s) n++;
+  return n;
 }
 
 function tryParseJson(value: unknown): { parsed: unknown; isJson: boolean } {
@@ -96,24 +108,26 @@ export function prepareEditValue(value: string, col: ColumnInfo): EditResult {
   const category = getTypeCategory(dataType);
   switch (category) {
     case "json":
-      // Validate, but send the text as typed: the backend writes it as
-      // JSON text, so big numbers, key order and JSON scalars survive.
-      try { JSON.parse(trimmed); return { ok: true, value: trimmed }; } catch { return { ok: false, error: "Invalid JSON syntax" }; }
+      // Validated here, but sent back as the JSON text the user typed:
+      // JSON/JSONB values travel as raw text in both directions.
+      try { JSON.parse(trimmed); } catch { return { ok: false, error: "Invalid JSON syntax" }; }
+      return { ok: true, value };
     case "uuid":
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed))
         return { ok: false, error: "Invalid UUID (expected xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)" };
       return { ok: true, value: trimmed };
     case "date":
-      if (isNaN(Date.parse(trimmed))) return { ok: false, error: "Invalid date format" };
-      return { ok: true, value: trimmed };
     case "timestamp":
-      if (isNaN(Date.parse(trimmed))) return { ok: false, error: "Invalid timestamp format" };
+      // Left to the database: Date.parse rejects valid values such as
+      // 'infinity', 'epoch', BC dates and years past 275760, and every
+      // engine has its own accepted formats.
       return { ok: true, value: trimmed };
     case "varchar":
     case "char": {
       const maxLen = parseMaxLength(dataType);
-      if (maxLen !== null && value.length > maxLen)
-        return { ok: false, error: `Max length is ${maxLen}, got ${value.length}` };
+      const len = codePointLength(value);
+      if (maxLen !== null && len > maxLen)
+        return { ok: false, error: `Max length is ${maxLen}, got ${len}` };
       return { ok: true, value };
     }
   }
@@ -247,9 +261,9 @@ export function RowDetailView({
   rowIndex,
   onClose,
   onCellChange,
+  readOnly = false,
 }: Props) {
   const [filterText, setFilterText] = useState("");
-  const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editingColIndex, setEditingColIndex] = useState(-1);
   const [editValue, setEditValue] = useState("");
   const [editError, setEditError] = useState<string | null>(null);
@@ -272,18 +286,17 @@ export function RowDetailView({
 
   useEffect(() => {
     setPendingEdits(new Map());
-    setEditingKey(null);
     setEditingColIndex(-1);
     setEditError(null);
-  }, [rowIndex]);
+  }, [rowIndex, readOnly]);
 
   useEffect(() => {
-    if (editingKey !== null && editRef.current) {
+    if (editingColIndex >= 0 && editRef.current) {
       editRef.current.focus();
       editRef.current.select();
       resizeTextarea();
     }
-  }, [editingKey, resizeTextarea]);
+  }, [editingColIndex, resizeTextarea]);
 
   useEffect(() => {
     return () => {
@@ -335,9 +348,12 @@ export function RowDetailView({
   }, [rowObj, filterText, pendingEdits]);
 
   const handleCopyAll = () => {
+    // Duplicate result column names (`SELECT a.id, b.id`) get suffixed
+    // keys instead of overwriting each other.
+    const keys = uniqueColumnKeys(columns.map((c) => c.name));
     const obj: Record<string, unknown> = {};
-    columns.forEach((col, i) => {
-      obj[col.name] = pendingEdits.has(i) ? pendingEdits.get(i) : row[i];
+    columns.forEach((_, i) => {
+      obj[keys[i]] = pendingEdits.has(i) ? pendingEdits.get(i) : row[i];
     });
     navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
     setCopied(true);
@@ -345,16 +361,13 @@ export function RowDetailView({
     copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
   };
 
-  const handleStartEdit = (colIndex: number, key: string, value: unknown, col: ColumnInfo) => {
-    if (col.is_primary_key) return;
+  const handleStartEdit = (colIndex: number, value: unknown, col: ColumnInfo) => {
+    if (readOnly || col.is_primary_key) return;
 
-    const str = value === null || value === undefined
-      ? ""
-      : typeof value === "object"
-        ? JSON.stringify(value, null, 2)
-        : String(value);
+    const str = value !== null && typeof value === "object"
+      ? JSON.stringify(value, null, 2)
+      : cellEditText(value) ?? "";
     editStartValueRef.current = str;
-    setEditingKey(key);
     setEditingColIndex(colIndex);
     setEditValue(str);
     setEditError(null);
@@ -362,7 +375,6 @@ export function RowDetailView({
   };
 
   const closeEditor = () => {
-    setEditingKey(null);
     setEditingColIndex(-1);
     setEditError(null);
   };
@@ -390,7 +402,7 @@ export function RowDetailView({
       return;
     }
 
-    const result = prepareEditValue(editValue, col);
+    const result = prepareEditValue(restoreLineEndings(row[editingColIndex], editValue), col);
     if (!result.ok) {
       setEditError(result.error);
       blurCommitRef.current = false;
@@ -399,7 +411,7 @@ export function RowDetailView({
 
     recordValue(editingColIndex, result.value);
     closeEditor();
-  }, [editValue, editingColIndex, columns, recordValue]);
+  }, [editValue, editingColIndex, columns, recordValue, row]);
 
   const handleSetNull = useCallback(() => {
     if (editingColIndex < 0) return;
@@ -411,7 +423,6 @@ export function RowDetailView({
 
   const handleCancel = () => {
     blurCommitRef.current = false;
-    setEditingKey(null);
     setEditingColIndex(-1);
     setEditError(null);
   };
@@ -435,7 +446,6 @@ export function RowDetailView({
   const handleDiscardAll = () => {
     blurCommitRef.current = false;
     setPendingEdits(new Map());
-    setEditingKey(null);
     setEditingColIndex(-1);
     setEditError(null);
   };
@@ -447,6 +457,11 @@ export function RowDetailView({
       <div className="row-detail-resize-handle" onMouseDown={handlePanelResizeStart} />
       <div className="row-detail-header">
         <h2>JSON VIEWER</h2>
+        {readOnly && (
+          <span className="row-detail-readonly" title="This row can't be edited here">
+            <Lock size={11} /> Read-only
+          </span>
+        )}
         <div className="row-detail-header-actions">
           {hasPendingEdits && (
             <button className="json-save-all-btn" onClick={handleSaveAll}>
@@ -482,7 +497,7 @@ export function RowDetailView({
           </div>
           {filtered.map(({ key, value, colIndex, col }, i) => {
             const isLast = i === filtered.length - 1;
-            const isEditing = editingKey === key;
+            const isEditing = editingColIndex === colIndex;
             const isPending = pendingEdits.has(colIndex);
             const displayValue = isPending ? pendingEdits.get(colIndex) : value;
             const isPk = col.is_primary_key;
@@ -495,7 +510,7 @@ export function RowDetailView({
 
               return (
                 <div
-                  key={key}
+                  key={colIndex}
                   className={`json-row ${isPending ? "json-row-modified" : ""}`}
                   style={{ paddingLeft: 18 }}
                 >
@@ -542,7 +557,7 @@ export function RowDetailView({
 
             return (
               <div
-                key={key}
+                key={colIndex}
                 className={`json-row ${isPending ? "json-row-modified" : ""} ${isPk ? "json-row-pk" : ""}`}
                 style={{ paddingLeft: 18 }}
               >
@@ -551,9 +566,9 @@ export function RowDetailView({
                 </span>
                 <span className="json-colon">: </span>
                 <span
-                  className={`json-value-inline ${isPk ? "json-value-readonly" : ""}`}
-                  onDoubleClick={() => handleStartEdit(colIndex, key, displayValue, col)}
-                  title={isPk ? "Primary key — not editable" : "Double-click to edit"}
+                  className={`json-value-inline ${isPk || readOnly ? "json-value-readonly" : ""}`}
+                  onDoubleClick={() => handleStartEdit(colIndex, displayValue, col)}
+                  title={readOnly ? "Read-only" : isPk ? "Primary key — not editable" : "Double-click to edit"}
                 >
                   {isPk && <Lock size={10} className="json-pk-icon" />}
                   {typeof displayValue === "string" && isNumericType(col.data_type) && isNumericLike(displayValue) ? (
