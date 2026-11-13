@@ -7,10 +7,11 @@ import { ConfirmDialog } from "../ConfirmDialog";
 import "./Tabs.css";
 
 export function TabBar() {
-  const { tabs, activeTabId, setActiveTab, closeTab, closeOtherTabs, closeAllTabs } =
+  const { tabs, activeTabId, dirtyTabs, setActiveTab, closeTab, closeOtherTabs, closeAllTabs } =
     useTabStore(useShallow((s) => ({
       tabs: s.tabs,
       activeTabId: s.activeTabId,
+      dirtyTabs: s.dirtyTabs,
       setActiveTab: s.setActiveTab,
       closeTab: s.closeTab,
       closeOtherTabs: s.closeOtherTabs,
@@ -35,10 +36,55 @@ export function TabBar() {
     setPendingClose({ titles: dirty.map((t) => t.title), action });
   };
   const tabsRef = useRef<HTMLDivElement>(null);
+  const requestCloseRef = useRef(requestClose);
+  requestCloseRef.current = requestClose;
+
+  // Ctrl/Cmd+W closes the active tab (asking first when it has unsaved
+  // work), the way the shortcuts panel says.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== "w") return;
+      if (e.repeat) return;
+      const id = useTabStore.getState().activeTabId;
+      if (!id) return;
+      e.preventDefault();
+      requestCloseRef.current([id], () => useTabStore.getState().closeTab(id));
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  const focusTab = (id: string) => {
+    const el = tabsRef.current?.querySelector(`[data-tab-id="${CSS.escape(id)}"]`) as HTMLElement | null;
+    el?.focus();
+  };
+
+  const handleTabKeyDown = (e: React.KeyboardEvent, idx: number) => {
+    if (e.target !== e.currentTarget) return;
+    let next = -1;
+    if (e.key === "ArrowRight") next = (idx + 1) % tabs.length;
+    else if (e.key === "ArrowLeft") next = (idx - 1 + tabs.length) % tabs.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = tabs.length - 1;
+    else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      setActiveTab(tabs[idx].id);
+      return;
+    } else if (e.key === "Delete") {
+      e.preventDefault();
+      const id = tabs[idx].id;
+      requestClose([id], () => closeTab(id));
+      return;
+    }
+    if (next < 0) return;
+    e.preventDefault();
+    setActiveTab(tabs[next].id);
+    requestAnimationFrame(() => focusTab(tabs[next].id));
+  };
 
   useEffect(() => {
     if (!activeTabId || !tabsRef.current) return;
-    const el = tabsRef.current.querySelector(`[data-tab-id="${activeTabId}"]`) as HTMLElement | null;
+    const el = tabsRef.current.querySelector(`[data-tab-id="${CSS.escape(activeTabId)}"]`) as HTMLElement | null;
     if (el) el.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
   }, [activeTabId, tabs.length]);
 
@@ -67,13 +113,34 @@ export function TabBar() {
 
   return (
     <>
-      <div className="tab-bar" ref={tabsRef}>
-        {tabs.map((tab, idx) => (
+      <div className="tab-bar" ref={tabsRef} role="tablist" aria-label="Open tabs">
+        {tabs.map((tab, idx) => {
+          const isActive = tab.id === activeTabId;
+          const isDirty = (dirtyTabs[tab.id]?.length ?? 0) > 0;
+          const tooltip = [
+            tab.title,
+            tab.type === "query" ? `Database: ${tab.database}` : null,
+            isDirty ? "Unsaved changes" : null,
+          ].filter(Boolean).join("\n");
+          return (
           <div
             key={tab.id}
             data-tab-id={tab.id}
-            className={`tab ${tab.id === activeTabId ? "active" : ""}`}
+            className={`tab ${isActive ? "active" : ""} ${isDirty ? "dirty" : ""}`}
+            role="tab"
+            aria-selected={isActive}
+            tabIndex={isActive ? 0 : -1}
+            title={tooltip}
             onClick={() => setActiveTab(tab.id)}
+            onKeyDown={(e) => handleTabKeyDown(e, idx)}
+            // Middle-click closes, like browser tabs. (mousedown is
+            // cancelled so it doesn't start autoscroll.)
+            onMouseDown={(e) => { if (e.button === 1) e.preventDefault(); }}
+            onAuxClick={(e) => {
+              if (e.button !== 1) return;
+              e.preventDefault();
+              requestClose([tab.id], () => closeTab(tab.id));
+            }}
             onContextMenu={(e) => handleContextMenu(e, tab.id)}
             draggable
             onDragStart={(e) => handleDragStart(e, idx)}
@@ -83,8 +150,9 @@ export function TabBar() {
             <span
               className="tab-color-dot"
               style={{ background: tab.connectionColor }}
+              aria-hidden="true"
             />
-            <span className="tab-icon">
+            <span className="tab-icon" aria-hidden="true">
               {tab.type === "table" ||
               tab.type === "structure" ||
               tab.type === "inspector" ||
@@ -112,15 +180,22 @@ export function TabBar() {
             </span>
             <button
               className="tab-close"
+              tabIndex={-1}
+              aria-label={`Close ${tab.title}${isDirty ? " (unsaved changes)" : ""}`}
+              title={isDirty ? "Unsaved changes — close" : "Close (Ctrl+W)"}
               onClick={(e) => {
                 e.stopPropagation();
                 requestClose([tab.id], () => closeTab(tab.id));
               }}
             >
-              <X size={12} />
+              {/* Unsaved work: a ring in the close slot (shown instead of
+                  the X until hover), distinct from the connection dot. */}
+              {isDirty && <span className="tab-dirty-marker" aria-hidden="true" />}
+              <X size={12} className="tab-close-x" />
             </button>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {contextMenu && (
