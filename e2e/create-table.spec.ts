@@ -98,6 +98,19 @@ test.describe("Create table dialog: keyboard and validation", () => {
     await expect(page.locator(".create-table-dialog .dialog-header").getByRole("button", { name: "Close" })).toBeVisible();
   });
 
+  test("column rows fit: the remove button and checkbox cells keep their size", async ({ page }) => {
+    // Regression: the text inputs' intrinsic width used to squeeze the
+    // remove button (and the Nullable/PK cells) out of view.
+    await page.setViewportSize({ width: 1024, height: 768 });
+    const btn = page.getByRole("button", { name: "Remove column id" });
+    const box = (await btn.boundingBox())!;
+    const columns = (await page.locator(".create-table-columns").boundingBox())!;
+    expect(box.width).toBeGreaterThanOrEqual(24);
+    expect(box.x + box.width).toBeLessThanOrEqual(columns.x + columns.width);
+    const pkCell = (await page.getByLabel("id primary key").locator("..").boundingBox())!;
+    expect(pkCell.width).toBeGreaterThanOrEqual(39);
+  });
+
   test("duplicate column names show a warning and block Create", async ({ page }) => {
     await page.getByLabel("Table Name").fill("dupes");
     await page.getByLabel("Column 2 name").fill("ID");

@@ -31,6 +31,29 @@
   border-bottom: 1px solid var(--border);
 }
 
+/* Text fields share the leftover width; the checkbox cells and the remove
+   button keep their size. Without min-width: 0 the inputs' intrinsic width
+   (font dependent) won, squeezing the remove button out of view. */
+.create-table-column-row > input,
+.create-table-column-row > select {
+  min-width: 0;
+}
+
+.create-table-column-row > div,
+.create-table-column-row > button,
+.create-table-columns-header > span[style*="width"] {
+  flex-shrink: 0;
+}
+
+.create-table-columns-header > span {
+  min-width: 0;
+}
+
+.create-table-column-row > button {
+  width: 32px;
+  justify-content: center;
+}
+
 .create-table-column-row:last-of-type {
   border-bottom: none;
 }
