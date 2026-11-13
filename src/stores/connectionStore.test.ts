@@ -8,6 +8,7 @@ import {
   requiresReconnect,
   resolveSshPassphrase,
   useConnectionStore,
+  wasCancelledByUser,
   withHostKeyMismatchRetry,
 } from "./connectionStore";
 import { useTabStore, type TabInfo } from "./tabStore";
@@ -160,11 +161,11 @@ describe("connectionStore.connectTo — SSH passphrase prompt", () => {
     expect(api.connect).toHaveBeenCalledTimes(1);
   });
 
-  it("does NOT raise the prompt for password auth even with the flag set", async () => {
+  it("does NOT raise the prompt for ssh-agent auth even with the flag set", async () => {
     const cfg = baseConfig({
       ssh_enabled: true,
       ssh_host: "bastion",
-      ssh_auth_method: "password",
+      ssh_auth_method: "agent",
       ssh_prompt_passphrase: true,
     });
     await useConnectionStore.getState().connectTo(cfg);
@@ -298,6 +299,7 @@ describe("connectionStore.connectTo — SSH host-key mismatch", () => {
     pending.resolve(false);
 
     await expect(promise).rejects.toBe(mismatchError);
+    expect(wasCancelledByUser(mismatchError)).toBe(true);
     expect(api.forgetKnownHost).not.toHaveBeenCalled();
     expect(connectMock).toHaveBeenCalledTimes(1);
     expect(useConnectionStore.getState().pendingHostKeyMismatch).toBeNull();
@@ -346,11 +348,31 @@ describe("resolveSshPassphrase", () => {
     expect(useConnectionStore.getState().pendingPassphrasePrompt).toBeNull();
   });
 
-  it("returns the original config unchanged for password auth", async () => {
+  it("asks for the SSH password when password auth opted into prompting", async () => {
     const cfg = baseConfig({
       ssh_enabled: true,
       ssh_host: "bastion",
+      ssh_user: "ops",
       ssh_auth_method: "password",
+      ssh_prompt_passphrase: true,
+    });
+    const promise = resolveSshPassphrase(cfg);
+    const pending = await waitForPending(
+      () => useConnectionStore.getState().pendingPassphrasePrompt,
+    );
+    expect(pending.kind).toBe("password");
+    expect(pending.sshTarget).toBe("ops@bastion");
+    pending.resolve("pw");
+    const out = await promise;
+    expect(out.ssh_password).toBe("pw");
+    expect(out.ssh_prompt_passphrase).toBe(false);
+  });
+
+  it("never prompts for ssh-agent auth", async () => {
+    const cfg = baseConfig({
+      ssh_enabled: true,
+      ssh_host: "bastion",
+      ssh_auth_method: "agent",
       ssh_prompt_passphrase: true,
     });
     const out = await resolveSshPassphrase(cfg);
@@ -533,12 +555,46 @@ describe("connectionStore.removeConnection", () => {
     expect(useConnectionStore.getState().connections).toEqual([]);
   });
 
-  it("keeps everything when deleting the saved config fails", async () => {
+  it("keeps everything and rejects when deleting the saved config fails", async () => {
     vi.mocked(api.deleteConnection).mockRejectedValue(new Error("io"));
     useConnectionStore.setState({ connections: [baseConfig()], activeConnections: new Set(["conn-1"]) });
-    await useConnectionStore.getState().removeConnection("conn-1");
+    await expect(useConnectionStore.getState().removeConnection("conn-1")).rejects.toThrow("io");
     expect(api.disconnect).not.toHaveBeenCalled();
     expect(useConnectionStore.getState().connections).toHaveLength(1);
     expect(useConnectionStore.getState().error).toContain("io");
+  });
+});
+
+describe("connectionStore save / disconnect failures propagate", () => {
+  beforeEach(() => resetStore());
+  afterEach(() => vi.restoreAllMocks());
+
+  it("addConnection rejects and does not add the connection when saving fails", async () => {
+    vi.spyOn(api, "saveConnection").mockRejectedValue(new Error("disk full"));
+    await expect(useConnectionStore.getState().addConnection(baseConfig())).rejects.toThrow("disk full");
+    expect(useConnectionStore.getState().connections).toEqual([]);
+  });
+
+  it("updateConnection rejects and keeps the old config when saving fails", async () => {
+    vi.spyOn(api, "saveConnection").mockRejectedValue(new Error("keychain locked"));
+    useConnectionStore.setState({ connections: [baseConfig()] });
+    await expect(
+      useConnectionStore.getState().updateConnection(baseConfig({ name: "Renamed" })),
+    ).rejects.toThrow("keychain locked");
+    expect(useConnectionStore.getState().connections[0].name).toBe("Test DB");
+  });
+
+  it("disconnectFrom rejects and keeps the connection active when it fails", async () => {
+    vi.spyOn(api, "disconnect").mockRejectedValue(new Error("busy"));
+    useConnectionStore.setState({ activeConnections: new Set(["conn-1"]) });
+    await expect(useConnectionStore.getState().disconnectFrom("conn-1")).rejects.toThrow("busy");
+    expect(useConnectionStore.getState().activeConnections.has("conn-1")).toBe(true);
+  });
+});
+
+describe("wasCancelledByUser", () => {
+  it("recognises a cancelled passphrase prompt", () => {
+    expect(wasCancelledByUser(new Error("Passphrase prompt cancelled"))).toBe(true);
+    expect(wasCancelledByUser(new Error("connection refused"))).toBe(false);
   });
 });

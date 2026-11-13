@@ -58,13 +58,17 @@
 .toast-message {
   flex: 1;
   word-break: break-word;
+  white-space: pre-wrap;
+  max-height: 200px;
+  overflow: auto;
+  user-select: text;
 }
 
 .toast-close {
   flex-shrink: 0;
   background: none;
   border: none;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   cursor: pointer;
   padding: 2px;
   border-radius: var(--radius-xs);
