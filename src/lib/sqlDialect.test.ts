@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { format as formatSQL } from "sql-formatter";
 import {
   backslashEscapesInStrings,
+  formatterLanguage,
   boolLiteral,
   stringLiteral,
   caseInsensitiveLike,
@@ -192,5 +194,25 @@ describe("stringLiteral", () => {
     expect(backslashEscapesInStrings("mysql")).toBe(true);
     expect(backslashEscapesInStrings("postgres")).toBe(false);
     expect(backslashEscapesInStrings("mssql")).toBe(false);
+  });
+});
+
+describe("formatterLanguage", () => {
+  it("maps each connection type to a sql-formatter language", () => {
+    expect(formatterLanguage("postgres")).toBe("postgresql");
+    expect(formatterLanguage("cockroachdb")).toBe("postgresql");
+    expect(formatterLanguage("mysql")).toBe("mysql");
+    expect(formatterLanguage("mariadb")).toBe("mariadb");
+    expect(formatterLanguage("tidb")).toBe("tidb");
+    expect(formatterLanguage("sqlite")).toBe("sqlite");
+    expect(formatterLanguage("mssql")).toBe("transactsql");
+    expect(formatterLanguage("cassandra")).toBe("sql");
+    expect(formatterLanguage(undefined)).toBe("sql");
+  });
+
+  it("produces languages sql-formatter accepts", () => {
+    for (const db of ["postgres", "mysql", "mariadb", "tidb", "sqlite", "mssql", "cassandra"] as const) {
+      expect(() => formatSQL("select a, b from t where x = 1", { language: formatterLanguage(db) })).not.toThrow();
+    }
   });
 });
