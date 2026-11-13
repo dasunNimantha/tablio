@@ -242,6 +242,16 @@
   line-height: 1.6;
 }
 
+.query-cancelled {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px var(--gutter-lg);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 15px;
+}
+
 .query-empty {
   display: flex;
   align-items: center;

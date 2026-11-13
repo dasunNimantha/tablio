@@ -1,10 +1,10 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import Editor, { OnMount, BeforeMount, type Monaco } from "@monaco-editor/react";
-import { api, QueryResult, ExplainResult, SavedQuery } from "../../lib/tauri";
+import { api, QueryResult, ExplainResult, SavedQuery, QUERY_CANCELLED_MESSAGE } from "../../lib/tauri";
 import { syncMonacoTheme, isLightTheme } from "../../lib/monacoTheme";
 import { ResultTable, parseSimpleSelect, type SourceTable } from "./ResultTable";
 import { ExplainView } from "./ExplainView";
-import { Play, Search, Clock, Loader2, History, AlignLeft, Bookmark, BookmarkPlus, Copy, Pin, CheckCircle2, Sparkles } from "lucide-react";
+import { Play, Search, Clock, Loader2, History, AlignLeft, Bookmark, BookmarkPlus, Copy, Pin, CheckCircle2, Sparkles, Square, Ban } from "lucide-react";
 import { SavedQueries } from "../SavedQueries/SavedQueries";
 import { ChartView } from "../ChartView/ChartView";
 import { format as formatSQL } from "sql-formatter";
@@ -268,6 +268,13 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
   const [resultMode, setResultMode] = useState<ResultMode>("results");
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The last run was stopped by the user: shown as a neutral notice,
+  // not as an error.
+  const [cancelled, setCancelled] = useState(false);
+  // Backend request id of the running execute (Stop targets it); null
+  // while idle or while a non-cancellable request (Explain) runs.
+  const [runningExecId, setRunningExecId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const [sourceTable, setSourceTable] = useState<SourceTable | null>(null);
   const lastQueryRef = useRef("");
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -294,6 +301,10 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
   // Execute button) and lets only the newest request update the UI.
   const executingRef = useRef(false);
   const requestSeqRef = useRef(0);
+  const runningExecIdRef = useRef<string | null>(null);
+  const cancelRequestedRef = useRef(false);
+  const cancelRef = useRef<() => void>(() => {});
+  const executingContextKeyRef = useRef<{ set: (v: boolean) => void } | null>(null);
   const modelUriRef = useRef<string | null>(null);
   const connRef = useRef({ connectionId, database });
   const tablesRef = useRef<{ name: string; schema: string }[]>([]);
@@ -409,6 +420,17 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       label: "Execute Query",
       keybindings: [2048 | 3],
       run: () => { executeRef.current(); },
+    });
+    // Escape stops a running query. The context key limits the binding
+    // to while a query runs, and the suggest / find widgets keep their
+    // own Escape (9 = KeyCode.Escape).
+    executingContextKeyRef.current = editor.createContextKey<boolean>("tablioQueryRunning", false);
+    editor.addAction({
+      id: "cancel-query",
+      label: "Stop Running Query",
+      keybindings: [9],
+      precondition: "tablioQueryRunning && !suggestWidgetVisible && !findWidgetVisible",
+      run: () => { cancelRef.current(); },
     });
     // Ctrl/Cmd+S: update the loaded saved query in place, or open
     // the Save dialog for a brand-new query. The binding goes
@@ -560,6 +582,52 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     if (reqId !== requestSeqRef.current) return;
     executingRef.current = false;
     setExecuting(false);
+    runningExecIdRef.current = null;
+    setRunningExecId(null);
+    setCancelling(false);
+  }, []);
+
+  /** Make run `reqId` cancellable and return its backend request id. */
+  const startCancellable = useCallback((reqId: number): string => {
+    const id = `${tabId}:${reqId}:${Date.now()}`;
+    cancelRequestedRef.current = false;
+    runningExecIdRef.current = id;
+    setRunningExecId(id);
+    setCancelled(false);
+    return id;
+  }, [tabId]);
+
+  /**
+   * A failed run the user had asked to stop is reported as cancelled,
+   * whatever the server said (the backend already normalises it, but
+   * a statement can also fail on its own just as Stop is pressed).
+   */
+  const isCancellation = useCallback((e: unknown) =>
+    cancelRequestedRef.current || String(e) === QUERY_CANCELLED_MESSAGE, []);
+
+  const cancelExecution = useCallback(async () => {
+    const id = runningExecIdRef.current;
+    if (!id || cancelRequestedRef.current) return;
+    cancelRequestedRef.current = true;
+    setCancelling(true);
+    try {
+      // The execute promise settles (as cancelled) once the backend has
+      // stopped the query and cleaned up its connection.
+      await api.cancelExecution(id);
+    } catch (e) {
+      cancelRequestedRef.current = false;
+      setCancelling(false);
+      addToast(`Could not cancel the query: ${String(e)}`, "error");
+    }
+  }, [addToast]);
+
+  useEffect(() => { cancelRef.current = cancelExecution; }, [cancelExecution]);
+  useEffect(() => { executingContextKeyRef.current?.set(runningExecId !== null); }, [runningExecId]);
+  // Closing the tab mid-query stops the query instead of leaving it
+  // running on the server.
+  useEffect(() => () => {
+    const id = runningExecIdRef.current;
+    if (id) api.cancelExecution(id).catch(() => {});
   }, []);
 
   const executeCurrentStatement = useCallback(async () => {
@@ -571,8 +639,11 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     setError(null);
     setResultMode("results");
     lastQueryRef.current = queryToRun;
+    const requestId = startCancellable(reqId);
     try {
-      const res = await api.executeQuery({ connection_id: connectionId, database, sql: queryToRun });
+      const res = await api.executeQuery({
+        connection_id: connectionId, database, sql: queryToRun, request_id: requestId,
+      });
       if (!isCurrent()) return;
       setResult(res);
       setExplainResult(null);
@@ -603,6 +674,12 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       setPinnedQueries(new Set());
     } catch (e) {
       if (!isCurrent()) return;
+      if (isCancellation(e)) {
+        setCancelled(true);
+        setResult(null);
+        setSourceTable(null);
+        return;
+      }
       const errMsg = String(e);
       setError(errMsg);
       setResult(null);
@@ -619,7 +696,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     } finally {
       endRequest(reqId);
     }
-  }, [connectionId, database, getQueryText, beginRequest, endRequest]);
+  }, [connectionId, database, getQueryText, beginRequest, endRequest, startCancellable, isCancellation]);
 
   const handleReExecute = useCallback(async () => {
     const queryToRun = lastQueryRef.current;
@@ -627,15 +704,20 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     const reqId = beginRequest();
     if (reqId === null) return;
     setError(null);
+    const requestId = startCancellable(reqId);
     try {
-      const res = await api.executeQuery({ connection_id: connectionId, database, sql: queryToRun });
+      const res = await api.executeQuery({
+        connection_id: connectionId, database, sql: queryToRun, request_id: requestId,
+      });
       if (reqId === requestSeqRef.current) setResult(res);
     } catch (e) {
-      if (reqId === requestSeqRef.current) setError(String(e));
+      if (reqId !== requestSeqRef.current) return;
+      if (isCancellation(e)) setCancelled(true);
+      else setError(String(e));
     } finally {
       endRequest(reqId);
     }
-  }, [connectionId, database, beginRequest, endRequest]);
+  }, [connectionId, database, beginRequest, endRequest, startCancellable, isCancellation]);
 
   useEffect(() => { executeRef.current = executeCurrentStatement; }, [executeCurrentStatement]);
 
@@ -649,6 +731,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     const reqId = beginRequest();
     if (reqId === null) return;
     setError(null);
+    setCancelled(false);
     setResultMode("explain");
     try {
       const res = await api.explainQuery({ connection_id: connectionId, database, sql: queryToRun });
@@ -896,6 +979,18 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
             {executing && resultMode === "results" ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
             Execute
           </button>
+          {runningExecId && (
+            <button
+              className="btn-secondary query-stop-btn"
+              data-testid="stop-query-btn"
+              onClick={cancelExecution}
+              disabled={cancelling}
+              title="Stop the running query (Esc)"
+            >
+              {cancelling ? <Loader2 size={14} className="spin" /> : <Square size={14} />}
+              {cancelling ? "Stopping…" : "Stop"}
+            </button>
+          )}
           <button className="btn-secondary" onClick={explainCurrentStatement} disabled={executing}>
             {executing && resultMode === "explain" ? <Loader2 size={14} className="spin" /> : <Search size={14} />}
             Explain
@@ -988,6 +1083,11 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
         {error && (
           <div className="query-error"><span>{error}</span></div>
         )}
+        {cancelled && !executing && !error && (
+          <div className="query-cancelled" data-testid="query-cancelled" role="status">
+            <Ban size={14} /> <span>{QUERY_CANCELLED_MESSAGE}</span>
+          </div>
+        )}
 
         {resultMode === "explain" && explainResult && <ExplainView result={explainResult} />}
 
@@ -1026,7 +1126,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
           </>
         )}
 
-        {!result && !explainResult && !error && (
+        {!result && !explainResult && !error && !cancelled && (
           <div className="query-empty"><p>Execute a query to see results here</p></div>
         )}
       </div>
