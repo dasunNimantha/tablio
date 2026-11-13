@@ -122,11 +122,11 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
     case "export_table_data":
       return "id,email,username\n1,alice@example.com,alice\n2,bob@example.com,bob" as T;
     case "export_table_to_file":
-      return undefined as T;
+      return null as T;
     case "export_query_result":
       return "id,name,value\n1,Item 1,42.50\n2,Item 2,99.99" as T;
     case "export_query_result_to_file":
-      return undefined as T;
+      return null as T;
     case "alter_table":
       return undefined as T;
     case "list_functions":
@@ -955,13 +955,18 @@ export const api = {
   exportTableData: (request: ExportRequest): Promise<string> =>
     invoke("export_table_data", { request }),
 
-  exportTableToFile: (request: ExportRequest, filePath: string): Promise<void> =>
+  /**
+   * Resolves to a warning when the export had to alter data (XLSX cells
+   * cut to Excel's 32,767-character limit), otherwise `null`.
+   */
+  exportTableToFile: (request: ExportRequest, filePath: string): Promise<string | null> =>
     invoke("export_table_to_file", { request, filePath }),
 
   exportQueryResult: (request: ExportResultRequest): Promise<string> =>
     invoke("export_query_result", { request }),
 
-  exportQueryResultToFile: (request: ExportResultRequest, filePath: string): Promise<void> =>
+  /** Like `exportTableToFile`: resolves to a warning or `null`. */
+  exportQueryResultToFile: (request: ExportResultRequest, filePath: string): Promise<string | null> =>
     invoke("export_query_result_to_file", { request, filePath }),
 
   alterTable: (request: AlterTableRequest): Promise<void> =>

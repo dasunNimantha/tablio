@@ -399,7 +399,9 @@ mod tests {
 
     fn make_workbook(cols: &[&str], rows: Vec<Vec<Value>>) -> Vec<u8> {
         let columns: Vec<String> = cols.iter().map(|s| s.to_string()).collect();
-        to_xlsx(&columns, &rows, "Sheet1").expect("xlsx encode")
+        to_xlsx(&columns, &rows, "Sheet1")
+            .expect("xlsx encode")
+            .bytes
     }
 
     #[test]

@@ -118,11 +118,23 @@ fn column_names(data: &TableData) -> Vec<String> {
     data.columns.iter().map(|c| c.name.clone()).collect()
 }
 
-fn numeric_flags(data: &TableData) -> Vec<bool> {
+fn column_kinds(data: &TableData) -> Vec<export::SqlColumnKind> {
     data.columns
         .iter()
-        .map(|c| export::is_numeric_type(&c.data_type))
+        .map(|c| export::SqlColumnKind::for_type(&c.data_type))
         .collect()
+}
+
+/// `INSERT` statements for a table export, in the connection's dialect.
+fn table_sql_inserts(db_type: &DbType, request: &ExportRequest, data: &TableData) -> String {
+    export::to_sql_inserts_for(
+        export::SqlExportDialect::for_db(db_type),
+        Some(request.schema.as_str()),
+        &request.table,
+        &column_names(data),
+        &column_kinds(data),
+        &data.rows,
+    )
 }
 
 #[tauri::command]
@@ -156,24 +168,21 @@ pub async fn export_table_data(
     let content = match request.format.as_str() {
         "csv" => export::to_csv(&columns, &data.rows),
         "json" => export::to_json(&columns, &data.rows),
-        _ => export::to_sql_inserts_typed(
-            Some(request.schema.as_str()),
-            &request.table,
-            &columns,
-            &numeric_flags(&data),
-            &data.rows,
-        ),
+        _ => table_sql_inserts(&db_type, &request, &data),
     };
 
     Ok(content)
 }
 
+/// Writes the export to `file_path`. Resolves to a warning to show the
+/// user when the export had to alter data (XLSX cells cut to Excel's
+/// length limit), otherwise `null`.
 #[tauri::command]
 pub async fn export_table_to_file(
     pool: State<'_, Arc<PoolManager>>,
     request: ExportRequest,
     file_path: String,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let file_path = crate::util::path::expand_tilde(&file_path);
 
     if !matches!(request.format.as_str(), "csv" | "json" | "sql" | "xlsx") {
@@ -194,27 +203,22 @@ pub async fn export_table_to_file(
     let columns = column_names(&data);
 
     if request.format.as_str() == "xlsx" {
-        let bytes = export::to_xlsx(&columns, &data.rows, &request.table)
+        let xlsx = export::to_xlsx(&columns, &data.rows, &request.table)
             .map_err(|e| format!("xlsx encoding failed: {e}"))?;
-        std::fs::write(&file_path, bytes).map_err(|e| format!("Failed to write file: {}", e))?;
-        return Ok(());
+        std::fs::write(&file_path, &xlsx.bytes)
+            .map_err(|e| format!("Failed to write file: {}", e))?;
+        return Ok(xlsx.warning());
     }
 
     let content = match request.format.as_str() {
         "csv" => export::to_csv(&columns, &data.rows),
         "json" => export::to_json(&columns, &data.rows),
-        _ => export::to_sql_inserts_typed(
-            Some(request.schema.as_str()),
-            &request.table,
-            &columns,
-            &numeric_flags(&data),
-            &data.rows,
-        ),
+        _ => table_sql_inserts(&db_type, &request, &data),
     };
 
     std::fs::write(&file_path, content).map_err(|e| format!("Failed to write file: {}", e))?;
 
-    Ok(())
+    Ok(None)
 }
 
 #[tauri::command]
@@ -234,11 +238,12 @@ pub async fn export_query_result(request: ExportResultRequest) -> Result<String,
     Ok(content)
 }
 
+/// Like [`export_table_to_file`], for console results.
 #[tauri::command]
 pub async fn export_query_result_to_file(
     request: ExportResultRequest,
     file_path: String,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let file_path = crate::util::path::expand_tilde(&file_path);
 
     let table_name = request
@@ -246,10 +251,11 @@ pub async fn export_query_result_to_file(
         .unwrap_or_else(|| "query_result".to_string());
 
     if request.format.as_str() == "xlsx" {
-        let bytes = export::to_xlsx(&request.columns, &request.rows, &table_name)
+        let xlsx = export::to_xlsx(&request.columns, &request.rows, &table_name)
             .map_err(|e| format!("xlsx encoding failed: {e}"))?;
-        std::fs::write(&file_path, bytes).map_err(|e| format!("Failed to write file: {}", e))?;
-        return Ok(());
+        std::fs::write(&file_path, &xlsx.bytes)
+            .map_err(|e| format!("Failed to write file: {}", e))?;
+        return Ok(xlsx.warning());
     }
 
     let content = match request.format.as_str() {
@@ -261,5 +267,5 @@ pub async fn export_query_result_to_file(
 
     std::fs::write(&file_path, content).map_err(|e| format!("Failed to write file: {}", e))?;
 
-    Ok(())
+    Ok(None)
 }

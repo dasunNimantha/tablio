@@ -2,13 +2,24 @@ use anyhow::Result;
 use rust_xlsxwriter::{Format, Workbook};
 use serde_json::Value;
 
+/// Render rows as CSV (RFC 4180, `\n` line ends).
+///
+/// * `NULL` is an empty field and an empty string is `""`, so the two
+///   stay distinguishable (most importers read an unquoted empty field
+///   as NULL / missing).
+/// * Text that a spreadsheet would run as a formula (starting with `=`,
+///   `+`, `-`, `@`, tab or carriage return) is prefixed with `'`, the
+///   usual CSV-injection guard: opening an export in Excel / Sheets must
+///   not run `=HYPERLINK(...)` or `@SUM(...)` from the data. Plain
+///   numbers such as `-12.5` (drivers send exact decimals as strings)
+///   are left alone. Column names get the same treatment.
 pub fn to_csv(columns: &[String], rows: &[Vec<Value>]) -> String {
     let mut out = String::new();
 
     out.push_str(
         &columns
             .iter()
-            .map(|c| escape_csv(c))
+            .map(|c| csv_text_field(c))
             .collect::<Vec<_>>()
             .join(","),
     );
@@ -19,10 +30,10 @@ pub fn to_csv(columns: &[String], rows: &[Vec<Value>]) -> String {
             .iter()
             .map(|v| match v {
                 Value::Null => String::new(),
-                Value::String(s) => escape_csv(s),
+                Value::String(s) => csv_text_field(s),
                 Value::Bool(b) => b.to_string(),
                 Value::Number(n) => n.to_string(),
-                _ => escape_csv(&v.to_string()),
+                _ => csv_text_field(&v.to_string()),
             })
             .collect();
         out.push_str(&line.join(","));
@@ -31,19 +42,163 @@ pub fn to_csv(columns: &[String], rows: &[Vec<Value>]) -> String {
     out
 }
 
-pub fn to_json(columns: &[String], rows: &[Vec<Value>]) -> String {
-    let objects: Vec<serde_json::Map<String, Value>> = rows
-        .iter()
-        .map(|row| {
-            columns
-                .iter()
-                .zip(row.iter())
-                .map(|(col, val)| (col.clone(), val.clone()))
-                .collect()
-        })
-        .collect();
+/// A text value as a CSV field: formula-neutralised, quoted when needed,
+/// and `""` when empty.
+fn csv_text_field(s: &str) -> String {
+    if s.is_empty() {
+        return "\"\"".to_string();
+    }
+    escape_csv(&neutralize_formula(s))
+}
 
-    serde_json::to_string_pretty(&objects).unwrap_or_else(|_| "[]".to_string())
+/// Prefix `s` with `'` when a spreadsheet would evaluate it as a formula.
+fn neutralize_formula(s: &str) -> std::borrow::Cow<'_, str> {
+    let risky = s
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'));
+    if risky && !is_numeric_literal(s) {
+        std::borrow::Cow::Owned(format!("'{s}"))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
+/// Render rows as a JSON array of objects.
+///
+/// Keys follow the result's column order (not sorted), and a column
+/// name that repeats (`SELECT a.id, b.id ...`) gets a `_2`, `_3`, ...
+/// suffix instead of overwriting the earlier value.
+pub fn to_json(columns: &[String], rows: &[Vec<Value>]) -> String {
+    if rows.is_empty() {
+        return "[]".to_string();
+    }
+    let keys: Vec<String> = unique_keys(columns)
+        .iter()
+        .map(|k| serde_json::to_string(k).unwrap_or_else(|_| "\"\"".to_string()))
+        .collect();
+    let mut out = String::from("[\n");
+    for (ri, row) in rows.iter().enumerate() {
+        out.push_str("  {");
+        let mut first = true;
+        for (key, val) in keys.iter().zip(row.iter()) {
+            out.push_str(if first { "\n" } else { ",\n" });
+            first = false;
+            let rendered = serde_json::to_string_pretty(val)
+                .unwrap_or_else(|_| "null".to_string())
+                .replace('\n', "\n    ");
+            out.push_str("    ");
+            out.push_str(key);
+            out.push_str(": ");
+            out.push_str(&rendered);
+        }
+        out.push_str(if first { "}" } else { "\n  }" });
+        out.push_str(if ri + 1 < rows.len() { ",\n" } else { "\n" });
+    }
+    out.push(']');
+    out
+}
+
+/// Column names made unique: a repeat becomes `name_2`, `name_3`, ...
+/// (skipping suffixes that are themselves column names).
+fn unique_keys(columns: &[String]) -> Vec<String> {
+    let all: std::collections::HashSet<&str> = columns.iter().map(String::as_str).collect();
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    columns
+        .iter()
+        .map(|c| {
+            if used.insert(c.clone()) {
+                return c.clone();
+            }
+            let mut n = 2;
+            loop {
+                let candidate = format!("{c}_{n}");
+                if !all.contains(candidate.as_str()) && used.insert(candidate.clone()) {
+                    return candidate;
+                }
+                n += 1;
+            }
+        })
+        .collect()
+}
+
+/// SQL flavour an `INSERT` export is written for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SqlExportDialect {
+    /// `"ident"` quoting, standard string literals. Used when the target
+    /// engine is unknown (query results).
+    #[default]
+    Standard,
+    Postgres,
+    /// MySQL / MariaDB / TiDB: `` `ident` `` and backslash-escaped strings.
+    MySql,
+    Sqlite,
+    /// SQL Server: `[ident]`, `N'...'` strings.
+    Mssql,
+    Cassandra,
+}
+
+impl SqlExportDialect {
+    pub fn for_db(db_type: &crate::models::DbType) -> Self {
+        use crate::models::DbType;
+        match db_type {
+            DbType::Postgres | DbType::Cockroachdb => Self::Postgres,
+            DbType::Mysql | DbType::Mariadb | DbType::Tidb => Self::MySql,
+            DbType::Sqlite => Self::Sqlite,
+            DbType::Mssql => Self::Mssql,
+            DbType::Cassandra => Self::Cassandra,
+        }
+    }
+
+    fn ident(self, name: &str) -> String {
+        match self {
+            Self::MySql => format!("`{}`", name.replace('`', "``")),
+            Self::Mssql => format!("[{}]", name.replace(']', "]]")),
+            _ => format!("\"{}\"", name.replace('"', "\"\"")),
+        }
+    }
+
+    fn string(self, s: &str) -> String {
+        match self {
+            // Default sql_mode treats `\` as an escape character.
+            Self::MySql => format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''")),
+            Self::Mssql => format!("N'{}'", s.replace('\'', "''")),
+            _ => format!("'{}'", s.replace('\'', "''")),
+        }
+    }
+
+    /// Literal for binary data given as lowercase / uppercase hex digits.
+    fn binary(self, hex: &str) -> String {
+        match self {
+            Self::Postgres => format!("'\\x{hex}'::bytea"),
+            Self::Mssql | Self::Cassandra => format!("0x{hex}"),
+            Self::Standard | Self::MySql | Self::Sqlite => format!("X'{hex}'"),
+        }
+    }
+}
+
+/// How a column's values are written in an `INSERT` export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SqlColumnKind {
+    #[default]
+    Other,
+    /// Numeric strings (big integers, exact decimals) are written bare.
+    Numeric,
+    /// Values the drivers render as hex text (`0x..`, `X'..'`, `\x..`)
+    /// are written as the dialect's binary literal.
+    Binary,
+}
+
+impl SqlColumnKind {
+    pub fn for_type(data_type: &str) -> Self {
+        if is_binary_type(data_type) {
+            Self::Binary
+        } else if is_numeric_type(data_type) {
+            Self::Numeric
+        } else {
+            Self::Other
+        }
+    }
 }
 
 /// Render rows as `INSERT INTO ... VALUES (...);` statements.
@@ -51,24 +206,25 @@ pub fn to_json(columns: &[String], rows: &[Vec<Value>]) -> String {
 /// `schema` is optional: when provided the output emits a fully
 /// qualified `"schema"."table"` reference so the dump can be replayed
 /// in a database that doesn't have a matching `search_path` /
-/// `current_schema`. Previously this argument was missing entirely and
-/// every export silently dropped to `INSERT INTO "table"`, which round-
-/// tripped fine on single-schema databases (SQLite, MySQL when
-/// `database == schema`) but broke restores in PostgreSQL multi-schema
-/// setups.
+/// `current_schema`.
 ///
-/// The output uses standard `"…"` identifier quoting (PG / SQLite /
-/// MSSQL with `QUOTED_IDENTIFIER ON` / Cassandra all accept this).
-/// MySQL with default `sql_mode` would need backticks — the dialect
-/// mismatch is tracked separately; this fix at least makes
-/// schema-qualified targets correct on the dialects that already work.
+/// This is the dialect-neutral form (`"…"` identifiers, standard string
+/// literals) used for query results, whose target engine and column
+/// types are unknown; table exports use [`to_sql_inserts_for`].
 pub fn to_sql_inserts(
     schema: Option<&str>,
     table_name: &str,
     columns: &[String],
     rows: &[Vec<Value>],
 ) -> String {
-    to_sql_inserts_typed(schema, table_name, columns, &[], rows)
+    to_sql_inserts_for(
+        SqlExportDialect::Standard,
+        schema,
+        table_name,
+        columns,
+        &[],
+        rows,
+    )
 }
 
 /// True for column types whose values can be written as bare SQL numeric
@@ -87,43 +243,40 @@ pub fn is_numeric_type(data_type: &str) -> bool {
         || t == "dec"
 }
 
+/// True for binary column types (`bytea`, `blob`, `varbinary(16)`, ...).
+pub fn is_binary_type(data_type: &str) -> bool {
+    let lower = data_type.to_ascii_lowercase();
+    let base = lower.split('(').next().unwrap_or("").trim();
+    matches!(
+        base,
+        "bytea"
+            | "blob"
+            | "tinyblob"
+            | "mediumblob"
+            | "longblob"
+            | "binary"
+            | "varbinary"
+            | "image"
+    )
+}
+
+/// The hex digits of a binary value as the drivers render it (`0xdead`,
+/// `X'dead'`, `\xdead`), or `None` when `s` isn't in one of those forms.
+fn binary_hex(s: &str) -> Option<&str> {
+    let hex = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("\\x"))
+        .or_else(|| {
+            s.strip_prefix("X'")
+                .or_else(|| s.strip_prefix("x'"))
+                .and_then(|r| r.strip_suffix('\''))
+        })?;
+    (hex.len() % 2 == 0 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hex)
+}
+
 /// A plain decimal literal (`-12`, `3.50`, `1e10`), safe to emit unquoted.
 fn is_numeric_literal(s: &str) -> bool {
-    let b = s.as_bytes();
-    let mut i = 0;
-    if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
-        i += 1;
-    }
-    let int_start = i;
-    while i < b.len() && b[i].is_ascii_digit() {
-        i += 1;
-    }
-    let mut digits = i - int_start;
-    if i < b.len() && b[i] == b'.' {
-        i += 1;
-        let frac_start = i;
-        while i < b.len() && b[i].is_ascii_digit() {
-            i += 1;
-        }
-        digits += i - frac_start;
-    }
-    if digits == 0 {
-        return false;
-    }
-    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
-        i += 1;
-        if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
-            i += 1;
-        }
-        let exp_start = i;
-        while i < b.len() && b[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i == exp_start {
-            return false;
-        }
-    }
-    i == b.len()
+    crate::util::sql::numeric_literal(s).is_some_and(|t| t.len() == s.len())
 }
 
 /// Like [`to_sql_inserts`], with per-column `numeric` flags. Drivers send
@@ -137,37 +290,68 @@ pub fn to_sql_inserts_typed(
     numeric: &[bool],
     rows: &[Vec<Value>],
 ) -> String {
+    let kinds: Vec<SqlColumnKind> = numeric
+        .iter()
+        .map(|n| {
+            if *n {
+                SqlColumnKind::Numeric
+            } else {
+                SqlColumnKind::Other
+            }
+        })
+        .collect();
+    to_sql_inserts_for(
+        SqlExportDialect::Standard,
+        schema,
+        table_name,
+        columns,
+        &kinds,
+        rows,
+    )
+}
+
+/// `INSERT` statements in `dialect`, with per-column value handling
+/// (`kinds`; missing entries are [`SqlColumnKind::Other`]).
+pub fn to_sql_inserts_for(
+    dialect: SqlExportDialect,
+    schema: Option<&str>,
+    table_name: &str,
+    columns: &[String],
+    kinds: &[SqlColumnKind],
+    rows: &[Vec<Value>],
+) -> String {
     let mut out = String::new();
     let cols_str = columns
         .iter()
-        .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+        .map(|c| dialect.ident(c))
         .collect::<Vec<_>>()
         .join(", ");
 
     let qualified = match schema {
-        Some(s) if !s.is_empty() => format!(
-            "\"{}\".\"{}\"",
-            s.replace('"', "\"\""),
-            table_name.replace('"', "\"\"")
-        ),
-        _ => format!("\"{}\"", table_name.replace('"', "\"\"")),
+        Some(s) if !s.is_empty() => format!("{}.{}", dialect.ident(s), dialect.ident(table_name)),
+        _ => dialect.ident(table_name),
     };
 
     for row in rows {
         let vals: Vec<String> = row
             .iter()
             .enumerate()
-            .map(|(i, v)| match v {
-                Value::Null => "NULL".to_string(),
-                Value::Bool(b) => b.to_string(),
-                Value::Number(n) => n.to_string(),
-                Value::String(s)
-                    if numeric.get(i).copied().unwrap_or(false) && is_numeric_literal(s) =>
-                {
-                    s.clone()
+            .map(|(i, v)| {
+                let kind = kinds.get(i).copied().unwrap_or_default();
+                match v {
+                    Value::Null => "NULL".to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    Value::Number(n) => n.to_string(),
+                    Value::String(s) if kind == SqlColumnKind::Numeric && is_numeric_literal(s) => {
+                        s.clone()
+                    }
+                    Value::String(s) if kind == SqlColumnKind::Binary => match binary_hex(s) {
+                        Some(hex) => dialect.binary(hex),
+                        None => dialect.string(s),
+                    },
+                    Value::String(s) => dialect.string(s),
+                    _ => dialect.string(&v.to_string()),
                 }
-                Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                _ => format!("'{}'", v.to_string().replace('\'', "''")),
             })
             .collect();
 
@@ -217,18 +401,24 @@ pub fn sanitize_sheet_name(raw: &str) -> String {
 ///
 /// Calls `autofit()` once at the end so column widths track the longest
 /// rendered value without a per-cell pass.
-pub fn to_xlsx(columns: &[String], rows: &[Vec<Value>], sheet_name: &str) -> Result<Vec<u8>> {
+///
+/// Excel cells hold at most 32,767 characters. Longer text is cut to fit
+/// and ends with [`XLSX_TRUNCATION_MARKER`] instead of failing the whole
+/// export; how many cells were cut is returned in [`XlsxExport`].
+pub fn to_xlsx(columns: &[String], rows: &[Vec<Value>], sheet_name: &str) -> Result<XlsxExport> {
     let mut workbook = Workbook::new();
     let safe_name = sanitize_sheet_name(sheet_name);
     let datetime_fmt = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss");
     let datetime_utc_fmt = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss \"UTC\"");
     let header_fmt = Format::new().set_bold();
+    let mut truncated_cells = 0usize;
 
     let worksheet = workbook.add_worksheet();
     worksheet.set_name(&safe_name)?;
 
     for (col_idx, col) in columns.iter().enumerate() {
-        worksheet.write_string_with_format(0, col_idx as u16, col, &header_fmt)?;
+        let text = fit_xlsx_text(col, &mut truncated_cells);
+        worksheet.write_string_with_format(0, col_idx as u16, text.as_ref(), &header_fmt)?;
     }
 
     for (row_idx, row) in rows.iter().enumerate() {
@@ -241,13 +431,64 @@ pub fn to_xlsx(columns: &[String], rows: &[Vec<Value>], sheet_name: &str) -> Res
                 val,
                 &datetime_fmt,
                 &datetime_utc_fmt,
+                &mut truncated_cells,
             )?;
         }
     }
 
     worksheet.autofit();
     let bytes = workbook.save_to_buffer()?;
-    Ok(bytes)
+    Ok(XlsxExport {
+        bytes,
+        truncated_cells,
+    })
+}
+
+/// A rendered workbook.
+#[derive(Debug)]
+pub struct XlsxExport {
+    pub bytes: Vec<u8>,
+    /// Cells whose text exceeded Excel's limit and was cut.
+    pub truncated_cells: usize,
+}
+
+impl XlsxExport {
+    /// User-facing warning about truncated cells, if any.
+    pub fn warning(&self) -> Option<String> {
+        (self.truncated_cells > 0).then(|| {
+            format!(
+                "{} cell(s) held more than {} characters, Excel's limit, and were cut short \
+                 (marked \"{}\"). Export as CSV or JSON to keep the full text.",
+                self.truncated_cells,
+                XLSX_MAX_CELL_CHARS,
+                XLSX_TRUNCATION_MARKER.trim()
+            )
+        })
+    }
+}
+
+/// Excel's per-cell text limit, in UTF-16 code units.
+pub const XLSX_MAX_CELL_CHARS: usize = 32_767;
+/// Appended to text cut to fit [`XLSX_MAX_CELL_CHARS`].
+pub const XLSX_TRUNCATION_MARKER: &str = " [truncated]";
+
+/// `s`, cut to fit an Excel cell (with the marker) when it is too long.
+fn fit_xlsx_text<'a>(s: &'a str, truncated: &mut usize) -> std::borrow::Cow<'a, str> {
+    if s.encode_utf16().count() <= XLSX_MAX_CELL_CHARS {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    *truncated += 1;
+    let budget = XLSX_MAX_CELL_CHARS - XLSX_TRUNCATION_MARKER.encode_utf16().count();
+    let mut used = 0;
+    let mut end = 0;
+    for (idx, ch) in s.char_indices() {
+        if used + ch.len_utf16() > budget {
+            break;
+        }
+        used += ch.len_utf16();
+        end = idx + ch.len_utf8();
+    }
+    std::borrow::Cow::Owned(format!("{}{}", &s[..end], XLSX_TRUNCATION_MARKER))
 }
 
 /// Largest integer magnitude Excel (an IEEE double) represents exactly.
@@ -260,6 +501,7 @@ fn write_typed_cell(
     val: &Value,
     datetime_fmt: &Format,
     datetime_utc_fmt: &Format,
+    truncated: &mut usize,
 ) -> Result<()> {
     match val {
         Value::Null => {
@@ -299,13 +541,14 @@ fn write_typed_cell(
                 worksheet.write_datetime_with_format(row, col, dt, datetime_utc_fmt)?;
             }
             None => {
-                worksheet.write_string(row, col, s.as_str())?;
+                worksheet.write_string(row, col, fit_xlsx_text(s, truncated).as_ref())?;
             }
         },
         // No native Excel cell type for arrays / objects; fall back to
         // the JSON representation so the data isn't silently dropped.
         Value::Array(_) | Value::Object(_) => {
-            worksheet.write_string(row, col, val.to_string())?;
+            let text = val.to_string();
+            worksheet.write_string(row, col, fit_xlsx_text(&text, truncated).as_ref())?;
         }
     }
     Ok(())
@@ -728,7 +971,7 @@ mod tests {
             Value::String("2024-05-01T12:30:00".into()),
             Value::Null,
         ]];
-        let bytes = to_xlsx(&cols, &rows, "users").expect("to_xlsx");
+        let bytes = to_xlsx(&cols, &rows, "users").expect("to_xlsx").bytes;
 
         let cursor = std::io::Cursor::new(bytes);
         let mut wb = calamine::open_workbook_auto_from_rs(cursor).expect("open workbook");
@@ -784,7 +1027,8 @@ mod tests {
             &[vec![Value::Number(1i64.into())]],
             "schema:table",
         )
-        .expect("to_xlsx");
+        .expect("to_xlsx")
+        .bytes;
         let wb = calamine::open_workbook_auto_from_rs(std::io::Cursor::new(bytes))
             .expect("open workbook");
         // The forbidden `:` is stripped; the sheet name must be the
@@ -796,7 +1040,9 @@ mod tests {
     fn xlsx_empty_rows_emits_only_header() {
         use calamine::Reader;
 
-        let bytes = to_xlsx(&["id".to_string()], &[], "t").expect("to_xlsx");
+        let bytes = to_xlsx(&["id".to_string()], &[], "t")
+            .expect("to_xlsx")
+            .bytes;
         let mut wb = calamine::open_workbook_auto_from_rs(std::io::Cursor::new(bytes))
             .expect("open workbook");
         let range = wb.worksheet_range("t").expect("range");
@@ -816,7 +1062,7 @@ mod tests {
                 Value::String("v".into()),
             )])),
         ]];
-        let bytes = to_xlsx(&cols, &rows, "t").expect("to_xlsx");
+        let bytes = to_xlsx(&cols, &rows, "t").expect("to_xlsx").bytes;
         let mut wb = calamine::open_workbook_auto_from_rs(std::io::Cursor::new(bytes))
             .expect("open workbook");
         let range = wb.worksheet_range("t").expect("range");
@@ -867,7 +1113,7 @@ mod tests {
             Value::Number(9_007_199_254_740_992i64.into()),
             Value::String("12345678901234567890.123456789".into()),
         ]];
-        let bytes = to_xlsx(&cols, &rows, "t").unwrap();
+        let bytes = to_xlsx(&cols, &rows, "t").unwrap().bytes;
         let mut wb = calamine::open_workbook_auto_from_rs(std::io::Cursor::new(bytes)).unwrap();
         let range = wb.worksheet_range("t").unwrap();
         let row: Vec<&Data> = range.rows().nth(1).unwrap().iter().collect();
@@ -943,5 +1189,178 @@ mod tests {
         // Untyped variant keeps quoting every string.
         let out = to_sql_inserts(None, "t", &cols, &rows);
         assert!(out.contains("VALUES ('9007199254740993', '00123', 'not-a-number');"));
+    }
+
+    #[test]
+    fn csv_neutralizes_formulas() {
+        let cols = ["=cmd".to_string()];
+        let rows = vec![
+            vec![Value::String("=HYPERLINK(\"http://x\",\"y\")".into())],
+            vec![Value::String("@SUM(A1)".into())],
+            vec![Value::String("+1+2".into())],
+            vec![Value::String("-2+3".into())],
+            vec![Value::String("\tx".into())],
+            vec![Value::String("-12.5".into())],
+            vec![Value::String("a=b".into())],
+        ];
+        let out = to_csv(&cols, &rows);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "'=cmd");
+        assert_eq!(lines[1], "\"'=HYPERLINK(\"\"http://x\"\",\"\"y\"\")\"");
+        assert_eq!(lines[2], "'@SUM(A1)");
+        assert_eq!(lines[3], "'+1+2");
+        assert_eq!(lines[4], "'-2+3");
+        assert_eq!(lines[5], "'\tx");
+        // Plain numbers and text with `=` later on are untouched.
+        assert_eq!(lines[6], "-12.5");
+        assert_eq!(lines[7], "a=b");
+    }
+
+    #[test]
+    fn csv_distinguishes_null_from_empty_string() {
+        let cols = ["a".to_string(), "b".to_string()];
+        let rows = vec![vec![Value::Null, Value::String(String::new())]];
+        assert_eq!(to_csv(&cols, &rows), "a,b\n,\"\"\n");
+    }
+
+    #[test]
+    fn json_keeps_column_order_and_duplicates() {
+        let cols = [
+            "z".to_string(),
+            "id".to_string(),
+            "a".to_string(),
+            "id".to_string(),
+        ];
+        let rows = vec![vec![
+            Value::Number(1.into()),
+            Value::Number(2.into()),
+            serde_json::json!({"k": [1, 2]}),
+            Value::Number(3.into()),
+        ]];
+        let out = to_json(&cols, &rows);
+        let z = out.find("\"z\"").unwrap();
+        let id = out.find("\"id\"").unwrap();
+        let a = out.find("\"a\"").unwrap();
+        let id2 = out.find("\"id_2\"").unwrap();
+        assert!(z < id && id < a && a < id2, "{out}");
+        let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(parsed[0]["id"], serde_json::json!(2));
+        assert_eq!(parsed[0]["id_2"], serde_json::json!(3));
+        assert_eq!(parsed[0]["a"]["k"][1], serde_json::json!(2));
+        assert_eq!(to_json(&cols, &[]), "[]");
+    }
+
+    #[test]
+    fn json_duplicate_suffix_skips_existing_names() {
+        let cols = ["id".to_string(), "id_2".to_string(), "id".to_string()];
+        assert_eq!(unique_keys(&cols), vec!["id", "id_2", "id_3"]);
+    }
+
+    #[test]
+    fn xlsx_truncates_overlong_text_and_counts_it() {
+        use calamine::Reader;
+        let long = "é".repeat(40_000);
+        let cols = ["v".to_string()];
+        let rows = vec![
+            vec![Value::String(long.clone())],
+            vec![Value::String("short".into())],
+        ];
+        let out = to_xlsx(&cols, &rows, "t").expect("long text must not fail the export");
+        assert_eq!(out.truncated_cells, 1);
+        assert!(out.warning().unwrap().contains("1 cell"));
+        let mut wb = calamine::open_workbook_auto_from_rs(std::io::Cursor::new(out.bytes)).unwrap();
+        let range = wb.worksheet_range("t").unwrap();
+        let cell = range.get((1, 0)).unwrap().to_string();
+        assert!(cell.ends_with(XLSX_TRUNCATION_MARKER));
+        assert_eq!(cell.encode_utf16().count(), XLSX_MAX_CELL_CHARS);
+        assert!(to_xlsx(&cols, &rows[1..], "t").unwrap().warning().is_none());
+    }
+
+    #[test]
+    fn sql_export_uses_dialect_quoting_and_binary_literals() {
+        let cols = ["id".to_string(), "b".to_string(), "s".to_string()];
+        let kinds = [
+            SqlColumnKind::Numeric,
+            SqlColumnKind::Binary,
+            SqlColumnKind::Other,
+        ];
+        let row = |bin: &str| {
+            vec![vec![
+                Value::String("12345678901234567890".into()),
+                Value::String(bin.into()),
+                Value::String("it's \\ ok".into()),
+            ]]
+        };
+        let my = to_sql_inserts_for(
+            SqlExportDialect::MySql,
+            Some("db"),
+            "t",
+            &cols,
+            &kinds,
+            &row("0xdead"),
+        );
+        assert_eq!(
+            my,
+            "INSERT INTO `db`.`t` (`id`, `b`, `s`) VALUES (12345678901234567890, X'dead', 'it''s \\\\ ok');\n"
+        );
+        let pg = to_sql_inserts_for(
+            SqlExportDialect::Postgres,
+            Some("public"),
+            "t",
+            &cols,
+            &kinds,
+            &row("\\xdead"),
+        );
+        assert!(pg.contains("'\\xdead'::bytea"), "{pg}");
+        assert!(pg.contains("\"public\".\"t\""), "{pg}");
+        let lite = to_sql_inserts_for(
+            SqlExportDialect::Sqlite,
+            None,
+            "t",
+            &cols,
+            &kinds,
+            &row("X'dead'"),
+        );
+        assert!(lite.contains(", X'dead', "), "{lite}");
+        let ms = to_sql_inserts_for(
+            SqlExportDialect::Mssql,
+            Some("dbo"),
+            "t",
+            &cols,
+            &kinds,
+            &row("0xDEAD"),
+        );
+        assert!(
+            ms.starts_with("INSERT INTO [dbo].[t] ([id], [b], [s])"),
+            "{ms}"
+        );
+        assert!(ms.contains(", 0xDEAD, N'it''s \\ ok'"), "{ms}");
+        // A binary column value that isn't hex stays a quoted string.
+        let odd = to_sql_inserts_for(
+            SqlExportDialect::MySql,
+            None,
+            "t",
+            &cols,
+            &kinds,
+            &row("zz"),
+        );
+        assert!(odd.contains(", 'zz', "), "{odd}");
+    }
+
+    #[test]
+    fn binary_type_names() {
+        for t in [
+            "bytea",
+            "BLOB",
+            "longblob",
+            "varbinary(16)",
+            "binary(4)",
+            "image",
+        ] {
+            assert!(is_binary_type(t), "{t}");
+        }
+        for t in ["text", "varchar(10)", "bit", "int"] {
+            assert!(!is_binary_type(t), "{t}");
+        }
     }
 }

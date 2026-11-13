@@ -2647,7 +2647,9 @@ async fn pg_xlsx_round_trip_preserves_types() {
         ],
     ];
 
-    let bytes = to_xlsx(&cols, &original_rows, &tbl).expect("encode xlsx");
+    let bytes = to_xlsx(&cols, &original_rows, &tbl)
+        .expect("encode xlsx")
+        .bytes;
     let payload = parse_sheet_impl(&bytes, &tbl).expect("parse xlsx");
     let parsed = payload.rows;
     assert_eq!(parsed.len(), 2, "round-trip lost rows: {parsed:?}");

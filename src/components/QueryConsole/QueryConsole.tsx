@@ -763,11 +763,12 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
         filters: [{ name: label, extensions: [ext] }],
       });
       if (!filePath) return;
-      await api.exportQueryResultToFile({
+      const warning = await api.exportQueryResultToFile({
         columns: result.columns, rows: result.rows as unknown[][],
         format, table_name: null,
       }, filePath);
       addToast(`Exported query result as ${label}`);
+      if (warning) addToast(warning, "info");
     } catch (e) {
       addToast(String(e), "error");
     }
