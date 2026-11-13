@@ -560,7 +560,8 @@ jobs:
   cross-os-e2e:
     name: Cross-OS E2E (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The suite is ~470 tests; macOS runners take ~30 min for it.
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
