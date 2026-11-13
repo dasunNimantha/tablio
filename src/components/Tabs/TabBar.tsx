@@ -112,6 +112,7 @@ export function TabBar() {
             </span>
             <button
               className="tab-close"
+              aria-label={`Close ${tab.title}`}
               onClick={(e) => {
                 e.stopPropagation();
                 requestClose([tab.id], () => closeTab(tab.id));
