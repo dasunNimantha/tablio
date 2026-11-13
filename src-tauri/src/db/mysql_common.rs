@@ -147,6 +147,19 @@ fn hex_json(prefix: &str, bytes: &[u8]) -> serde_json::Value {
     serde_json::Value::String(format!("{}{}", prefix, hex_str))
 }
 
+/// Collation id of the `binary` character set.
+const MYSQL_BINARY_COLLATION: u16 = 63;
+
+/// Collation id the server reported for a result column. sqlx keeps it
+/// private, so it is read from the (derived, stable for the pinned sqlx
+/// version) `Debug` output; `None` if that ever stops working, in which
+/// case values are shown as text when they are valid UTF-8.
+fn mysql_collation_id(ti: &sqlx::mysql::MySqlTypeInfo) -> Option<u16> {
+    let dbg = format!("{:?}", ti);
+    let rest = &dbg[dbg.find("collation: Collation(")? + "collation: Collation(".len()..];
+    rest[..rest.find(')')?].trim().parse().ok()
+}
+
 fn mysql_cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Value {
     use crate::util::sql::{exact_numeric_text_to_json, i64_to_json, u64_to_json};
     use serde_json::Value;
@@ -165,17 +178,18 @@ fn mysql_cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Valu
     let text = || bytes().and_then(|b| String::from_utf8(b).ok());
 
     let decoded: Option<Value> = match type_name.as_str() {
-        "BOOLEAN" => row.try_get::<bool, _>(i).ok().map(Value::Bool),
-        "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "BIGINT" => {
-            row.try_get::<i64, _>(i).ok().map(i64_to_json)
+        // sqlx names every TINYINT(1) "BOOLEAN", but the column holds
+        // any TINYINT (`5` would show as `true` and be saved back as
+        // 1), so it is decoded as the integer it is.
+        "BOOLEAN" | "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "BIGINT" => {
+            row.try_get_unchecked::<i64, _>(i).ok().map(i64_to_json)
         }
         "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" | "INT UNSIGNED"
         | "BIGINT UNSIGNED" => row.try_get::<u64, _>(i).ok().map(u64_to_json),
         "FLOAT" | "DOUBLE" => row
             .try_get::<f64, _>(i)
             .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map(Value::Number),
+            .map(crate::util::values::f64_to_json),
         "DECIMAL" => text().map(|t| exact_numeric_text_to_json(&t)).or_else(|| {
             row.try_get::<rust_decimal::Decimal, _>(i)
                 .ok()
@@ -194,7 +208,10 @@ fn mysql_cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Valu
                 hex_json("0x", &b)
             }
         }),
-        "JSON" => row.try_get::<serde_json::Value, _>(i).ok(),
+        // The server's JSON text as a string: parsing it would round
+        // big numbers, reorder / dedupe keys and conflate JSON `null`
+        // with SQL NULL, and saving would write the altered document.
+        "JSON" => text().map(Value::String),
         "DATETIME" | "TIMESTAMP" => row
             .try_get::<chrono::NaiveDateTime, _>(i)
             .ok()
@@ -207,8 +224,16 @@ fn mysql_cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Valu
             .try_get::<chrono::NaiveTime, _>(i)
             .ok()
             .map(|t| Value::String(t.format("%H:%M:%S%.f").to_string())),
-        "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" | "GEOMETRY" => {
-            bytes().map(|b| hex_json("0x", &b))
+        "GEOMETRY" => bytes().map(|b| hex_json("0x", &b)),
+        // sqlx reports these names for any column with the BINARY flag,
+        // which includes `_bin`-collated text (and MariaDB's JSON, a
+        // utf8mb4_bin LONGTEXT). Only the `binary` character set means
+        // real bytes; anything else is text and falls through.
+        "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" => {
+            match mysql_collation_id(&raw.type_info()) {
+                Some(MYSQL_BINARY_COLLATION) => bytes().map(|b| hex_json("0x", &b)),
+                _ => None,
+            }
         }
         _ => None,
     };
@@ -1504,15 +1529,42 @@ async fn my_column_types(
 
 /// Like `json_to_sql_literal`, but a string value for a numeric column
 /// is emitted as a bare literal once validated as a plain number.
-pub fn typed_sql_literal(data_type: Option<&str>, val: &serde_json::Value) -> String {
+///
+/// A string for a binary column (`binary`, `varbinary`, `*blob`), shown
+/// as `0x00ff`, is written as the hex literal of those bytes; text that
+/// is not in that format is written as its UTF-8 bytes. A quoted
+/// `'0x00ff'` would store the six ASCII characters and never match a
+/// binary primary key.
+pub fn typed_sql_literal(data_type: Option<&str>, val: &serde_json::Value) -> Result<String> {
     if let (Some(t), serde_json::Value::String(s)) = (data_type, val) {
         if is_numeric_type_name(t) {
             if let Some(n) = numeric_literal(s) {
-                return n.to_string();
+                return Ok(n.to_string());
             }
         }
+        if is_mysql_binary_type(t) {
+            let hex =
+                crate::util::values::binary_value_hex(s, crate::util::values::HexDisplay::ZeroX)
+                    .map_err(|e| anyhow!(e))?;
+            // `0x` alone is not a valid literal; X'' is the empty string.
+            return Ok(if hex.is_empty() {
+                "X''".to_string()
+            } else {
+                format!("0x{}", hex)
+            });
+        }
     }
-    json_to_sql_literal(val)
+    Ok(json_to_sql_literal(val))
+}
+
+/// True for MySQL / MariaDB / TiDB `COLUMN_TYPE`s that hold bytes.
+pub fn is_mysql_binary_type(column_type: &str) -> bool {
+    let lower = column_type.trim().to_ascii_lowercase();
+    let base = lower.split('(').next().unwrap_or("").trim();
+    matches!(
+        base,
+        "binary" | "varbinary" | "tinyblob" | "blob" | "mediumblob" | "longblob"
+    )
 }
 
 pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result<()> {
@@ -1525,7 +1577,7 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
         my_column_types(pool, &changes.database, &changes.table)
             .await
             .unwrap_or_default();
-    let lit = |col: &str, val: &serde_json::Value| -> String {
+    let lit = |col: &str, val: &serde_json::Value| -> Result<String> {
         typed_sql_literal(col_types.get(col).map(String::as_str), val)
     };
     let mut tx = pool.begin().await?;
@@ -1542,13 +1594,13 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
         let set_clause = format!(
             "{} = {}",
             quote_ident(&update.column_name),
-            lit(&update.column_name, &update.new_value)
+            lit(&update.column_name, &update.new_value)?
         );
         let where_clause: Vec<String> = update
             .primary_key_values
             .iter()
-            .map(|(col, val)| format!("{} = {}", quote_ident(col), lit(col, val)))
-            .collect();
+            .map(|(col, val)| Ok(format!("{} = {}", quote_ident(col), lit(col, val)?)))
+            .collect::<Result<_>>()?;
         let sql = format!(
             "UPDATE {} SET {} WHERE {}",
             fq_table,
@@ -1566,7 +1618,11 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
 
     for insert in &changes.inserts {
         let cols: Vec<String> = insert.values.iter().map(|(c, _)| quote_ident(c)).collect();
-        let vals: Vec<String> = insert.values.iter().map(|(c, v)| lit(c, v)).collect();
+        let vals: Vec<String> = insert
+            .values
+            .iter()
+            .map(|(c, v)| lit(c, v))
+            .collect::<Result<_>>()?;
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
             fq_table,
@@ -1585,8 +1641,8 @@ pub async fn my_apply_changes(pool: &MySqlPool, changes: &DataChanges) -> Result
         let where_clause: Vec<String> = delete
             .primary_key_values
             .iter()
-            .map(|(col, val)| format!("{} = {}", quote_ident(col), lit(col, val)))
-            .collect();
+            .map(|(col, val)| Ok(format!("{} = {}", quote_ident(col), lit(col, val)?)))
+            .collect::<Result<_>>()?;
         let sql = format!(
             "DELETE FROM {} WHERE {}",
             fq_table,
@@ -2082,5 +2138,53 @@ mod column_definition_tests {
         );
         d.column_type = "int".into();
         assert_eq!(render_column_definition(&d, false), "int NULL");
+    }
+}
+
+#[cfg(test)]
+mod value_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn collation_id_is_read_from_type_info() {
+        // `__enum()` is the only public constructor; it uses
+        // utf8mb4_general_ci (45).
+        assert_eq!(
+            mysql_collation_id(&sqlx::mysql::MySqlTypeInfo::__enum()),
+            Some(45)
+        );
+    }
+
+    #[test]
+    fn binary_column_types() {
+        for t in [
+            "binary(16)",
+            "VARBINARY(10)",
+            "blob",
+            "tinyblob",
+            "mediumblob",
+            "longblob",
+        ] {
+            assert!(is_mysql_binary_type(t), "{t}");
+        }
+        for t in ["varchar(10)", "text", "bit(8)", "json", "longtext"] {
+            assert!(!is_mysql_binary_type(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn binary_values_are_hex_literals() {
+        let lit = |v| typed_sql_literal(Some("varbinary(10)"), &v).unwrap();
+        assert_eq!(lit(json!("0x00FF80")), "0x00ff80");
+        assert_eq!(lit(json!("0x")), "X''");
+        assert_eq!(lit(json!("hi")), "0x6869");
+        assert_eq!(lit(json!(null)), "NULL");
+        assert!(typed_sql_literal(Some("blob"), &json!("0x0ff")).is_err());
+        // Text columns keep quoting the display form.
+        assert_eq!(
+            typed_sql_literal(Some("varchar(10)"), &json!("0x00")).unwrap(),
+            "'0x00'"
+        );
     }
 }

@@ -42,6 +42,13 @@ describe("prepareEditValue", () => {
       .toEqual({ ok: true, value: "1234567890123456789.0123456789" });
   });
 
+  it("sends JSON as the validated text, not a re-serialised value", () => {
+    expect(prepareEditValue('{"big":123456789012345678901234567890}', col("j", "jsonb")))
+      .toEqual({ ok: true, value: '{"big":123456789012345678901234567890}' });
+    expect(prepareEditValue('"str"', col("j", "json"))).toEqual({ ok: true, value: '"str"' });
+    expect(prepareEditValue("{bad", col("j", "json")).ok).toBe(false);
+  });
+
   it("rejects malformed numbers instead of truncating them", () => {
     expect(prepareEditValue("12abc", col("n", "integer")).ok).toBe(false);
   });

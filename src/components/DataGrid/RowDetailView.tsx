@@ -96,7 +96,9 @@ export function prepareEditValue(value: string, col: ColumnInfo): EditResult {
   const category = getTypeCategory(dataType);
   switch (category) {
     case "json":
-      try { return { ok: true, value: JSON.parse(trimmed) }; } catch { return { ok: false, error: "Invalid JSON syntax" }; }
+      // Validate, but send the text as typed: the backend writes it as
+      // JSON text, so big numbers, key order and JSON scalars survive.
+      try { JSON.parse(trimmed); return { ok: true, value: trimmed }; } catch { return { ok: false, error: "Invalid JSON syntax" }; }
     case "uuid":
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed))
         return { ok: false, error: "Invalid UUID (expected xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)" };
