@@ -4080,3 +4080,45 @@ async fn pg_console_copy_stdout_has_a_clear_error() {
     // The connection is fine afterwards.
     driver.execute_query(DB, "SELECT 1").await.unwrap();
 }
+
+#[tokio::test]
+async fn pg_sorting_json_and_geometric_columns() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_jsort");
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {tbl} (id int PRIMARY KEY, j json, p point)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "INSERT INTO {tbl} VALUES (1, '{{\"b\":1}}', '(1,1)'), (2, '{{\"a\":1}}', '(0,0)')"
+            ),
+        )
+        .await
+        .unwrap();
+    let sort = |col: &str| {
+        vec![SortSpec {
+            column: col.into(),
+            direction: SortDirection::Asc,
+        }]
+    };
+    let data = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, sort("j"), None)
+        .await
+        .expect("json column sorts by its text");
+    assert_eq!(data.rows[0][0], serde_json::json!(2));
+    let err = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, sort("p"), None)
+        .await
+        .expect_err("point sort is refused");
+    assert!(err.to_string().contains("can't be sorted"), "{err}");
+    driver
+        .execute_query(DB, &format!("DROP TABLE {tbl}"))
+        .await
+        .unwrap();
+}

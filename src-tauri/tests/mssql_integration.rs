@@ -3145,6 +3145,54 @@ async fn mssql_console_shows_rows_of_any_statement() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn mssql_sorting_lob_columns_works_or_explains() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("ms_lobsort");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE TABLE [dbo].[{tbl}] (id INT PRIMARY KEY, t TEXT, nt NTEXT, g GEOGRAPHY)"
+            ),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            &db,
+            &format!("INSERT INTO [dbo].[{tbl}] (id, t, nt) VALUES (1, 'b', N'y'), (2, 'a', N'z')"),
+        )
+        .await
+        .unwrap();
+    let sort = |col: &str| {
+        vec![SortSpec {
+            column: col.into(),
+            direction: SortDirection::Asc,
+        }]
+    };
+    let data = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, sort("t"), None)
+        .await
+        .expect("text column sorts");
+    assert_eq!(as_i64(&data.rows[0][0]), Some(2));
+    let data = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, sort("nt"), None)
+        .await
+        .expect("ntext column sorts");
+    assert_eq!(as_i64(&data.rows[0][0]), Some(1));
+    let err = driver
+        .fetch_rows(&db, SCHEMA, &tbl, 0, 10, sort("g"), None)
+        .await
+        .expect_err("spatial sort is refused");
+    assert!(err.to_string().contains("can't be sorted"), "{err}");
+
+    driver
+        .drop_object(&db, SCHEMA, &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
 /// Takes over 30 s, so it is opt-in: `cargo test -- --ignored`.
 #[tokio::test]
 #[ignore]

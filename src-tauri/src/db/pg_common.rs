@@ -911,6 +911,28 @@ pub async fn pg_list_triggers(
         .collect())
 }
 
+/// `ORDER BY` expression for sorting the grid by `column`. `json` and
+/// `xml` have no ordering but sort fine by their text; the geometric
+/// types have none at all and get a clear error instead of the server's
+/// "could not identify an ordering operator".
+fn pg_sort_expr(column: &str, data_type: &str) -> Result<String> {
+    let base = data_type
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let col = quote_ident(column);
+    Ok(match base.as_str() {
+        "json" | "xml" => format!("{col}::text"),
+        "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle" => anyhow::bail!(
+            "Column '{column}' ({base}) can't be sorted: PostgreSQL has no ordering for \
+             geometric values."
+        ),
+        _ => col,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn pg_fetch_rows_impl(
     pool: &PgPool,
@@ -946,9 +968,14 @@ pub async fn pg_fetch_rows_impl(
                     SortDirection::Asc => "ASC",
                     SortDirection::Desc => "DESC",
                 };
-                format!("{} {}", quote_ident(&s.column), dir)
+                let data_type = columns
+                    .iter()
+                    .find(|c| c.name == s.column)
+                    .map(|c| c.data_type.as_str())
+                    .unwrap_or("");
+                Ok(format!("{} {}", pg_sort_expr(&s.column, data_type)?, dir))
             })
-            .collect();
+            .collect::<Result<_>>()?;
         format!("ORDER BY {}", parts.join(", "))
     } else {
         // No explicit sort — order by the PK columns so pagination

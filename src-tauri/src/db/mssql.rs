@@ -400,6 +400,30 @@ fn rows_to_grid(rows: Vec<Row>) -> (Vec<String>, Vec<Vec<serde_json::Value>>) {
     (columns, data)
 }
 
+/// `ORDER BY` expression for sorting the grid by `column`. The legacy
+/// LOB types and `xml` can't be compared, so they sort by their value
+/// cast to the matching `(max)` type; spatial types have no order at all
+/// and get a clear error instead of the server's.
+fn mssql_sort_expr(column: &str, data_type: &str) -> Result<String> {
+    let base = data_type
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let col = bracket(column);
+    Ok(match base.as_str() {
+        "text" => format!("CAST({col} AS varchar(max))"),
+        "ntext" | "xml" => format!("CAST({col} AS nvarchar(max))"),
+        "image" => format!("CAST({col} AS varbinary(max))"),
+        "geography" | "geometry" => anyhow::bail!(
+            "Column '{column}' ({base}) can't be sorted: SQL Server has no ordering for \
+             spatial values."
+        ),
+        _ => col,
+    })
+}
+
 /// `IF @@ROWCOUNT = 0 THROW ...` placed right after a keyed UPDATE /
 /// DELETE so an edit that matches no row fails the batch instead of
 /// silently succeeding.
@@ -1305,16 +1329,21 @@ impl DatabaseDriver for MssqlDriver {
         let order = if !sort.is_empty() {
             sort.iter()
                 .map(|s| {
-                    format!(
+                    let data_type = columns
+                        .iter()
+                        .find(|c| c.name == s.column)
+                        .map(|c| c.data_type.as_str())
+                        .unwrap_or("");
+                    Ok(format!(
                         "{} {}",
-                        bracket(&s.column),
+                        mssql_sort_expr(&s.column, data_type)?,
                         match s.direction {
                             SortDirection::Asc => "ASC",
                             SortDirection::Desc => "DESC",
                         }
-                    )
+                    ))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>>>()?
                 .join(", ")
         } else if pk_cols.is_empty() {
             // First column that can be sorted on; text / ntext / image /
