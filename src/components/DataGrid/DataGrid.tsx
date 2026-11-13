@@ -14,7 +14,18 @@ import {
   ExplainResult,
 } from "../../lib/tauri";
 import { readZoomFactor } from "../../lib/zoom";
-import { FilterBar } from "./FilterBar";
+import { FilterBar, defaultFilterConditions } from "./FilterBar";
+import { buildWhereClause, type FilterCondition } from "../../lib/filterBuilder";
+import {
+  LARGE_TEXT_EDITOR_PARAMS,
+  cellEditText,
+  colField,
+  colIndexFromId,
+  restoreLineEndings,
+  rowToObject,
+  shouldSuppressGridKey,
+  usesLargeTextEditor,
+} from "../../lib/gridData";
 import { RowDetailView } from "./RowDetailView";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { editorInputToValue } from "../../lib/cellValues";
@@ -47,11 +58,13 @@ import {
   ExternalLink,
   Shuffle,
   Trash2,
+  Lock,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { AllCommunityModule, themeQuartz, type ColDef, type CellClickedEvent, type CellContextMenuEvent, type CellKeyDownEvent, type GridApi, type GridReadyEvent, type IHeaderParams, type SelectionChangedEvent } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { pendingInsertToNewRow, type PendingInsert } from "./pendingInsert";
+import { nullCellSelector } from "./NullCell";
 import "./DataGrid.css";
 import "./ag-grid-theme.css";
 
@@ -192,18 +205,25 @@ function sameSort(a: SortSpec[], b: SortSpec[]): boolean {
     a.every((p, i) => p.column === b[i].column && p.direction === b[i].direction);
 }
 
-function applySortToGrid(api: GridApi | null, spec: SortSpec[]) {
+/** Grid columns are addressed by position (see `colField`), sorts by name. */
+function applySortToGrid(api: GridApi | null, spec: SortSpec[], columns: ColumnInfo[]) {
   api?.applyColumnState({
-    state: spec.map((s, i) => ({ colId: s.column, sort: s.direction, sortIndex: i })),
+    state: spec.flatMap((s, i) => {
+      const idx = columns.findIndex((c) => c.name === s.column);
+      return idx < 0 ? [] : [{ colId: colField(idx), sort: s.direction, sortIndex: i }];
+    }),
     defaultState: { sort: null },
   });
 }
 
+/** Row object handed to ag-grid; column values live under `colField(i)`. */
 interface RowObj {
   __rowIdx: number;
   __pkKey: string;
   __isInserted: boolean;
   __isDeleted: boolean;
+  /** Pending inserts: which columns the user has set. */
+  __touched?: boolean[];
   [key: string]: unknown;
 }
 
@@ -242,6 +262,8 @@ export function DataGrid({
   );
   const connections = useConnectionStore((s) => s.connections);
   const [data, setData] = useState<TableData | null>(null);
+  const dataRef = useRef<TableData | null>(null);
+  dataRef.current = data;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
@@ -253,6 +275,8 @@ export function DataGrid({
   const [saving, setSaving] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
+  const [filterConditions, setFilterConditions] = useState<FilterCondition[] | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [filterLoading, setFilterLoading] = useState(false);
 
   const [changes, setChanges] = useState<PendingChanges>({
@@ -275,7 +299,7 @@ export function DataGrid({
   const containerRef = useRef<HTMLDivElement>(null);
   const isConnected = useConnectionStore((s) => s.activeConnections.has(connectionId));
   const [detailRowIdx, setDetailRowIdx] = useState<number | null>(null);
-  const [rowContextMenu, setRowContextMenu] = useState<{ x: number; y: number; rowIdx: number; colName?: string } | null>(null);
+  const [rowContextMenu, setRowContextMenu] = useState<{ x: number; y: number; rowIdx: number; colIdx: number } | null>(null);
   const [selectedPkKeys, setSelectedPkKeys] = useState<Set<string>>(new Set());
   const [refreshInterval, setRefreshInterval] = useState(10);
   const [showRefreshMenu, setShowRefreshMenu] = useState(false);
@@ -313,6 +337,7 @@ export function DataGrid({
     changes.updates.size > 0 ||
     changes.inserts.length > 0 ||
     changes.deletedKeys.size > 0;
+  const changeCount = changes.updates.size + changes.inserts.length + changes.deletedKeys.size;
   const hasChangesLatestRef = useRef(hasChanges);
   hasChangesLatestRef.current = hasChanges;
   useReportTabDirty(tabId, "grid", hasChanges);
@@ -339,6 +364,10 @@ export function DataGrid({
         filter: activeFilter,
       });
       if (gen !== fetchGenRef.current) return;
+      // A background refresh that lands after the user started editing
+      // must not replace the rows the pending edits were made against
+      // (it would wipe the visible edit while Save/Discard still show).
+      if (opts?.silent && hasChangesLatestRef.current) return;
       const pkIndices = result.columns
         .map((c, i) => ({ col: c, idx: i }))
         .filter((x) => x.col.is_primary_key)
@@ -401,13 +430,6 @@ export function DataGrid({
     seenStructureVersionRef.current = structureVersion;
     if (!hasChangesLatestRef.current) fetchData({ silent: true });
   }, [structureVersion, fetchData]);
-
-  useEffect(() => {
-    if (error && data) {
-      const timer = setTimeout(() => setError(null), 5000);
-      return () => clearTimeout(timer);
-    }
-  }, [error, data]);
 
   useEffect(() => {
     if (!rowContextMenu) return;
@@ -478,7 +500,7 @@ export function DataGrid({
         setSelectedPkKeys(new Set());
         gridApiRef.current?.deselectAll();
       }
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedPkKeys.size > 0) {
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedPkKeys.size > 0 && !readOnlyRef.current) {
         const target = e.target as HTMLElement;
         if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) return;
         e.preventDefault();
@@ -502,17 +524,17 @@ export function DataGrid({
     if (!searchQuery || !data) return [];
     const q = searchQuery.toLowerCase();
     const matches: { rowIndex: number; colId: string }[] = [];
+    // Only visible columns: a match in a hidden column can't be shown.
     for (let r = 0; r < editingRows.length; r++) {
-      for (let c = 0; c < editingRows[r].length; c++) {
-        const val = editingRows[r][c];
-        const str = (val === null || val === undefined) ? "null" : typeof val === "object" ? JSON.stringify(val) : String(val);
-        if (str.toLowerCase().includes(q) && data.columns[c]) {
-          matches.push({ rowIndex: r, colId: data.columns[c].name });
+      for (const c of visibleIndices) {
+        const str = cellEditText(editingRows[r][c]) ?? "null";
+        if (str.toLowerCase().includes(q)) {
+          matches.push({ rowIndex: r, colId: colField(c) });
         }
       }
     }
     return matches;
-  }, [searchQuery, editingRows, data]);
+  }, [searchQuery, editingRows, data, visibleIndices]);
 
   const searchMatchCount = searchMatches.length;
 
@@ -562,12 +584,8 @@ export function DataGrid({
   const getPkValues = useCallback((rowIndex: number): [string, unknown][] => {
     if (!data || rowIndex < 0 || rowIndex >= data.rows.length) return [];
     const row = data.rows[rowIndex];
-    return data.columns
-      .filter((c) => c.is_primary_key)
-      .map((c) => {
-        const colIdx = data.columns.findIndex((col) => col.name === c.name);
-        return [c.name, colIdx >= 0 ? row[colIdx] : undefined] as [string, unknown];
-      });
+    return data.columns.flatMap((c, i) =>
+      c.is_primary_key ? [[c.name, row[i]] as [string, unknown]] : []);
   }, [data]);
 
   const getPkKey = useCallback((rowIndex: number): string => {
@@ -581,6 +599,9 @@ export function DataGrid({
     newValue: unknown
   ) => {
     if (!data) return;
+    // Mark dirty immediately so a refresh resolving before the next
+    // render can't overwrite this edit.
+    hasChangesLatestRef.current = true;
     if (rowIndex >= data.rows.length) {
       const insertIdx = rowIndex - data.rows.length;
       setChanges((prev) => {
@@ -629,9 +650,18 @@ export function DataGrid({
     });
   }, [data, getPkValues, getPkKey]);
 
-  const pkColumns = useMemo(() => {
-    return data?.columns.filter((c) => c.is_primary_key).map((c) => c.name) ?? [];
+  const pkIndices = useMemo(() => {
+    return data?.columns.flatMap((c, i) => (c.is_primary_key ? [i] : [])) ?? [];
   }, [data]);
+  // Rows can only be addressed for UPDATE / DELETE through a primary
+  // key. Without one every row would share the same key, so edits would
+  // collide and deletes would hit every row: the grid is read-only.
+  const readOnly = !!data && pkIndices.length === 0;
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+  const savingRef = useRef(false);
+  const selectedCountRef = useRef(0);
+  selectedCountRef.current = selectedPkKeys.size;
 
   const { agRowData, pinnedTopRows } = useMemo(() => {
     if (!data) return { agRowData: [] as RowObj[], pinnedTopRows: [] as RowObj[] };
@@ -641,20 +671,25 @@ export function DataGrid({
       const row = editingRows[i];
       const isInserted = i >= originalRowCount;
       const obj: RowObj = { __rowIdx: i, __pkKey: "", __isInserted: isInserted, __isDeleted: false };
-      data.columns.forEach((col, colIdx) => { obj[col.name] = row[colIdx]; });
+      data.columns.forEach((_, colIdx) => { obj[colField(colIdx)] = row[colIdx]; });
       if (isInserted) {
         const ins = changes.inserts[i - originalRowCount];
         obj.__pkKey = `__ins_${ins ? ins.tempId : i - originalRowCount}`;
+        obj.__touched = ins?.touched;
         inserted.push(obj);
+      } else if (pkIndices.length > 0) {
+        // Keyed by the *original* PK values so an edit to a PK cell
+        // doesn't change the row's identity.
+        obj.__pkKey = getPkKey(i);
+        obj.__isDeleted = changes.deletedKeys.has(obj.__pkKey);
+        existing.push(obj);
       } else {
-        const pkValues = pkColumns.map((name) => obj[name]);
-        obj.__pkKey = pkColumns.length > 0 ? JSON.stringify(pkValues) : `__nopk_${i}`;
-        obj.__isDeleted = changes.deletedKeys.has(JSON.stringify(pkValues));
+        obj.__pkKey = `__nopk_${i}`;
         existing.push(obj);
       }
     }
     return { agRowData: existing, pinnedTopRows: inserted };
-  }, [editingRows, data, originalRowCount, pkColumns, changes.deletedKeys, changes.inserts]);
+  }, [editingRows, data, originalRowCount, pkIndices, getPkKey, changes.deletedKeys, changes.inserts]);
 
   // Build AG Grid column definitions
   const columnDefs = useMemo((): ColDef[] => {
@@ -675,6 +710,9 @@ export function DataGrid({
       valueGetter: (params) => {
         if (!params.data) return "";
         if (params.data.__isInserted) return "+";
+        // Marked for deletion: a clear marker on top of the
+        // strikethrough so it reads at a glance.
+        if (params.data.__isDeleted) return "−";
         return page * PAGE_SIZE + params.data.__rowIdx + 1;
       },
       onCellClicked: (params) => {
@@ -688,9 +726,20 @@ export function DataGrid({
     const dataCols: ColDef[] = visibleIndices.map((colIdx) => {
       const col = data.columns[colIdx];
       const isAutoGen = col.is_auto_generated;
+      const field = colField(colIdx);
+      // Untouched columns of a pending insert are left out of the
+      // INSERT, so the database fills them in: show that instead of
+      // a NULL that will never be written.
+      const placeholderFor = (row: RowObj | undefined, value: unknown): string | null => {
+        if (!row?.__isInserted || row.__touched?.[colIdx]) return null;
+        if (value !== null && value !== undefined) return null;
+        if (isAutoGen) return "auto";
+        if (col.default_value !== null && col.default_value !== undefined) return "default";
+        return null;
+      };
 
       return {
-        field: col.name,
+        colId: field,
         headerName: col.name,
         headerTooltip: `${col.name} (${col.data_type})`,
         headerComponent: DataTypeHeader,
@@ -699,38 +748,48 @@ export function DataGrid({
           isPk: col.is_primary_key,
           fk: fkMap.get(col.name),
         },
+        // Read by position, never by name: a "." in a column name would
+        // otherwise be taken as a nested path. Objects (Cassandra maps,
+        // UDTs) become their JSON text so display, search and the editor
+        // all see the same string.
+        valueGetter: (params) => (params.data ? cellEditText(params.data[field]) : null),
         editable: (params) => {
-          if (!params.data) return false;
-          if (params.data.__isInserted && isAutoGen && (params.data[col.name] === null || params.data[col.name] === undefined)) return false;
+          if (readOnlyRef.current || savingRef.current) return false;
+          if (!params.data || params.data.__isDeleted) return false;
+          if (params.data.__isInserted && isAutoGen && (params.data[field] === null || params.data[field] === undefined)) return false;
           return true;
         },
+        // ag-grid's default editor is a single-line <input> that drops
+        // newlines; long, multi-line, text and JSON values get a
+        // textarea (Shift+Enter for a new line, Enter to commit).
+        cellRendererSelector: nullCellSelector,
+        cellEditorSelector: (params) =>
+          usesLargeTextEditor(col.data_type, params.data?.[field])
+            ? { component: "agLargeTextCellEditor", popup: true, params: LARGE_TEXT_EDITOR_PARAMS }
+            : { component: "agTextCellEditor" },
         cellClassRules: {
-          "cell-null": (params) => params.value === null || params.value === undefined,
+          "cell-null": (params) => (params.value === null || params.value === undefined) && !placeholderFor(params.data, params.value),
           "cell-modified": (params) => {
             if (!params.data || params.data.__isInserted) return false;
-            const pkValues = pkColumns.map((name) => params.data[name]);
-            const pkKey = JSON.stringify(pkValues);
-            return changes.updates.has(`${pkKey}:${col.name}`);
+            return changes.updates.has(`${params.data.__pkKey}:${col.name}`);
           },
           "cell-inserted": (params) => params.data?.__isInserted === true,
-          "cell-auto": (params) => {
-            return params.data?.__isInserted && isAutoGen && (params.value === null || params.value === undefined);
-          },
+          "cell-auto": (params) => placeholderFor(params.data, params.value) !== null,
           "cell-search-match": (params) => {
             const q = searchQueryRef.current;
             if (!q) return false;
-            const v = params.value;
-            const str = (v === null || v === undefined) ? "null" : typeof v === "object" ? JSON.stringify(v) : String(v);
+            const str = params.value === null || params.value === undefined ? "null" : String(params.value);
             return str.toLowerCase().includes(q.toLowerCase());
           },
           "cell-search-current": (params) => {
             const cur = searchCurrentRef.current;
             if (!cur) return false;
-            return params.rowIndex === cur.rowIndex && params.colDef.field === cur.colId;
+            return params.rowIndex === cur.rowIndex && params.column.getColId() === cur.colId;
           },
         },
         valueFormatter: (params) => {
-          if (params.data?.__isInserted && isAutoGen && (params.value === null || params.value === undefined)) return "auto";
+          const placeholder = placeholderFor(params.data, params.value);
+          if (placeholder) return placeholder;
           if (params.value === null || params.value === undefined) return "NULL";
           return String(params.value);
         },
@@ -739,8 +798,15 @@ export function DataGrid({
           // Opening and closing the editor without typing must not
           // record an edit (e.g. a NULL cell would otherwise become '').
           if (params.newValue === params.oldValue) return false;
-          if ((params.oldValue === null || params.oldValue === undefined) && params.newValue === "") return false;
-          const parsed = editorInputToValue(params.newValue, col);
+          if ((params.oldValue === null || params.oldValue === undefined) &&
+            (params.newValue === "" || params.newValue === null || params.newValue === undefined)) return false;
+          // The Delete key clears a cell with `null`: that empties a text
+          // value (NULL stays an explicit action) and means NULL for
+          // other types, exactly like clearing the editor.
+          const typed = params.newValue === null || params.newValue === undefined
+            ? ""
+            : restoreLineEndings(params.data[field], String(params.newValue));
+          const parsed = editorInputToValue(typed, col);
           if (!parsed.ok) {
             addToast(`${col.name}: ${parsed.error}`, "error");
             return false;
@@ -753,10 +819,11 @@ export function DataGrid({
     });
 
     return [rowNumCol, ...dataCols];
-  }, [data, visibleIndices, page, changes, pkColumns, handleCellChange, fkMap, addToast]);
+  }, [data, visibleIndices, page, changes, handleCellChange, fkMap, addToast]);
 
   const handleAddRow = () => {
-    if (!data) return;
+    if (!data || readOnly) return;
+    hasChangesLatestRef.current = true;
     const insert: PendingInsert = {
       tempId: nextInsertTempId++,
       values: data.columns.map(() => null),
@@ -795,14 +862,14 @@ export function DataGrid({
     const api = event.api;
     if (api.getEditingCells().length > 0) return;
 
-    if (!data) return;
+    if (!data || readOnly) return;
     // First non-auto-generated column is the first cell the user
     // can actually type into. If every column is auto-generated
     // (a degenerate case but possible for tables with only a
     // serial PK), there's nothing to focus, so we don't trigger
     // the shortcut.
-    const firstEditable = data.columns.find((c) => !c.is_auto_generated);
-    if (!firstEditable) return;
+    const firstEditableIdx = data.columns.findIndex((c, i) => !c.is_auto_generated && visibleIndices.includes(i));
+    if (firstEditableIdx < 0) return;
 
     ev.preventDefault();
 
@@ -813,11 +880,13 @@ export function DataGrid({
     const newPinnedIdx = pinnedTopRows.length;
     handleAddRow();
     setTimeout(() => {
-      gridApiRef.current?.setFocusedCell(newPinnedIdx, firstEditable.name, "top");
+      gridApiRef.current?.setFocusedCell(newPinnedIdx, colField(firstEditableIdx), "top");
     }, 0);
-  }, [agRowData.length, pinnedTopRows.length, data, handleAddRow]);
+  }, [agRowData.length, pinnedTopRows.length, data, handleAddRow, readOnly, visibleIndices]);
 
   const handleDeleteRow = (rowIndex: number) => {
+    if (readOnly) return;
+    hasChangesLatestRef.current = true;
     const pkKey = getPkKey(rowIndex);
     setChanges((prev) => {
       const next = { ...prev, deletedKeys: new Set(prev.deletedKeys) };
@@ -831,7 +900,8 @@ export function DataGrid({
   };
 
   const handleDeleteSelected = useCallback(() => {
-    if (selectedPkKeys.size === 0) return;
+    if (selectedPkKeys.size === 0 || readOnlyRef.current) return;
+    hasChangesLatestRef.current = true;
     setChanges((prev) => {
       const next = { ...prev, deletedKeys: new Set(prev.deletedKeys) };
       for (const pkKey of selectedPkKeys) {
@@ -854,8 +924,13 @@ export function DataGrid({
   }, []);
 
   const handleSave = async () => {
-    if (!data || !hasChanges) return;
+    // The ref blocks a second click / Enter before `saving` re-renders,
+    // which would otherwise apply the same inserts twice.
+    if (!data || !hasChanges || readOnly || savingRef.current) return;
+    savingRef.current = true;
+    gridApiRef.current?.stopEditing();
     setSaving(true);
+    setSaveError(null);
     setFilterLoading(true);
     try {
       const allChanges: DataChanges = {
@@ -885,17 +960,23 @@ export function DataGrid({
       };
       await api.applyChanges(allChanges);
       setChanges({ updates: new Map(), inserts: [], deletedKeys: new Set() });
+      hasChangesLatestRef.current = false;
       await fetchData();
     } catch (e) {
-      setError(String(e));
+      // Kept until dismissed (or the next successful save): the pending
+      // edits are still there to fix and retry.
+      setSaveError(String(e));
       setFilterLoading(false);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
 
   const handleDiscard = () => {
     setChanges({ updates: new Map(), inserts: [], deletedKeys: new Set() });
+    hasChangesLatestRef.current = false;
+    setSaveError(null);
     if (data) {
       setExistingRows(data.rows.map((r) => [...r]));
     }
@@ -926,6 +1007,8 @@ export function DataGrid({
       fetchData();
     });
   }, [guardNav, startManualTimer, fetchData]);
+
+  const dbType = connections.find((c) => c.id === connectionId)?.db_type;
 
   const handleFilterApply = (filter: string | null) => {
     guardNav(() => {
@@ -967,14 +1050,22 @@ export function DataGrid({
     }
   };
 
-  const formatRowAsInsert = useCallback((row: unknown[]): string => {
+  /** INSERT for a row; `include` limits the columns (pending inserts
+   *  leave untouched columns to their DEFAULT, as Save does). */
+  const formatRowAsInsert = useCallback((row: unknown[], include?: boolean[]): string => {
     if (!data) return "";
     // Dialect-aware: previously hardcoded `"col"` / `"schema"."table"`
     // / `TRUE` regardless of connection type, producing snippets that
     // didn't run as-is on default-mode MySQL or MSSQL.
-    const dbType = connections.find((c) => c.id === connectionId)?.db_type;
-    const cols = data.columns.map((c) => quoteIdent(dbType, c.name)).join(", ");
-    const vals = row
+    const idx = data.columns.map((_, i) => i).filter((i) => !include || include[i]);
+    if (idx.length === 0) {
+      return dbType === "mysql" || dbType === "mariadb" || dbType === "tidb"
+        ? `INSERT INTO ${quoteQualified(dbType, schema, table)} () VALUES ();`
+        : `INSERT INTO ${quoteQualified(dbType, schema, table)} DEFAULT VALUES;`;
+    }
+    const cols = idx.map((i) => quoteIdent(dbType, data.columns[i].name)).join(", ");
+    const vals = idx
+      .map((i) => row[i])
       .map((v) => {
         if (v === null) return "NULL";
         if (typeof v === "number") return String(v);
@@ -983,10 +1074,29 @@ export function DataGrid({
       })
       .join(", ");
     return `INSERT INTO ${quoteQualified(dbType, schema, table)} (${cols}) VALUES (${vals});`;
-  }, [data, schema, table, connections, connectionId]);
+  }, [data, schema, table, dbType]);
 
-  const handleCopyAllAsInsert = () => {
-    navigator.clipboard.writeText(editingRows.map(formatRowAsInsert).join("\n"));
+  /** INSERT for the row at `rowIdx` of `editingRows` as it would be saved. */
+  const insertForRow = useCallback((rowIdx: number): string => {
+    const row = editingRows[rowIdx];
+    if (!row) return "";
+    const ins = rowIdx >= originalRowCount ? changes.inserts[rowIdx - originalRowCount] : undefined;
+    return formatRowAsInsert(row, ins?.touched);
+  }, [editingRows, originalRowCount, changes.inserts, formatRowAsInsert]);
+
+  const handleCopyAllAsInsert = async () => {
+    // Rows marked for deletion are left out: they won't exist after Save.
+    const statements: string[] = [];
+    for (let i = 0; i < editingRows.length; i++) {
+      if (i < originalRowCount && changes.deletedKeys.has(getPkKey(i))) continue;
+      statements.push(insertForRow(i));
+    }
+    try {
+      await navigator.clipboard.writeText(statements.join("\n"));
+      addToast(`Copied ${statements.length} INSERT statement${statements.length === 1 ? "" : "s"}`);
+    } catch (e) {
+      addToast(`Copy failed: ${String(e)}`, "error");
+    }
   };
 
   const onGridReady = useCallback((params: GridReadyEvent) => {
@@ -999,7 +1109,7 @@ export function DataGrid({
     if (!e) return;
     e.preventDefault();
     const z = readZoomFactor();
-    setRowContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx, colName: event.column?.getColId() });
+    setRowContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx, colIdx: colIndexFromId(event.column?.getColId()) });
   }, []);
 
   const onCellClicked = useCallback((params: CellClickedEvent) => {
@@ -1034,10 +1144,11 @@ export function DataGrid({
     const sortModel = gridApiRef.current.getColumnState()
       .filter((c) => c.sort)
       .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
-    const next: SortSpec[] = sortModel.map((c) => ({
-      column: c.colId,
-      direction: c.sort as "asc" | "desc",
-    }));
+    const cols = dataRef.current?.columns ?? [];
+    const next: SortSpec[] = sortModel.flatMap((c) => {
+      const col = cols[colIndexFromId(c.colId)];
+      return col ? [{ column: col.name, direction: c.sort as "asc" | "desc" }] : [];
+    });
     const prev = sortRef.current;
     // Cheap structural equality check — avoids spuriously re-fetching
     // (and resetting the page) when ag-grid emits a sortChanged event
@@ -1046,7 +1157,7 @@ export function DataGrid({
     if (sameSort(prev, next)) return;
     const apply = (restoreHeaders = false) => {
       sortRef.current = next;
-      if (restoreHeaders) applySortToGrid(gridApiRef.current, next);
+      if (restoreHeaders) applySortToGrid(gridApiRef.current, next, cols);
       setFilterLoading(true);
       setSort(next);
       setPage(0);
@@ -1054,7 +1165,7 @@ export function DataGrid({
     if (hasChangesLatestRef.current) {
       // Keep the headers showing the sort the rows are actually in
       // until the user decides what to do with the pending edits.
-      applySortToGrid(gridApiRef.current, prev);
+      applySortToGrid(gridApiRef.current, prev, cols);
       setPendingNav(() => () => apply(true));
       return;
     }
@@ -1200,10 +1311,11 @@ export function DataGrid({
       database,
       schema,
       table: fk.referenced_table,
+      subTab: "data",
+      initialFilter: { column: fk.referenced_column, value: cellValue, nonce: Date.now() },
     };
     openTab(tab);
-    addToast(`Opened ${fk.referenced_table} — filter by ${fk.referenced_column} = ${JSON.stringify(cellValue)}`);
-  }, [connectionId, database, schema, connections, openTab, addToast]);
+  }, [connectionId, database, schema, connections, openTab]);
 
   // `handleOpenQuery` used to live here; it now lives on TableView's
   // header so the "Query" button is reachable from both Data and Schema
@@ -1237,17 +1349,34 @@ export function DataGrid({
     comparator: () => 0,
     suppressHeaderMenuButton: true,
     cellDataType: false,
-    suppressKeyboardEvent: (params) => {
-      if (!params.editing) {
-        const key = params.event.key;
-        if (key === "Delete" || key === "Backspace" || key === "Enter" || key === "F2" ||
-          (key.length === 1 && !params.event.ctrlKey && !params.event.metaKey)) {
-          return true;
-        }
-      }
-      return false;
-    },
+    suppressKeyboardEvent: (params) => shouldSuppressGridKey({
+      editing: params.editing,
+      key: params.event.key,
+      hasRowSelection: selectedCountRef.current > 0,
+    }),
   }), []);
+
+  // "Jump to FK" (from another grid) opens this tab with a one-shot
+  // filter on the referenced column; apply it once per request.
+  const initialFilter = useTabStore((s) =>
+    tabId ? s.tabs.find((t) => t.id === tabId)?.initialFilter : undefined);
+  const appliedFilterNonceRef = useRef<number | null>(null);
+  const handleFilterApplyRef = useRef(handleFilterApply);
+  handleFilterApplyRef.current = handleFilterApply;
+  useEffect(() => {
+    if (!initialFilter || !data || appliedFilterNonceRef.current === initialFilter.nonce) return;
+    appliedFilterNonceRef.current = initialFilter.nonce;
+    const conds: FilterCondition[] = [{
+      id: `fk-${initialFilter.nonce}`,
+      column: initialFilter.column,
+      operator: initialFilter.value === null || initialFilter.value === undefined ? "IS NULL" : "=",
+      value: cellEditText(initialFilter.value) ?? "",
+      join: "AND",
+    }];
+    setFilterConditions(conds);
+    setShowFilter(true);
+    handleFilterApplyRef.current(buildWhereClause(conds, data.columns, dbType));
+  }, [initialFilter, data, dbType]);
 
   if (loading && !data) {
     return (
@@ -1285,17 +1414,27 @@ export function DataGrid({
           </div>
         )}
         <div className="grid-toolbar-right">
+          {readOnly && (
+            <span
+              className="result-updatable-badge readonly grid-readonly-badge"
+              title="Read-only: table has no primary key, so rows can't be addressed for updates or deletes"
+            >
+              <Lock size={12} /> Read-only<span className="btn-label">: no primary key</span>
+            </span>
+          )}
           <button
             className={`btn-ghost ${showFilter || activeFilter ? "active-filter" : ""}`}
             onClick={() => setShowFilter(!showFilter)}
-            title="Toggle Filter"
+            title={activeFilter ? "Toggle Filter (a filter is applied)" : "Toggle Filter"}
+            aria-label={activeFilter ? "Filter (active)" : "Filter"}
           >
-            <Filter size={14} /> Filter{activeFilter ? " (active)" : ""}
+            <Filter size={14} /> <span className="btn-label">Filter{activeFilter ? " (active)" : ""}</span>
           </button>
           <button
             className="btn-ghost"
             onClick={handleRefresh}
             title="Refresh now"
+            aria-label="Refresh now"
           >
             <RefreshCw size={14} />
           </button>
@@ -1334,32 +1473,40 @@ export function DataGrid({
             className={`btn-ghost ${showExplain ? "active-filter" : ""}`}
             onClick={handleExplain}
             title="Explain current query"
+            aria-label="Explain"
           >
-            <Zap size={14} /> Explain
+            <Zap size={14} /> <span className="btn-label">Explain</span>
           </button>
           <ExportMenu onExport={handleExport} />
           <button
             className="btn-ghost"
             onClick={handleCopyAllAsInsert}
             title="Copy all rows as INSERT statements"
+            aria-label="Copy as SQL"
           >
-            <Copy size={14} /> Copy as SQL
+            <Copy size={14} /> <span className="btn-label">Copy as SQL</span>
           </button>
-          <button
-            className="btn-ghost"
-            onClick={handleAddRow}
-            title="Add Row"
-          >
-            <Plus size={14} /> Add Row
-          </button>
-          <button
-            className="btn-ghost"
-            onClick={handleGenerateTestData}
-            title="Generate a row with random test data"
-          >
-            <Shuffle size={14} /> Test Data
-          </button>
-          {selectedPkKeys.size > 0 && (
+          {!readOnly && (
+            <>
+              <button
+                className="btn-ghost"
+                onClick={handleAddRow}
+                title="Add Row"
+                aria-label="Add Row"
+              >
+                <Plus size={14} /> <span className="btn-label">Add Row</span>
+              </button>
+              <button
+                className="btn-ghost"
+                onClick={handleGenerateTestData}
+                title="Generate a row with random test data"
+                aria-label="Test Data"
+              >
+                <Shuffle size={14} /> <span className="btn-label">Test Data</span>
+              </button>
+            </>
+          )}
+          {!readOnly && selectedPkKeys.size > 0 && (
             <button
               className="btn-delete-selected"
               onClick={handleDeleteSelected}
@@ -1380,9 +1527,10 @@ export function DataGrid({
               onClick={handleSave}
               disabled={saving}
               style={{ display: "flex", alignItems: "center", gap: 6 }}
+              title="Save changes to the database"
             >
               {saving ? <Loader2 size={14} className="spin" /> : <Save size={14} />}
-              Save
+              {saving ? "Saving..." : `Save ${changeCount} change${changeCount === 1 ? "" : "s"}`}
             </button>
           </div>
         )}
@@ -1391,14 +1539,26 @@ export function DataGrid({
       {showFilter && data && (
         <FilterBar
           columns={data.columns}
+          conditions={filterConditions ?? defaultFilterConditions(data.columns)}
+          onConditionsChange={setFilterConditions}
           onApply={handleFilterApply}
           onClose={() => setShowFilter(false)}
-          dbType={connections.find((c) => c.id === connectionId)?.db_type}
+          dbType={dbType}
         />
       )}
 
-      {error && (
-        <div className="grid-error-banner">{error}</div>
+      {(saveError || error) && (
+        <div className="grid-error-banner" role="alert">
+          <span className="grid-error-banner-text">{saveError ?? error}</span>
+          <button
+            className="btn-icon grid-error-banner-close"
+            onClick={() => { setSaveError(null); setError(null); }}
+            title="Dismiss"
+            aria-label="Dismiss error"
+          >
+            <X size={14} />
+          </button>
+        </div>
       )}
 
       {showSearch && (
@@ -1407,7 +1567,7 @@ export function DataGrid({
           <input
             ref={searchInputRef}
             className="grid-search-input"
-            placeholder="Search columns and values..."
+            placeholder="Search values in visible columns..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={(e) => {
@@ -1448,6 +1608,7 @@ export function DataGrid({
         </div>
       )}
 
+      <div className="grid-body">
       <div
         className={`grid-table-wrapper ag-grid-wrapper${
           loading && data ? " grid-table-wrapper-stale" : ""
@@ -1480,6 +1641,21 @@ export function DataGrid({
           enableCellTextSelection={true}
           suppressRowClickSelection={true}
         />
+      </div>
+      {/* Inside the grid body so the panel never covers the toolbar
+          (Save / Discard stay reachable while it is open). */}
+      {detailRowIdx !== null && data && editingRows[detailRowIdx] && (
+        <RowDetailView
+          columns={data.columns}
+          row={editingRows[detailRowIdx]}
+          rowIndex={detailRowIdx}
+          onClose={() => setDetailRowIdx(null)}
+          readOnly={readOnly || (detailRowIdx < originalRowCount && changes.deletedKeys.has(getPkKey(detailRowIdx)))}
+          onCellChange={(colIndex, newValue) =>
+            handleCellChange(detailRowIdx, colIndex, newValue)
+          }
+        />
+      )}
       </div>
 
       <div className="grid-pagination">
@@ -1583,10 +1759,7 @@ export function DataGrid({
           <button
             className="context-menu-item"
             onClick={() => {
-              const obj: Record<string, unknown> = {};
-              data.columns.forEach((col, i) => {
-                obj[col.name] = editingRows[rowContextMenu.rowIdx][i];
-              });
+              const obj = rowToObject(data.columns.map((c) => c.name), editingRows[rowContextMenu.rowIdx]);
               navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
               setRowContextMenu(null);
             }}
@@ -1596,7 +1769,7 @@ export function DataGrid({
           <button
             className="context-menu-item"
             onClick={() => {
-              navigator.clipboard.writeText(formatRowAsInsert(editingRows[rowContextMenu.rowIdx]));
+              navigator.clipboard.writeText(insertForRow(rowContextMenu.rowIdx));
               setRowContextMenu(null);
             }}
           >
@@ -1605,9 +1778,9 @@ export function DataGrid({
           {(() => {
             // Explicit NULL: clearing a text cell stores an empty
             // string, so NULL needs its own action.
-            const colIdx = data.columns.findIndex((c) => c.name === rowContextMenu.colName);
+            const colIdx = rowContextMenu.colIdx;
             const col = colIdx >= 0 ? data.columns[colIdx] : null;
-            if (!col || !col.is_nullable) return null;
+            if (readOnly || !col || !col.is_nullable) return null;
             const cur = editingRows[rowContextMenu.rowIdx][colIdx];
             const isInsertedRow = rowContextMenu.rowIdx >= originalRowCount;
             if (!isInsertedRow && cur === null) return null;
@@ -1624,7 +1797,7 @@ export function DataGrid({
               </button>
             );
           })()}
-          {selectedPkKeys.size > 1 && selectedPkKeys.has(getPkKey(rowContextMenu.rowIdx)) ? (
+          {readOnly ? null : selectedPkKeys.size > 1 && selectedPkKeys.has(getPkKey(rowContextMenu.rowIdx)) ? (
             <button
               className="context-menu-item context-menu-danger"
               onClick={() => {
@@ -1697,17 +1870,6 @@ export function DataGrid({
         />
       )}
 
-      {detailRowIdx !== null && data && editingRows[detailRowIdx] && (
-        <RowDetailView
-          columns={data.columns}
-          row={editingRows[detailRowIdx]}
-          rowIndex={detailRowIdx}
-          onClose={() => setDetailRowIdx(null)}
-          onCellChange={(colIndex, newValue) =>
-            handleCellChange(detailRowIdx, colIndex, newValue)
-          }
-        />
-      )}
     </div>
   );
 }

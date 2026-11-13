@@ -17,6 +17,8 @@ import { KnownHostsDialog } from "./components/KnownHostsDialog";
 import { PreferencesDialog } from "./components/Preferences/PreferencesDialog";
 import { useConnectionStore } from "./stores/connectionStore";
 import { useTabStore } from "./stores/tabStore";
+import { useToastStore } from "./stores/toastStore";
+import { openNewQueryTab } from "./lib/newQueryTab";
 import { useUserSettingsStore } from "./stores/userSettingsStore";
 import { applyFontSettings } from "./lib/applyFontSettings";
 import { loader } from "@monaco-editor/react";
@@ -331,6 +333,11 @@ export default function App() {
       if (e.ctrlKey && e.key === "0") {
         e.preventDefault();
         applyZoom(defaultZoomPercent());
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        if (!openNewQueryTab()) useToastStore.getState().addToast("Connect to a database to open a query tab", "info");
         return;
       }
     };

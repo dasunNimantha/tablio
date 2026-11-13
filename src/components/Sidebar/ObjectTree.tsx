@@ -1007,6 +1007,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   activeConnectionsRef.current = activeConnections;
 
   const schemaVersions = useConnectionStore((s) => s.schemaVersions);
+  const connectionsLoaded = useConnectionStore((s) => s.connectionsLoaded);
   const invalidateSchema = useConnectionStore((s) => s.invalidateSchema);
   // Connections whose next schema-version bump came from this tree, which
   // has already refreshed itself and only needs to notify open tabs.
@@ -2080,7 +2081,12 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         }}
         onDrop={(e) => handleDrop(e, null)}
       >
-        {connections.length === 0 ? (
+        {connections.length === 0 && !connectionsLoaded ? (
+          <div className="tree-empty-state tree-loading-state" role="status" aria-live="polite">
+            <Loader2 size={16} className="spin" aria-hidden="true" />
+            <p>Loading connections…</p>
+          </div>
+        ) : connections.length === 0 ? (
           <div className="tree-empty-state">
             <p>No connections yet</p>
             <button className="btn-secondary" onClick={onAddConnection} style={{ marginTop: 8 }}>

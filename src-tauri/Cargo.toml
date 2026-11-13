@@ -82,6 +82,12 @@ keyring = { version = "3.6", features = [
 # pageant 0.2 in transitively (its `AgentClient::connect_pageant()` returns
 # `AgentClient<pageant::PageantStream>`), but doesn't re-export the type, so
 # we declare it explicitly here.
+# Linux-only: read all stored connection secrets in one Secret Service
+# session (see `KeyringStore::get_all`). Same crate and features `keyring`
+# already uses there, so this adds nothing to the build.
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "4", features = ["rt-async-io-crypto-rust"] }
+
 [target.'cfg(windows)'.dependencies]
 pageant = "0.2"
 

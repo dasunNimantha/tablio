@@ -46,6 +46,19 @@
   letter-spacing: 0.04em;
 }
 
+.row-detail-readonly {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 10px;
+  margin-right: auto;
+  padding: 1px 7px;
+  border-radius: 9px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-hover);
+}
+
 .row-detail-header-actions {
   display: flex;
   align-items: center;

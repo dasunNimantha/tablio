@@ -2431,3 +2431,211 @@ async fn sqlite_console_cancel_before_start_is_reported() {
     assert!(tablio_lib::db::cancel::is_cancelled_error(&err));
     driver.execute_query(DB, "SELECT 1").await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Value decoding and write-back
+// ---------------------------------------------------------------------------
+
+fn pk(col: &str, v: serde_json::Value) -> Vec<(String, serde_json::Value)> {
+    vec![(col.to_string(), v)]
+}
+
+fn update_change(
+    table: &str,
+    pk_values: Vec<(String, serde_json::Value)>,
+    col: &str,
+    old: serde_json::Value,
+    new: serde_json::Value,
+) -> DataChanges {
+    DataChanges {
+        connection_id: "test".into(),
+        database: DB.into(),
+        schema: SCHEMA.into(),
+        table: table.into(),
+        updates: vec![CellChange {
+            row_index: 0,
+            column_name: col.into(),
+            old_value: old,
+            new_value: new,
+            primary_key_values: pk_values,
+        }],
+        inserts: vec![],
+        deletes: vec![],
+    }
+}
+
+#[tokio::test]
+async fn sqlite_nulls_decode_as_null_not_type_defaults() {
+    use serde_json::json;
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("nulls");
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {tbl} (id INTEGER PRIMARY KEY, r REAL, i INTEGER, t TEXT, \
+                 bo BOOLEAN, b BLOB); INSERT INTO {tbl}(id) VALUES (1);"
+            ),
+        )
+        .await
+        .unwrap();
+    let expected = vec![
+        json!(1),
+        json!(null),
+        json!(null),
+        json!(null),
+        json!(null),
+        json!(null),
+    ];
+    let data = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0], expected);
+    let r = driver
+        .execute_query(DB, &format!("SELECT * FROM {tbl}"))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0], expected);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_cells_decode_by_storage_class() {
+    use serde_json::json;
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("mixed");
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {tbl} (id INTEGER PRIMARY KEY, r REAL, bo BOOLEAN, t TEXT); \
+                 INSERT INTO {tbl} VALUES (1, 'not a number', 5, 42), \
+                 (2, 1e999, 1, 'x'), (3, -1e999, 0, 'y');"
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    // Text in a REAL column, an integer that is not 0/1 in a BOOLEAN
+    // column keep their real values (TEXT affinity stores 42 as "42").
+    assert_eq!(
+        data.rows[0],
+        vec![json!(1), json!("not a number"), json!(5), json!("42")]
+    );
+    assert_eq!(
+        data.rows[1],
+        vec![json!(2), json!("Infinity"), json!(true), json!("x")]
+    );
+    assert_eq!(
+        data.rows[2],
+        vec![json!(3), json!("-Infinity"), json!(false), json!("y")]
+    );
+
+    // ±Infinity is written back as a REAL, not as the text "Infinity".
+    driver
+        .apply_changes(&update_change(
+            &tbl,
+            pk("id", json!(3)),
+            "r",
+            json!("-Infinity"),
+            json!("Infinity"),
+        ))
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(
+            DB,
+            &format!("SELECT typeof(r), r > 1e308 FROM {tbl} WHERE id = 3"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0], vec![json!("real"), json!(1)]);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_blob_write_back_stores_bytes_and_matches_blob_pk() {
+    use serde_json::json;
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("blobs");
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE {tbl} (k BLOB PRIMARY KEY, b BLOB); \
+                 INSERT INTO {tbl} VALUES (X'00ff80', X'01');"
+            ),
+        )
+        .await
+        .unwrap();
+    let data = driver
+        .fetch_rows(DB, SCHEMA, &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0], vec![json!("X'00ff80'"), json!("X'01'")]);
+
+    driver
+        .apply_changes(&update_change(
+            &tbl,
+            pk("k", json!("X'00ff80'")),
+            "b",
+            json!("X'01'"),
+            json!("X'deadbeef'"),
+        ))
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(DB, &format!("SELECT hex(b), typeof(b) FROM {tbl}"))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0], vec![json!("DEADBEEF"), json!("blob")]);
+
+    let del = DataChanges {
+        updates: vec![],
+        deletes: vec![DeleteRow {
+            primary_key_values: pk("k", json!("X'00ff80'")),
+        }],
+        ..update_change(&tbl, vec![], "b", json!(null), json!(null))
+    };
+    driver.apply_changes(&del).await.unwrap();
+    let r = driver
+        .execute_query(DB, &format!("SELECT count(*) FROM {tbl}"))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], json!(0));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_text_with_nul_round_trips() {
+    use serde_json::json;
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("nul");
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {tbl} (id INTEGER PRIMARY KEY, t TEXT); INSERT INTO {tbl} VALUES (1, 'a');"),
+        )
+        .await
+        .unwrap();
+    driver
+        .apply_changes(&update_change(
+            &tbl,
+            pk("id", json!(1)),
+            "t",
+            json!("a"),
+            json!("a\u{0}b'c"),
+        ))
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(DB, &format!("SELECT hex(t) FROM {tbl}"))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], json!("6100622763"));
+    let _ = std::fs::remove_file(&path);
+}

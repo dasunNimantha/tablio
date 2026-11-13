@@ -2074,3 +2074,191 @@ async fn crdb_console_cancel_before_start_is_reported() {
     assert!(tablio_lib::db::cancel::is_cancelled_error(&err));
     driver.execute_query(&db, "SELECT 1").await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Value decoding and write-back
+// ---------------------------------------------------------------------------
+
+async fn cockroachdb_exec(driver: &impl DatabaseDriver, db: &str, sql: &str) -> QueryResult {
+    driver
+        .execute_query(db, sql)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+}
+
+fn cockroachdb_update(
+    db: &str,
+    tbl: &str,
+    pk: Vec<(String, serde_json::Value)>,
+    col: &str,
+    new: serde_json::Value,
+) -> DataChanges {
+    DataChanges {
+        connection_id: "test".into(),
+        database: db.into(),
+        schema: "public".into(),
+        table: tbl.into(),
+        updates: vec![CellChange {
+            row_index: 0,
+            column_name: col.into(),
+            old_value: serde_json::Value::Null,
+            new_value: new,
+            primary_key_values: pk,
+        }],
+        inserts: vec![],
+        deletes: vec![],
+    }
+}
+
+#[tokio::test]
+async fn cockroachdb_json_is_sent_as_server_text() {
+    use serde_json::json;
+    let (driver, db) = crdb_driver!();
+    let tbl = unique_table("jsontext");
+    cockroachdb_exec(
+        &driver,
+        &db,
+        &format!("CREATE TABLE {tbl} (id INT PRIMARY KEY, jb JSONB)"),
+    )
+    .await;
+    cockroachdb_exec(
+        &driver,
+        &db,
+        &format!(
+            "INSERT INTO {tbl} VALUES \
+             (1, '{{\"big\":123456789012345678901234567890}}'), \
+             (2, 'null'), (3, '\"str\"'), (4, NULL)"
+        ),
+    )
+    .await;
+    let data = driver
+        .fetch_rows(&db, "public", &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    let text = cockroachdb_exec(
+        &driver,
+        &db,
+        &format!("SELECT jb::text FROM {tbl} ORDER BY id"),
+    )
+    .await;
+    for (i, row) in data.rows.iter().enumerate() {
+        assert_eq!(row[1], text.rows[i][0], "jsonb row {}", i + 1);
+    }
+    assert!(data.rows[0][1]
+        .as_str()
+        .unwrap()
+        .contains("123456789012345678901234567890"));
+    assert_eq!(data.rows[1][1], json!("null"));
+    assert_eq!(data.rows[2][1], json!("\"str\""));
+    assert_eq!(data.rows[3][1], json!(null));
+
+    // The console sends the same text.
+    let r = cockroachdb_exec(&driver, &db, &format!("SELECT jb FROM {tbl} WHERE id = 1")).await;
+    assert_eq!(r.rows[0][0], data.rows[0][1]);
+
+    // Saving the text keeps the document exact, and JSON scalars / JSON
+    // null are written as JSON (not SQL NULL).
+    driver
+        .apply_changes(&cockroachdb_update(
+            &db,
+            &tbl,
+            vec![("id".into(), json!(1))],
+            "jb",
+            data.rows[0][1].clone(),
+        ))
+        .await
+        .unwrap();
+    driver
+        .apply_changes(&cockroachdb_update(
+            &db,
+            &tbl,
+            vec![("id".into(), json!(2))],
+            "jb",
+            json!("\"hello\""),
+        ))
+        .await
+        .unwrap();
+    driver
+        .apply_changes(&cockroachdb_update(
+            &db,
+            &tbl,
+            vec![("id".into(), json!(3))],
+            "jb",
+            json!("null"),
+        ))
+        .await
+        .unwrap();
+    let r = cockroachdb_exec(
+        &driver,
+        &db,
+        &format!("SELECT jb::text, jsonb_typeof(jb), jb IS NULL FROM {tbl} ORDER BY id"),
+    )
+    .await;
+    assert_eq!(r.rows[0][0], data.rows[0][1]);
+    assert_eq!(r.rows[1][1], json!("string"));
+    assert_eq!(r.rows[2][1], json!("null"));
+    assert_eq!(r.rows[2][2], json!(false));
+    driver
+        .drop_object(&db, "public", &tbl, "TABLE")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cockroachdb_float_values_are_exact_and_non_finite_are_strings() {
+    use serde_json::json;
+    let (driver, db) = crdb_driver!();
+    let tbl = unique_table("floats");
+    cockroachdb_exec(
+        &driver,
+        &db,
+        &format!("CREATE TABLE {tbl} (id INT PRIMARY KEY, r REAL, d DOUBLE PRECISION)"),
+    )
+    .await;
+    cockroachdb_exec(
+        &driver,
+        &db,
+        &format!(
+            "INSERT INTO {tbl} VALUES (1, 0.1, 'Infinity'), (2, '-Infinity', 'NaN'), (3, 3.4028235e38, -0.5)"
+        ),
+    )
+    .await;
+    let data = driver
+        .fetch_rows(&db, "public", &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0], vec![json!(1), json!(0.1), json!("Infinity")]);
+    assert_eq!(
+        data.rows[1],
+        vec![json!(2), json!("-Infinity"), json!("NaN")]
+    );
+    assert_eq!(
+        data.rows[2],
+        vec![json!(3), json!(3.4028235e38), json!(-0.5)]
+    );
+    let r = cockroachdb_exec(
+        &driver,
+        &db,
+        &format!("SELECT r, d FROM {tbl} WHERE id = 1"),
+    )
+    .await;
+    assert_eq!(r.rows[0], vec![json!(0.1), json!("Infinity")]);
+
+    // The strings are accepted back.
+    driver
+        .apply_changes(&cockroachdb_update(
+            &db,
+            &tbl,
+            vec![("id".into(), json!(3))],
+            "d",
+            json!("-Infinity"),
+        ))
+        .await
+        .unwrap();
+    let r = cockroachdb_exec(&driver, &db, &format!("SELECT d FROM {tbl} WHERE id = 3")).await;
+    assert_eq!(r.rows[0][0], json!("-Infinity"));
+    driver
+        .drop_object(&db, "public", &tbl, "TABLE")
+        .await
+        .unwrap();
+}

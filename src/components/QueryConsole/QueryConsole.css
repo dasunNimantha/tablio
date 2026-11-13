@@ -38,10 +38,19 @@
   font-weight: 400;
 }
 
+.query-toolbar > button {
+  flex-shrink: 0;
+}
+
 .query-hint {
   font-size: 14px;
   color: var(--text-muted);
   margin-left: auto;
+  /* Gives way first when the toolbar is narrow (zoom, small window). */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .flex-spacer {
@@ -50,13 +59,24 @@
 
 .query-editor-wrapper {
   flex: 1;
-  overflow: visible;
+  min-height: 0;
   position: relative;
-  zoom: calc(1 / var(--app-zoom, 1));
-  width: calc(100% * var(--app-zoom, 1));
-  height: calc(100% * var(--app-zoom, 1));
+  /* Never let Monaco spill out and scroll / shift the console. */
+  overflow: clip;
   /* Prevent a white flash before Monaco mounts and applies our custom theme. */
   background: var(--bg-primary);
+}
+
+/* Monaco can't hit-test under CSS zoom, so it is un-zoomed here. The
+   box is sized by insets rather than `width: calc(100% * zoom)`:
+   current Chromium / WebView2 resolve that percentage in zoomed units,
+   which made the editor ~zoom² wide (clipped on the right, wrapper
+   scrolling, toolbar shifted). Insets give the parent's box in every
+   engine; Monaco is laid out from this box (see layoutEditor). */
+.query-editor-zoom {
+  position: absolute;
+  inset: 0;
+  zoom: calc(1 / var(--app-zoom, 1));
 }
 
 /* Monaco suggest widget styling */
@@ -240,6 +260,25 @@
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.6;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gutter-sm);
+  /* Long errors scroll inside the results pane. */
+  overflow: auto;
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.query-error > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.query-error-copy {
+  flex-shrink: 0;
+  color: var(--error);
+  position: sticky;
+  top: 0;
 }
 
 .query-cancelled {
@@ -297,6 +336,26 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* Grid + row detail panel; the panel is positioned in here so it
+   never covers the toolbar (Chart / Export / Save). */
+.result-table-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.result-table-body > .ag-grid-wrapper {
+  flex: 1;
+  min-height: 0;
+}
+
+.result-no-rows {
+  color: var(--text-muted);
+  font-size: 13px;
 }
 
 .result-table-toolbar {

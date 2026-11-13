@@ -52,6 +52,18 @@ type MockOverride = (args?: Record<string, unknown>) => unknown;
 async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   await new Promise((r) => setTimeout(r, Math.random() * 200 + 50));
 
+  // E2E hooks (mock mode only): `__mockInvokeLog` records calls, and
+  // `__mockOverride(cmd, args)` may answer (or delay / fail) a command
+  // before the canned data; returning undefined falls through.
+  const hooks = window as unknown as {
+    __mockInvokeLog?: { cmd: string; args?: Record<string, unknown> }[];
+    __mockOverride?: (cmd: string, args?: Record<string, unknown>) => unknown;
+  };
+  hooks.__mockInvokeLog?.push({ cmd, args });
+  if (hooks.__mockOverride) {
+    const overridden = await hooks.__mockOverride(cmd, args);
+    if (overridden !== undefined) return overridden as T;
+  }
   const override = (window as { __mockOverrides?: Record<string, MockOverride> }).__mockOverrides?.[cmd];
   if (override) return (await override(args)) as T;
 

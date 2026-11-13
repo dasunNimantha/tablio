@@ -422,6 +422,17 @@
   line-height: 1.6;
 }
 
+.tree-loading-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.tree-loading-state p {
+  margin: 0;
+}
+
 .tree-empty .tree-label {
   font-style: italic;
   color: var(--text-muted);

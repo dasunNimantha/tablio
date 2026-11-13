@@ -598,3 +598,31 @@ describe("wasCancelledByUser", () => {
     expect(wasCancelledByUser(new Error("connection refused"))).toBe(false);
   });
 });
+
+describe("connectionStore.loadConnections — first-load flag", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    useConnectionStore.setState({ connections: [], connectionsLoaded: false, error: null });
+  });
+
+  it("is false until the first load finishes, then true", async () => {
+    let resolve!: (v: ConnectionConfig[]) => void;
+    vi.spyOn(api, "loadConnections").mockReturnValue(new Promise((r) => (resolve = r)));
+    useConnectionStore.setState({ connections: [], connectionsLoaded: false });
+    const p = useConnectionStore.getState().loadConnections();
+    expect(useConnectionStore.getState().connectionsLoaded).toBe(false);
+    expect(useConnectionStore.getState().loading).toBe(true);
+    resolve([baseConfig()]);
+    await p;
+    expect(useConnectionStore.getState().connectionsLoaded).toBe(true);
+    expect(useConnectionStore.getState().connections).toHaveLength(1);
+  });
+
+  it("is also set when loading fails, so the empty state can show", async () => {
+    vi.spyOn(api, "loadConnections").mockRejectedValue(new Error("boom"));
+    useConnectionStore.setState({ connections: [], connectionsLoaded: false });
+    await useConnectionStore.getState().loadConnections();
+    expect(useConnectionStore.getState().connectionsLoaded).toBe(true);
+    expect(useConnectionStore.getState().error).toContain("boom");
+  });
+});

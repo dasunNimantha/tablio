@@ -3002,3 +3002,219 @@ async fn mssql_console_cancel_before_start_is_reported() {
     assert!(tablio_lib::db::cancel::is_cancelled_error(&err));
     driver.execute_query(&db, "SELECT 1").await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Value decoding and write-back
+// ---------------------------------------------------------------------------
+
+async fn mssql_exec(driver: &MssqlDriver, db: &str, sql: &str) -> QueryResult {
+    driver
+        .execute_query(db, sql)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+}
+
+fn mssql_update(
+    db: &str,
+    tbl: &str,
+    pk: Vec<(String, serde_json::Value)>,
+    col: &str,
+    new: serde_json::Value,
+) -> DataChanges {
+    DataChanges {
+        connection_id: "test".into(),
+        database: db.into(),
+        schema: "dbo".into(),
+        table: tbl.into(),
+        updates: vec![CellChange {
+            row_index: 0,
+            column_name: col.into(),
+            old_value: serde_json::Value::Null,
+            new_value: new,
+            primary_key_values: pk,
+        }],
+        inserts: vec![],
+        deletes: vec![],
+    }
+}
+
+#[tokio::test]
+async fn mssql_exact_money_numeric_and_real_values_round_trip() {
+    use serde_json::json;
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("exactnum");
+    mssql_exec(
+        &driver,
+        &db,
+        &format!(
+            "CREATE TABLE dbo.[{tbl}] (id INT PRIMARY KEY, m MONEY, sm SMALLMONEY, \
+             n NUMERIC(38, 0), d DECIMAL(10, 3), r REAL)"
+        ),
+    )
+    .await;
+    mssql_exec(
+        &driver,
+        &db,
+        &format!(
+            "INSERT INTO dbo.[{tbl}] VALUES \
+             (1, 922337203685477.5807, 214748.3647, 99999999999999999999999999999999999999, -0.005, 0.1), \
+             (2, -1.5, 0, -1, 12.000, -2.5)"
+        ),
+    )
+    .await;
+    let data = driver
+        .fetch_rows(&db, "dbo", &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        data.rows[0],
+        vec![
+            json!(1),
+            json!("922337203685477.5807"),
+            json!("214748.3647"),
+            json!("99999999999999999999999999999999999999"),
+            json!("-0.005"),
+            json!(0.1)
+        ]
+    );
+    assert_eq!(data.rows[1][3], json!("-1"));
+    assert_eq!(data.rows[1][4], json!("12.000"));
+
+    // Saving the displayed values writes them back unchanged.
+    for (i, col) in ["m", "sm", "n", "d", "r"].iter().enumerate() {
+        driver
+            .apply_changes(&mssql_update(
+                &db,
+                &tbl,
+                vec![("id".into(), json!(1))],
+                col,
+                data.rows[0][i + 1].clone(),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("save {col}: {e}"));
+    }
+    let again = driver
+        .fetch_rows(&db, "dbo", &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(again.rows[0], data.rows[0]);
+    driver.drop_object(&db, "dbo", &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mssql_binary_values_write_back_as_bytes() {
+    use serde_json::json;
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("binwb");
+    mssql_exec(
+        &driver,
+        &db,
+        &format!("CREATE TABLE dbo.[{tbl}] (id VARBINARY(16) PRIMARY KEY, b VARBINARY(10), bn BINARY(2))"),
+    )
+    .await;
+    mssql_exec(
+        &driver,
+        &db,
+        &format!("INSERT INTO dbo.[{tbl}] VALUES (0x00ff80, 0x01, 0xabcd)"),
+    )
+    .await;
+    let data = driver
+        .fetch_rows(&db, "dbo", &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        data.rows[0],
+        vec![json!("0x00ff80"), json!("0x01"), json!("0xabcd")]
+    );
+    let key = vec![("id".to_string(), json!("0x00ff80"))];
+    driver
+        .apply_changes(&mssql_update(
+            &db,
+            &tbl,
+            key.clone(),
+            "b",
+            json!("0xdeadbeef"),
+        ))
+        .await
+        .unwrap();
+    driver
+        .apply_changes(&mssql_update(&db, &tbl, key.clone(), "bn", json!("hi")))
+        .await
+        .unwrap();
+    let r = mssql_exec(
+        &driver,
+        &db,
+        &format!("SELECT CONVERT(varchar(20), b, 2), CONVERT(varchar(20), bn, 2) FROM dbo.[{tbl}]"),
+    )
+    .await;
+    assert_eq!(r.rows[0], vec![json!("DEADBEEF"), json!("6869")]);
+    let mut del = mssql_update(&db, &tbl, vec![], "b", json!(null));
+    del.updates.clear();
+    del.deletes.push(DeleteRow {
+        primary_key_values: key,
+    });
+    driver.apply_changes(&del).await.unwrap();
+    let r = mssql_exec(&driver, &db, &format!("SELECT COUNT(*) FROM dbo.[{tbl}]")).await;
+    assert_eq!(r.rows[0][0], json!(0));
+    driver.drop_object(&db, "dbo", &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mssql_hierarchyid_shows_as_text_and_saves() {
+    use serde_json::json;
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("hier");
+    mssql_exec(
+        &driver,
+        &db,
+        &format!("CREATE TABLE dbo.[{tbl}] (id INT PRIMARY KEY, h HIERARCHYID)"),
+    )
+    .await;
+    mssql_exec(
+        &driver,
+        &db,
+        &format!("INSERT INTO dbo.[{tbl}] VALUES (1, '/1/2/'), (2, NULL)"),
+    )
+    .await;
+    let data = driver
+        .fetch_rows(&db, "dbo", &tbl, 0, 10, Vec::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(data.rows[0], vec![json!(1), json!("/1/2/")]);
+    assert_eq!(data.rows[1], vec![json!(2), json!(null)]);
+    driver
+        .apply_changes(&mssql_update(
+            &db,
+            &tbl,
+            vec![("id".into(), json!(1))],
+            "h",
+            json!("/1/3/"),
+        ))
+        .await
+        .unwrap();
+    let r = mssql_exec(
+        &driver,
+        &db,
+        &format!("SELECT h.ToString() FROM dbo.[{tbl}] WHERE id = 1"),
+    )
+    .await;
+    assert_eq!(r.rows[0][0], json!("/1/3/"));
+    // Sorting by the column still works with the rewritten select list.
+    let sorted = driver
+        .fetch_rows(
+            &db,
+            "dbo",
+            &tbl,
+            0,
+            10,
+            vec![SortSpec {
+                column: "h".into(),
+                direction: SortDirection::Desc,
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(sorted.rows.len(), 2);
+    driver.drop_object(&db, "dbo", &tbl, "TABLE").await.unwrap();
+}

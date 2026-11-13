@@ -15,6 +15,31 @@ export interface TabInfo {
   /** Active sub-tab inside a TableView ("data" | "columns" | ...).
    *  Persisted so the user comes back to the same panel they left. */
   subTab?: string;
+  /** One-shot filter for a table tab's data grid (e.g. "Jump to FK").
+   *  `nonce` changes on every request so re-opening the same table
+   *  with the same filter still re-applies it. Not persisted. */
+  initialFilter?: { column: string; value: unknown; nonce: number };
+}
+
+/** Untitled query consoles get "Query - db", "Query 2 - db", ... */
+const QUERY_TITLE_RE = /^Query(?: (\d+))? - (.*)$/;
+
+/**
+ * Title for a new query tab: the requested title when no open tab uses
+ * it yet, otherwise numbered after the highest open "Query N - target".
+ */
+export function numberedQueryTitle(tabs: TabInfo[], title: string): string {
+  const m = QUERY_TITLE_RE.exec(title);
+  if (!m || m[1]) return title;
+  const target = m[2];
+  let max = 0;
+  for (const t of tabs) {
+    if (t.type !== "query") continue;
+    const tm = QUERY_TITLE_RE.exec(t.title);
+    if (!tm || tm[2] !== target) continue;
+    max = Math.max(max, tm[1] ? Number(tm[1]) : 1);
+  }
+  return max === 0 ? title : `Query ${max + 1} - ${target}`;
 }
 
 const STORAGE_KEY = "tablio-open-tabs";
@@ -38,7 +63,8 @@ function persistTabs(tabs: TabInfo[], activeTabId: string | null) {
   if (_persistTimer) clearTimeout(_persistTimer);
   _persistTimer = setTimeout(() => {
     try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs, activeTabId }));
+      const persisted = tabs.map(({ initialFilter: _f, ...t }) => t);
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs: persisted, activeTabId }));
     } catch {}
   }, 500);
 }
@@ -111,9 +137,15 @@ export const useTabStore = create<TabState>((set, get) => ({
       // specific sub-tab (e.g. right-click "Open Inspector" on a tab whose
       // Data view is already open), we update subTab so the existing tab
       // jumps to the requested panel instead of staying where it was.
-      if (tab.subTab && tab.subTab !== existing.subTab) {
+      if ((tab.subTab && tab.subTab !== existing.subTab) || tab.initialFilter) {
         const newTabs = get().tabs.map((t) =>
-          t.id === tab.id ? { ...t, subTab: tab.subTab } : t
+          t.id === tab.id
+            ? {
+                ...t,
+                ...(tab.subTab ? { subTab: tab.subTab } : {}),
+                ...(tab.initialFilter ? { initialFilter: tab.initialFilter } : {}),
+              }
+            : t
         );
         set({ tabs: newTabs, activeTabId: tab.id });
         persistTabs(newTabs, tab.id);
@@ -123,7 +155,8 @@ export const useTabStore = create<TabState>((set, get) => ({
       persistTabs(get().tabs, tab.id);
       return;
     }
-    const newTabs = [...get().tabs, tab];
+    const title = tab.type === "query" ? numberedQueryTitle(get().tabs, tab.title) : tab.title;
+    const newTabs = [...get().tabs, title === tab.title ? tab : { ...tab, title }];
     set({ tabs: newTabs, activeTabId: tab.id });
     persistTabs(newTabs, tab.id);
   },

@@ -168,87 +168,88 @@ fn sqlite_row_to_json_values(
     col_count: usize,
 ) -> Vec<serde_json::Value> {
     let width = row.len();
-    let mut values = Vec::with_capacity(col_count);
-    for i in 0..col_count {
-        // Never index past the row's own width.
-        if i >= width {
-            values.push(serde_json::Value::Null);
-            continue;
-        }
-        let col = row.column(i);
-        let type_name = col.type_info().name();
-        let val: serde_json::Value = match type_name {
-            "BOOLEAN" => row
-                .try_get::<bool, _>(i)
-                .ok()
-                .map(serde_json::Value::Bool)
-                .unwrap_or(serde_json::Value::Null),
-            "INTEGER" => row
-                .try_get::<i64, _>(i)
-                .ok()
-                .map(i64_to_json)
-                .unwrap_or_else(|| decode_dynamic_sqlite_cell(row, i)),
-            "REAL" => row
-                .try_get::<f64, _>(i)
-                .ok()
-                .and_then(serde_json::Number::from_f64)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
-            "BLOB" => row
-                .try_get::<Option<Vec<u8>>, _>(i)
-                .ok()
-                .flatten()
-                .map(|b| {
-                    let hex_str: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
-                    serde_json::Value::String(format!("X'{}'", hex_str))
-                })
-                .unwrap_or(serde_json::Value::Null),
-            "TEXT" => row
-                .try_get::<String, _>(i)
-                .ok()
-                .map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null),
-            // Computed columns (view bodies, SELECT-list expressions
-            // like `strftime() - if(...)`, aggregates) have no declared
-            // type. SQLite gives sqlx a non-static type name and the
-            // earlier branches don't fire. The old fallback tried to
-            // decode the cell as `String` only, which silently failed
-            // for integer / real values and rendered them as NULL —
-            // that's the regression Dialga hit on issue #126 after
-            // v0.4.8 (every cell of his `create view f as select ...`
-            // came back null).
-            //
-            // Probe each concrete sqlx decoder in turn. Order matters:
-            // integer first so a `1+1` cell stays as the number `2`
-            // rather than the string `"2"`; real second so `1.5*2`
-            // stays a number rather than getting truncated to `3` by
-            // i64; string third; explicit null last.
-            _ => decode_dynamic_sqlite_cell(row, i),
-        };
-        values.push(val);
-    }
-    values
+    (0..col_count)
+        .map(|i| {
+            // Never index past the row's own width.
+            if i < width {
+                sqlite_cell_to_json(row, i)
+            } else {
+                serde_json::Value::Null
+            }
+        })
+        .collect()
 }
 
-/// Per-cell decoder for SQLite columns whose declared type isn't one
-/// of the static affinities (`INTEGER` / `REAL` / `TEXT` / `BLOB` /
-/// `BOOLEAN`). The runtime type is inferred from whichever sqlx
-/// decoder accepts the cell first.
+/// One SQLite cell as JSON.
+///
+/// SQLite is dynamically typed: the declared column type is only an
+/// affinity, and any cell can hold any storage class (a REAL column can
+/// contain text, a view column has no declared type at all). So the
+/// cell is decoded by its *runtime* storage class, and the declared
+/// type only decides whether an integer 0/1 is shown as a boolean.
+/// NULL is checked first; the typed decoders would otherwise turn a
+/// NULL into `0` / `0.0` / `""` / `false`.
+fn sqlite_cell_to_json(row: &sqlx::sqlite::SqliteRow, i: usize) -> serde_json::Value {
+    use serde_json::Value;
+    use sqlx::ValueRef;
+
+    let raw = match row.try_get_raw(i) {
+        Ok(raw) => raw,
+        Err(_) => return Value::Null,
+    };
+    if raw.is_null() {
+        return Value::Null;
+    }
+    let storage = raw.type_info().name().to_string();
+    let declared_bool = row.column(i).type_info().name() == "BOOLEAN";
+    let decoded = match storage.as_str() {
+        "INTEGER" | "BOOLEAN" => row.try_get_unchecked::<i64, _>(i).ok().map(|n| {
+            // A BOOLEAN column can hold any integer; only 0/1 are
+            // booleans, anything else stays a number so saving the row
+            // does not rewrite it to 1.
+            match (declared_bool, n) {
+                (true, 0) => Value::Bool(false),
+                (true, 1) => Value::Bool(true),
+                _ => i64_to_json(n),
+            }
+        }),
+        "REAL" => row
+            .try_get_unchecked::<f64, _>(i)
+            .ok()
+            .map(crate::util::values::f64_to_json),
+        "TEXT" => row
+            .try_get_unchecked::<String, _>(i)
+            .ok()
+            .map(Value::String),
+        "BLOB" => row
+            .try_get_unchecked::<Vec<u8>, _>(i)
+            .ok()
+            .map(|b| sqlite_blob_json(&b)),
+        _ => None,
+    };
+    decoded.unwrap_or_else(|| decode_dynamic_sqlite_cell(row, i))
+}
+
+fn sqlite_blob_json(bytes: &[u8]) -> serde_json::Value {
+    serde_json::Value::String(format!("X'{}'", crate::util::values::hex_encode(bytes)))
+}
+
+/// Last-resort decoder: whichever sqlx decoder accepts the cell first.
+/// Order matters: integer first so a `1+1` cell stays the number `2`
+/// rather than the string `"2"`; real second so `1.5*2` is not
+/// truncated to `3`; then string, blob, and NULL last.
 fn decode_dynamic_sqlite_cell(row: &sqlx::sqlite::SqliteRow, i: usize) -> serde_json::Value {
     if let Ok(Some(n)) = row.try_get::<Option<i64>, _>(i) {
         return i64_to_json(n);
     }
     if let Ok(Some(n)) = row.try_get::<Option<f64>, _>(i) {
-        if let Some(num) = serde_json::Number::from_f64(n) {
-            return serde_json::Value::Number(num);
-        }
+        return crate::util::values::f64_to_json(n);
     }
     if let Ok(Some(s)) = row.try_get::<Option<String>, _>(i) {
         return serde_json::Value::String(s);
     }
     if let Ok(Some(b)) = row.try_get::<Option<Vec<u8>>, _>(i) {
-        let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
-        return serde_json::Value::String(format!("X'{}'", hex));
+        return sqlite_blob_json(&b);
     }
     serde_json::Value::Null
 }
@@ -340,9 +341,56 @@ fn json_to_sql_literal(val: &serde_json::Value) -> String {
         serde_json::Value::Null => "NULL".to_string(),
         serde_json::Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        _ => format!("'{}'", val.to_string().replace('\'', "''")),
+        serde_json::Value::String(s) => sqlite_text_literal(s),
+        _ => sqlite_text_literal(&val.to_string()),
     }
+}
+
+/// A quoted SQLite text literal. SQLite's tokenizer stops at a NUL
+/// byte, so text containing NULs is spliced together with `char(0)`.
+fn sqlite_text_literal(s: &str) -> String {
+    if !s.contains('\0') {
+        return format!("'{}'", s.replace('\'', "''"));
+    }
+    let parts: Vec<String> = s
+        .split('\0')
+        .map(|p| format!("'{}'", p.replace('\'', "''")))
+        .collect();
+    format!("({})", parts.join(" || char(0) || "))
+}
+
+/// True when SQLite gives the declared type BLOB affinity: the type
+/// mentions BLOB, or there is no declared type at all.
+fn sqlite_is_blob_type(declared: &str) -> bool {
+    let t = declared.trim();
+    t.is_empty() || t.to_ascii_uppercase().contains("BLOB")
+}
+
+/// Like `json_to_sql_literal`, but uses the column's declared type: a
+/// string for a BLOB column (shown as `X'00ff'`) is written back as a
+/// blob literal holding those bytes instead of the display text.
+fn typed_sql_literal(declared: Option<&str>, val: &serde_json::Value) -> Result<String> {
+    use crate::util::values::{parse_hex_display, HexDisplay};
+    if let (Some(t), serde_json::Value::String(s)) = (declared, val) {
+        if sqlite_is_blob_type(t) {
+            if let Some(hex) =
+                parse_hex_display(s, HexDisplay::SqlQuoted).map_err(|e| anyhow::anyhow!(e))?
+            {
+                return Ok(format!("X'{}'", hex));
+            }
+        }
+        // ±Infinity is sent as text (JSON has no infinity); write the
+        // overflowing literal SQLite reads back as an infinite REAL.
+        let upper = t.to_ascii_uppercase();
+        if upper.contains("REAL") || upper.contains("FLOA") || upper.contains("DOUB") {
+            match s.trim() {
+                "Infinity" | "+Infinity" | "inf" => return Ok("1e999".to_string()),
+                "-Infinity" | "-inf" => return Ok("-1e999".to_string()),
+                _ => {}
+            }
+        }
+    }
+    Ok(json_to_sql_literal(val))
 }
 
 /// Strict — types/operators must never legitimately contain `'`.
@@ -1108,6 +1156,18 @@ impl DatabaseDriver for SqliteDriver {
     }
 
     async fn apply_changes(&self, changes: &DataChanges) -> Result<()> {
+        // Declared column types decide how a value is written (a BLOB
+        // shown as `X'..'` must be written back as bytes, not text).
+        let declared: std::collections::HashMap<String, String> = self
+            .list_columns(&changes.database, &changes.schema, &changes.table)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.name, c.data_type))
+            .collect();
+        let lit = |col: &str, val: &serde_json::Value| -> Result<String> {
+            typed_sql_literal(declared.get(col).map(String::as_str), val)
+        };
         let mut tx = self.pool.begin().await?;
 
         for update in &changes.updates {
@@ -1117,13 +1177,13 @@ impl DatabaseDriver for SqliteDriver {
             let set_clause = format!(
                 "{} = {}",
                 quote_ident(&update.column_name),
-                json_to_sql_literal(&update.new_value)
+                lit(&update.column_name, &update.new_value)?
             );
             let where_clause: Vec<String> = update
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_sql_literal(val)))
-                .collect();
+                .map(|(col, val)| Ok(format!("{} = {}", quote_ident(col), lit(col, val)?)))
+                .collect::<Result<_>>()?;
             let sql = format!(
                 "UPDATE {} SET {} WHERE {}",
                 quote_ident(&changes.table),
@@ -1141,8 +1201,8 @@ impl DatabaseDriver for SqliteDriver {
             let vals: Vec<String> = insert
                 .values
                 .iter()
-                .map(|(_, v)| json_to_sql_literal(v))
-                .collect();
+                .map(|(c, v)| lit(c, v))
+                .collect::<Result<_>>()?;
             let sql = format!(
                 "INSERT INTO {} ({}) VALUES ({})",
                 quote_ident(&changes.table),
@@ -1161,8 +1221,8 @@ impl DatabaseDriver for SqliteDriver {
             let where_clause: Vec<String> = delete
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| format!("{} = {}", quote_ident(col), json_to_sql_literal(val)))
-                .collect();
+                .map(|(col, val)| Ok(format!("{} = {}", quote_ident(col), lit(col, val)?)))
+                .collect::<Result<_>>()?;
             let sql = format!(
                 "DELETE FROM {} WHERE {}",
                 quote_ident(&changes.table),
@@ -1660,5 +1720,29 @@ mod tests {
             Ok(v) => assert_eq!(v, 1),
             Err(e) => panic!("tilde inside sqlite: URL should expand and open: {e:#}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod value_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn text_with_nul_is_spliced_with_char0() {
+        assert_eq!(sqlite_text_literal("a\0b'c"), "('a' || char(0) || 'b''c')");
+        assert_eq!(sqlite_text_literal("plain"), "'plain'");
+    }
+
+    #[test]
+    fn typed_literals_for_blob_and_real_columns() {
+        let lit = |t: &str, v| typed_sql_literal(Some(t), &v).unwrap();
+        assert_eq!(lit("BLOB", json!("X'00FF'")), "X'00ff'");
+        assert_eq!(lit("", json!("X'01'")), "X'01'");
+        assert_eq!(lit("BLOB", json!("text")), "'text'");
+        assert_eq!(lit("TEXT", json!("X'01'")), "'X''01'''");
+        assert_eq!(lit("REAL", json!("Infinity")), "1e999");
+        assert_eq!(lit("DOUBLE", json!("-Infinity")), "-1e999");
+        assert!(typed_sql_literal(Some("BLOB"), &json!("X'0'")).is_err());
     }
 }

@@ -261,8 +261,9 @@ export function ColumnOrganizer({ columns, settings, onChange, foreignKeyColumns
         className={`btn-ghost ${hiddenCount > 0 ? "active-filter" : ""}`}
         onClick={() => setOpen((v) => !v)}
         title="Organize Columns"
+        aria-label="Columns"
       >
-        <Columns3 size={14} /> Columns{hiddenCount > 0 ? ` (${columns.length - pkNames.size - hiddenCount}/${columns.length - pkNames.size})` : ""}
+        <Columns3 size={14} /> <span className="btn-label">Columns{hiddenCount > 0 ? ` (${columns.length - pkNames.size - hiddenCount}/${columns.length - pkNames.size})` : ""}</span>
       </button>
       {open && (
         <div className="col-organizer-dropdown">

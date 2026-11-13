@@ -325,10 +325,10 @@ fn column_data_to_json(data: &ColumnData<'_>) -> serde_json::Value {
             .map(crate::util::sql::i64_to_json)
             .unwrap_or(serde_json::Value::Null),
         ColumnData::F32(v) => v
-            .map(|x| serde_json::json!(x))
+            .map(crate::util::values::f32_to_json)
             .unwrap_or(serde_json::Value::Null),
         ColumnData::F64(v) => v
-            .map(|x| serde_json::json!(x))
+            .map(crate::util::values::f64_to_json)
             .unwrap_or(serde_json::Value::Null),
         ColumnData::Bit(v) => v
             .map(|x| serde_json::json!(x))
@@ -353,7 +353,7 @@ fn column_data_to_json(data: &ColumnData<'_>) -> serde_json::Value {
             .unwrap_or(serde_json::Value::Null),
         ColumnData::Numeric(v) => v
             .as_ref()
-            .map(|n: &Numeric| serde_json::Value::String(format!("{}", n)))
+            .map(|n: &Numeric| serde_json::Value::String(numeric_text(n)))
             .unwrap_or(serde_json::Value::Null),
         ColumnData::Xml(v) => v
             .as_ref()
@@ -378,6 +378,26 @@ fn column_data_to_json(data: &ColumnData<'_>) -> serde_json::Value {
             .map(|d| serde_json::Value::String(tds_time::datetimeoffset(d)))
             .unwrap_or(serde_json::Value::Null),
     }
+}
+
+/// Exact decimal text of a NUMERIC / DECIMAL value. tiberius' `Display`
+/// always prints a fractional part (`999` with scale 0 becomes
+/// `999.0`), which SQL Server then rejects as out of range for a
+/// `numeric(p, 0)` column when the value is saved back.
+fn numeric_text(n: &Numeric) -> String {
+    let digits = n.value().unsigned_abs().to_string();
+    let scale = n.scale() as usize;
+    let sign = if n.value() < 0 { "-" } else { "" };
+    if scale == 0 {
+        return format!("{}{}", sign, digits);
+    }
+    let padded = if digits.len() <= scale {
+        format!("{}{}", "0".repeat(scale - digits.len() + 1), digits)
+    } else {
+        digits
+    };
+    let (int_part, frac_part) = padded.split_at(padded.len() - scale);
+    format!("{}{}.{}", sign, int_part, frac_part)
 }
 
 /// Decode a `serde_json::Value` cell as `i64`, accepting integer numbers,
@@ -441,14 +461,25 @@ fn no_row_matched_guard(action: &str, pk: &[(String, serde_json::Value)]) -> Str
 /// `YYYY-MM-DD HH:MM:SS` strings for datetime / smalldatetime columns
 /// use the ISO 8601 `T` separator, the only form those types parse
 /// independently of the session language / DATEFORMAT.
-fn typed_mssql_literal(data_type: Option<&str>, val: &serde_json::Value) -> String {
+///
+/// A string for a `binary` / `varbinary` / `image` column (shown as
+/// `0x00ff`) becomes an unquoted `0x…` literal, since SQL Server does not
+/// convert `nvarchar` to `varbinary` implicitly; text not in that format
+/// is written as its UTF-8 bytes.
+fn typed_mssql_literal(data_type: Option<&str>, val: &serde_json::Value) -> Result<String> {
     if let (Some(t), serde_json::Value::String(s)) = (data_type, val) {
-        if crate::util::sql::is_numeric_type_name(t) {
+        let lower = t.to_ascii_lowercase();
+        if crate::util::sql::is_numeric_type_name(t) || lower == "money" || lower == "smallmoney" {
             if let Some(n) = crate::util::sql::numeric_literal(s) {
-                return n.to_string();
+                return Ok(n.to_string());
             }
         }
-        let lower = t.to_ascii_lowercase();
+        if matches!(lower.as_str(), "binary" | "varbinary" | "image") {
+            let hex =
+                crate::util::values::binary_value_hex(s, crate::util::values::HexDisplay::ZeroX)
+                    .map_err(|e| anyhow!(e))?;
+            return Ok(format!("0x{}", hex));
+        }
         if lower == "datetime" || lower == "smalldatetime" {
             let b = s.as_bytes();
             let looks_iso = b.len() >= 19
@@ -462,11 +493,48 @@ fn typed_mssql_literal(data_type: Option<&str>, val: &serde_json::Value) -> Stri
                     .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit());
             if looks_iso {
                 let iso = format!("{}T{}", &s[..10], &s[11..]);
-                return format!("N'{}'", iso.replace('\'', "''"));
+                return Ok(format!("N'{}'", iso.replace('\'', "''")));
             }
         }
     }
-    json_to_mssql_literal(val)
+    Ok(json_to_mssql_literal(val))
+}
+
+/// Select list for the data grid. `*` except for types whose TDS value
+/// cannot be shown or saved as is:
+///  * `money` / `smallmoney` arrive as f64 and lose their last digits
+///    (922337203685477.5807 shows as ...477.6 and overflows on save), so
+///    they are cast to an exact `decimal(19, 4)`;
+///  * `hierarchyid` arrives as its binary encoding, so its canonical
+///    text (`/1/2/`) is selected instead; SQL Server converts that text
+///    back to `hierarchyid` on save.
+///
+/// The original column names are kept as aliases, and `ORDER BY` on such
+/// a name sorts by the alias, which orders money the same way; a
+/// hierarchyid sorts by its text instead of depth-first, which is an
+/// acceptable trade for being able to read and edit it.
+fn grid_select_list(columns: &[ColumnInfo]) -> String {
+    let needs_rewrite = |c: &ColumnInfo| {
+        matches!(
+            c.data_type.to_ascii_lowercase().as_str(),
+            "money" | "smallmoney" | "hierarchyid"
+        )
+    };
+    if !columns.iter().any(needs_rewrite) {
+        return "*".to_string();
+    }
+    columns
+        .iter()
+        .map(|c| {
+            let col = bracket(&c.name);
+            match c.data_type.to_ascii_lowercase().as_str() {
+                "money" | "smallmoney" => format!("CAST({col} AS decimal(19, 4)) AS {col}"),
+                "hierarchyid" => format!("{col}.ToString() AS {col}"),
+                _ => col,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 type MssqlClient = Client<MssqlStream>;
@@ -1327,8 +1395,13 @@ impl DatabaseDriver for MssqlDriver {
             .unwrap_or(0);
 
         let data_sql = format!(
-            "SELECT * FROM {}{} ORDER BY {} OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
-            fq, where_clause, order, offset, limit
+            "SELECT {} FROM {}{} ORDER BY {} OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
+            grid_select_list(&columns),
+            fq,
+            where_clause,
+            order,
+            offset,
+            limit
         );
         let (select_names, row_values) = self.run_select(&data_sql).await?;
 
@@ -1553,7 +1626,7 @@ impl DatabaseDriver for MssqlDriver {
             .into_iter()
             .map(|c| (c.name, c.data_type))
             .collect();
-        let lit = |col: &str, val: &serde_json::Value| -> String {
+        let lit = |col: &str, val: &serde_json::Value| -> Result<String> {
             typed_mssql_literal(col_types.get(col).map(String::as_str), val)
         };
         let mut stmts = Vec::new();
@@ -1565,13 +1638,13 @@ impl DatabaseDriver for MssqlDriver {
             let set_clause = format!(
                 "{} = {}",
                 bracket(&update.column_name),
-                lit(&update.column_name, &update.new_value)
+                lit(&update.column_name, &update.new_value)?
             );
             let where_clause: Vec<String> = update
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| format!("{} = {}", bracket(col), lit(col, val)))
-                .collect();
+                .map(|(col, val)| Ok(format!("{} = {}", bracket(col), lit(col, val)?)))
+                .collect::<Result<_>>()?;
             stmts.push(format!(
                 "UPDATE {} SET {} WHERE {};",
                 fq,
@@ -1583,7 +1656,11 @@ impl DatabaseDriver for MssqlDriver {
         }
         for insert in &changes.inserts {
             let cols: Vec<String> = insert.values.iter().map(|(n, _)| bracket(n)).collect();
-            let vals: Vec<String> = insert.values.iter().map(|(c, v)| lit(c, v)).collect();
+            let vals: Vec<String> = insert
+                .values
+                .iter()
+                .map(|(c, v)| lit(c, v))
+                .collect::<Result<_>>()?;
             stmts.push(format!(
                 "INSERT INTO {} ({}) VALUES ({});",
                 fq,
@@ -1598,8 +1675,8 @@ impl DatabaseDriver for MssqlDriver {
             let where_clause: Vec<String> = delete
                 .primary_key_values
                 .iter()
-                .map(|(col, val)| format!("{} = {}", bracket(col), lit(col, val)))
-                .collect();
+                .map(|(col, val)| Ok(format!("{} = {}", bracket(col), lit(col, val)?)))
+                .collect::<Result<_>>()?;
             stmts.push(format!(
                 "DELETE FROM {} WHERE {};",
                 fq,
@@ -2521,5 +2598,62 @@ mod tests {
     fn three_part_table_with_injection_attempt() {
         let result = three_part_table("db]; DROP TABLE x; --", "dbo", "t");
         assert_eq!(result, "[db]]; DROP TABLE x; --].[dbo].[t]");
+    }
+}
+
+#[cfg(test)]
+mod value_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn numeric_text_is_exact() {
+        let t = |v: i128, s: u8| numeric_text(&Numeric::new_with_scale(v, s));
+        assert_eq!(t(999, 0), "999");
+        assert_eq!(t(-1, 0), "-1");
+        assert_eq!(t(9_223_372_036_854_775_807, 4), "922337203685477.5807");
+        assert_eq!(t(-5, 3), "-0.005");
+        assert_eq!(t(12000, 3), "12.000");
+        assert_eq!(t(0, 2), "0.00");
+    }
+
+    #[test]
+    fn float_cells_use_shortest_repr() {
+        assert_eq!(column_data_to_json(&ColumnData::F32(Some(0.1))), json!(0.1));
+        assert_eq!(
+            column_data_to_json(&ColumnData::F64(Some(f64::INFINITY))),
+            json!("Infinity")
+        );
+    }
+
+    #[test]
+    fn binary_and_money_literals() {
+        let lit = |t: &str, v| typed_mssql_literal(Some(t), &v).unwrap();
+        assert_eq!(lit("varbinary", json!("0x00FF80")), "0x00ff80");
+        assert_eq!(lit("binary", json!("hi")), "0x6869");
+        assert_eq!(lit("image", json!(null)), "NULL");
+        assert_eq!(
+            lit("money", json!("922337203685477.5807")),
+            "922337203685477.5807"
+        );
+        assert_eq!(lit("nvarchar", json!("0x00")), "N'0x00'");
+    }
+
+    #[test]
+    fn grid_select_list_rewrites_only_when_needed() {
+        let col = |n: &str, t: &str| ColumnInfo {
+            name: n.into(),
+            data_type: t.into(),
+            is_nullable: true,
+            is_primary_key: false,
+            default_value: None,
+            ordinal_position: 0,
+            is_auto_generated: false,
+        };
+        assert_eq!(grid_select_list(&[col("a", "int")]), "*");
+        assert_eq!(
+            grid_select_list(&[col("a", "int"), col("m", "money"), col("h", "hierarchyid")]),
+            "[a], CAST([m] AS decimal(19, 4)) AS [m], [h].ToString() AS [h]"
+        );
     }
 }
