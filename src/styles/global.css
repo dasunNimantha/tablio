@@ -82,8 +82,8 @@
   --bg-selected: rgba(99, 152, 255, 0.14);
 
   --text-primary: #e4e4e9;
-  --text-secondary: #a8a8b4;
-  --text-muted: #6e6e7c;
+  --text-secondary: #a9a9b5;
+  --text-muted: #9999a3;
   --text-inverse: #111114;
 
   --border: rgba(255, 255, 255, 0.08);
@@ -140,7 +140,7 @@
   --cell-modified: rgba(245, 183, 49, 0.15);
   --cell-inserted: rgba(61, 214, 140, 0.15);
   --cell-deleted: rgba(240, 100, 100, 0.13);
-  --cell-null: #7c7c8a;
+  --cell-null: #9999a3;
 
   --gutter-xs: 4px;
   --gutter-sm: 8px;

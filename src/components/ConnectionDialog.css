@@ -145,6 +145,11 @@
   -webkit-box-orient: vertical;
 }
 
+/* Muted text isn't 4.5:1 on the active item's accent tint. */
+.connection-nav-item--active .connection-nav-item__description {
+  color: var(--text-secondary);
+}
+
 .connection-nav-item__error {
   display: inline-flex;
   align-items: center;

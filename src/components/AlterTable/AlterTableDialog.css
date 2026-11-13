@@ -493,7 +493,8 @@
   padding: 0 8px;
   border-radius: 999px;
   background: var(--accent-muted);
-  color: var(--accent);
+  /* Accent text on its own tint is below 4.5:1 in dark themes. */
+  color: color-mix(in srgb, var(--accent) 65%, var(--text-primary));
   font-size: 10px;
   font-weight: 700;
 }

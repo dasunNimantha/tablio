@@ -94,12 +94,12 @@
   flex-shrink: 0;
   line-height: 1;
 }
-.pv-chip-strategy-range { background: rgba(91, 155, 213, 0.18); color: #8ab8e0; }
-.pv-chip-strategy-list  { background: rgba(196, 123, 176, 0.18); color: #d4a4c5; }
-.pv-chip-strategy-hash  { background: rgba(232, 168, 56, 0.18); color: #e6c285; }
+.pv-chip-strategy-range { background: rgba(91, 155, 213, 0.18); color: color-mix(in srgb, #8ab8e0 45%, var(--text-primary)); }
+.pv-chip-strategy-list  { background: rgba(196, 123, 176, 0.18); color: color-mix(in srgb, #d4a4c5 45%, var(--text-primary)); }
+.pv-chip-strategy-hash  { background: rgba(232, 168, 56, 0.18); color: color-mix(in srgb, #e6c285 45%, var(--text-primary)); }
 .pv-chip-default {
   background: rgba(232, 168, 56, 0.14);
-  color: #e6c285;
+  color: color-mix(in srgb, #e6c285 45%, var(--text-primary));
   text-transform: uppercase;
 }
 .pv-chip-inline {
