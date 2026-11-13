@@ -571,7 +571,12 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "lts/*"
+          # Node 26 on Windows aborts inside Buffer.byteLength while the Vite
+          # dev server sends its multi-megabyte pre-bundled modules
+          # ("Lazy deopt after a fast API call with return value is
+          # unsupported"), killing the server mid-suite. Dev/test only;
+          # the shipped app doesn't run Node.
+          node-version: ${{ matrix.os == 'windows-latest' && '24' || 'lts/*' }}
           cache: "npm"
 
       - run: npm ci --no-audit --no-fund
