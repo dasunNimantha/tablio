@@ -1,6 +1,6 @@
 .create-table-dialog {
   width: 700px;
-  max-width: 92vw;
+  max-width: calc(92 * var(--vw));
 }
 
 .create-table-columns {
@@ -43,8 +43,8 @@
 }
 
 .create-table-column-row select option {
-  background: #25252b;
-  color: #e0e0e8;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
   padding: 6px 8px;
 }
 
@@ -83,4 +83,22 @@
   color: var(--text-secondary);
   white-space: pre-wrap;
   line-height: 1.6;
+}
+
+.create-table-dialog .form-group-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.create-table-column-row input.input-invalid {
+  border-color: var(--error);
+}
+
+.create-table-columns-error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--error);
 }

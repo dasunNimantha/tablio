@@ -7,35 +7,15 @@
  */
 
 import { AlterTableOperation, ColumnInfo } from "../../lib/tauri";
+import { columnTypesFor } from "../../lib/columnTypes";
+import { quoteIdent, type DbType } from "../../lib/sqlDialect";
 
 /**
- * Catalog of canonical PostgreSQL data types offered in the
- * column-type select. Tablio's other engines map onto these by
- * convention — there's deliberately no per-engine version of the
- * list yet (tracked in a separate follow-up).
+ * Catalog of canonical PostgreSQL data types. Kept for callers that
+ * want the PG list explicitly; the editor uses the per-dialect
+ * catalog from `lib/columnTypes`.
  */
-export const PG_TYPES = [
-  "integer",
-  "bigint",
-  "smallint",
-  "serial",
-  "bigserial",
-  "text",
-  "varchar(255)",
-  "char(1)",
-  "boolean",
-  "timestamp",
-  "timestamptz",
-  "date",
-  "time",
-  "numeric",
-  "real",
-  "double precision",
-  "uuid",
-  "json",
-  "jsonb",
-  "bytea",
-];
+export const PG_TYPES = columnTypesFor("postgres");
 
 /**
  * A column the user has added to the table but not yet saved.
@@ -126,9 +106,10 @@ export function applyOperations(
 
 /**
  * Render a human-readable preview of the SQL the editor would emit on
- * Apply. Quotes identifiers Postgres-style (`"name"`) — the actual
- * server-side execution goes through the engine-specific code path
- * in the Rust backend, so this preview is informational only.
+ * Apply. Identifiers are quoted for `dbType` (Postgres-style when
+ * omitted); the actual server-side execution goes through the
+ * engine-specific code path in the Rust backend, so this preview is
+ * informational only.
  */
 export function generatePreviewSql(
   schema: string,
@@ -136,41 +117,46 @@ export function generatePreviewSql(
   tableNameNew: string | null,
   operations: AlterTableOperation[],
   pendingNewColumns: PendingNewColumn[],
+  dbType?: DbType,
 ): string {
   const parts: string[] = [];
-  let currentQual = `"${schema}"."${tableName}"`;
+  const q = (name: string) => quoteIdent(dbType, name);
+  const qualify = (t: string) => (dbType === "sqlite" ? q(t) : `${q(schema)}.${q(t)}`);
+  // SQL Server and CQL spell it `ADD <col>`, everyone else `ADD COLUMN`.
+  const addKw = dbType === "mssql" || dbType === "cassandra" ? "ADD" : "ADD COLUMN";
+  let currentQual = qualify(tableName);
 
   if (tableNameNew && tableNameNew !== tableName) {
-    parts.push(`ALTER TABLE ${currentQual} RENAME TO "${tableNameNew}";`);
-    currentQual = `"${schema}"."${tableNameNew}"`;
+    parts.push(`ALTER TABLE ${currentQual} RENAME TO ${q(tableNameNew)};`);
+    currentQual = qualify(tableNameNew);
   }
 
   for (const op of operations) {
     switch (op.op) {
       case "add_column":
         if (op.column) {
-          let def = `"${op.column.name}" ${op.column.data_type}`;
+          let def = `${q(op.column.name)} ${op.column.data_type}`;
           if (!op.column.is_nullable) def += " NOT NULL";
           if (op.column.default_value) def += ` DEFAULT ${op.column.default_value}`;
-          parts.push(`ALTER TABLE ${currentQual} ADD COLUMN ${def};`);
+          parts.push(`ALTER TABLE ${currentQual} ${addKw} ${def};`);
         }
         break;
       case "drop_column":
         if (op.column_name) {
-          parts.push(`ALTER TABLE ${currentQual} DROP COLUMN "${op.column_name}";`);
+          parts.push(`ALTER TABLE ${currentQual} DROP COLUMN ${q(op.column_name)};`);
         }
         break;
       case "rename_column":
         if (op.old_name && op.new_name) {
           parts.push(
-            `ALTER TABLE ${currentQual} RENAME COLUMN "${op.old_name}" TO "${op.new_name}";`,
+            `ALTER TABLE ${currentQual} RENAME COLUMN ${q(op.old_name)} TO ${q(op.new_name)};`,
           );
         }
         break;
       case "change_type":
         if (op.column_name && op.new_type) {
           parts.push(
-            `ALTER TABLE ${currentQual} ALTER COLUMN "${op.column_name}" TYPE ${op.new_type};`,
+            `ALTER TABLE ${currentQual} ALTER COLUMN ${q(op.column_name)} TYPE ${op.new_type};`,
           );
         }
         break;
@@ -178,7 +164,7 @@ export function generatePreviewSql(
         if (op.column_name && op.nullable !== undefined) {
           const action = op.nullable ? "DROP NOT NULL" : "SET NOT NULL";
           parts.push(
-            `ALTER TABLE ${currentQual} ALTER COLUMN "${op.column_name}" ${action};`,
+            `ALTER TABLE ${currentQual} ALTER COLUMN ${q(op.column_name)} ${action};`,
           );
         }
         break;
@@ -189,7 +175,7 @@ export function generatePreviewSql(
               ? `SET DEFAULT ${op.default_value}`
               : "DROP DEFAULT";
           parts.push(
-            `ALTER TABLE ${currentQual} ALTER COLUMN "${op.column_name}" ${def};`,
+            `ALTER TABLE ${currentQual} ALTER COLUMN ${q(op.column_name)} ${def};`,
           );
         }
         break;
@@ -198,10 +184,10 @@ export function generatePreviewSql(
 
   for (const col of pendingNewColumns) {
     if (!col.name.trim()) continue;
-    let def = `"${col.name}" ${col.data_type}`;
+    let def = `${q(col.name)} ${col.data_type}`;
     if (!col.is_nullable) def += " NOT NULL";
     if (col.default_value) def += ` DEFAULT ${col.default_value}`;
-    parts.push(`ALTER TABLE ${currentQual} ADD COLUMN ${def};`);
+    parts.push(`ALTER TABLE ${currentQual} ${addKw} ${def};`);
   }
 
   return parts.length > 0 ? parts.join("\n") : "-- No changes";

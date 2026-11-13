@@ -316,3 +316,25 @@ describe("PG_TYPES", () => {
     expect(PG_TYPES.length).toBeGreaterThan(10);
   });
 });
+
+describe("generatePreviewSql dialect quoting", () => {
+  const pending = [{ name: "note", data_type: "NVARCHAR(255)", is_nullable: true, default_value: "" }];
+
+  it("uses brackets and ADD on MSSQL", () => {
+    expect(generatePreviewSql("dbo", "t", null, [{ op: "drop_column", column_name: "old" }], pending, "mssql")).toBe(
+      "ALTER TABLE [dbo].[t] DROP COLUMN [old];\nALTER TABLE [dbo].[t] ADD [note] NVARCHAR(255);",
+    );
+  });
+
+  it("uses backticks on MySQL", () => {
+    expect(generatePreviewSql("shop", "t", "t2", [], [], "mysql")).toBe(
+      "ALTER TABLE `shop`.`t` RENAME TO `t2`;",
+    );
+  });
+
+  it("keeps Postgres quoting when no dialect is given", () => {
+    expect(generatePreviewSql("public", "t", null, [], pending)).toBe(
+      'ALTER TABLE "public"."t" ADD COLUMN "note" NVARCHAR(255);',
+    );
+  });
+});

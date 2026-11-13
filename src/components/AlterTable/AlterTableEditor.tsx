@@ -1,13 +1,14 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, useId } from "react";
 import { api, AlterTableOperation, ColumnInfo } from "../../lib/tauri";
 import { X, Plus, Loader2, Eye, EyeOff, Search } from "lucide-react";
 import {
   applyOperations,
   generatePreviewSql,
   reorderOperations,
-  PG_TYPES,
   type PendingNewColumn,
 } from "./operations";
+import { columnTypesFor, defaultColumnType } from "../../lib/columnTypes";
+import { useConnectionStore } from "../../stores/connectionStore";
 import {
   useAlterTableDraftStore,
   draftKey as makeDraftKey,
@@ -15,14 +16,14 @@ import {
 import { CustomSelect } from "../CustomSelect/CustomSelect";
 
 /**
- * Build a {value, label} option list for the type CustomSelect. If
- * the column's current type isn't in the curated PG_TYPES catalog
- * (varchar(50), numeric(10,2), custom domains, …) we prepend it so
- * the trigger always shows a valid selected value.
+ * Build a {value, label} option list for the type CustomSelect from
+ * the connection dialect's catalog. If the column's current type isn't
+ * in it (varchar(50), numeric(10,2), custom domains, …) we prepend it
+ * so the trigger always shows a valid selected value.
  */
-function buildTypeOptions(currentType: string) {
-  const has = !currentType || PG_TYPES.includes(currentType);
-  const list = has ? PG_TYPES : [currentType, ...PG_TYPES];
+function buildTypeOptions(catalog: string[], currentType: string) {
+  const has = !currentType || catalog.includes(currentType);
+  const list = has ? catalog : [currentType, ...catalog];
   return list.map((t) => ({ value: t, label: t }));
 }
 
@@ -62,6 +63,9 @@ interface Props {
   /** Fired on user-initiated Discard / Cancel. */
   onDiscard: () => void;
   variant: AlterTableEditorVariant;
+  /** Reports whether there are unsaved changes / a save in flight, so
+   *  the modal wrapper can guard overlay clicks and Escape. */
+  onStateChange?: (state: { dirty: boolean; busy: boolean }) => void;
 }
 
 export function AlterTableEditor({
@@ -73,7 +77,9 @@ export function AlterTableEditor({
   onSaved,
   onDiscard,
   variant,
+  onStateChange,
 }: Props) {
+  const idBase = useId();
   // ---------------------------------------------------------------
   // Per-table draft persistence (issue #59).
   //
@@ -84,6 +90,10 @@ export function AlterTableEditor({
   // modal, switching tabs, or remounting via the in-tab variant all
   // pick up where the user left off.
   // ---------------------------------------------------------------
+  const dbType = useConnectionStore(
+    (s) => s.connections.find((c) => c.id === connectionId)?.db_type,
+  );
+  const typeCatalog = columnTypesFor(dbType);
   const draftKey = makeDraftKey(connectionId, database, schema, tableName);
   const draftFromStore = useAlterTableDraftStore((s) => s.drafts[draftKey]);
   const setDraft = useAlterTableDraftStore((s) => s.setDraft);
@@ -248,12 +258,17 @@ export function AlterTableEditor({
     tableNameLocal !== tableName ? tableNameLocal : null,
     operations,
     pendingNewColumns,
+    dbType,
   );
 
   const hasChanges =
     operations.length > 0 ||
     pendingNewColumns.some((c) => c.name.trim()) ||
     tableNameLocal.trim() !== tableName;
+
+  useEffect(() => {
+    onStateChange?.({ dirty: hasChanges, busy: applying });
+  }, [hasChanges, applying, onStateChange]);
 
   const pendingAddCount = pendingNewColumns.filter((c) => c.name.trim()).length;
   const pendingChangeCount =
@@ -298,7 +313,7 @@ export function AlterTableEditor({
   const addColumn = () => {
     setPendingNewColumns((prev) => [
       ...prev,
-      { name: "", data_type: "text", is_nullable: true, default_value: "" },
+      { name: "", data_type: defaultColumnType(dbType), is_nullable: true, default_value: "" },
     ]);
   };
 
@@ -467,12 +482,13 @@ export function AlterTableEditor({
       {variant === "modal" && (
         <div className="form-row">
           <div className="form-group flex-1">
-            <label>Schema</label>
-            <input value={`${database}.${schema}`} disabled />
+            <label htmlFor={`${idBase}-schema`}>Schema</label>
+            <input id={`${idBase}-schema`} value={`${database}.${schema}`} disabled />
           </div>
           <div className="form-group flex-1">
-            <label>Table Name</label>
+            <label htmlFor={`${idBase}-table`}>Table Name</label>
             <input
+              id={`${idBase}-table`}
               value={tableNameLocal}
               onChange={(e) => setTableNameLocal(e.target.value)}
               placeholder="table_name"
@@ -561,6 +577,7 @@ export function AlterTableEditor({
                       updatePendingColumn(idx, "name", e.target.value)
                     }
                     placeholder="column_name"
+                    aria-label={`New column ${idx + 1} name`}
                   />
                 </div>
               </div>
@@ -568,7 +585,7 @@ export function AlterTableEditor({
                 <CustomSelect
                   className="alter-table-type-select"
                   value={col.data_type}
-                  options={buildTypeOptions(col.data_type)}
+                  options={buildTypeOptions(typeCatalog, col.data_type)}
                   onChange={(v) => updatePendingColumn(idx, "data_type", v)}
                   searchable
                 />
@@ -587,6 +604,7 @@ export function AlterTableEditor({
                   onChange={(e) =>
                     updatePendingColumn(idx, "is_nullable", e.target.checked)
                   }
+                  aria-label={`${col.name.trim() || `New column ${idx + 1}`} nullable`}
                 />
               </div>
               {/* Match the existing-row PK spacer's display/justify
@@ -611,12 +629,14 @@ export function AlterTableEditor({
                     updatePendingColumn(idx, "default_value", e.target.value)
                   }
                   placeholder="default"
+                  aria-label={`${col.name.trim() || `New column ${idx + 1}`} default value`}
                 />
               </div>
               <button
                 className="btn-icon drop-column-btn"
                 onClick={() => removePendingColumn(idx)}
                 title="Remove this new column"
+                aria-label={`Remove new column ${col.name.trim() || idx + 1}`}
               >
                 <X size={12} />
               </button>
@@ -648,7 +668,7 @@ export function AlterTableEditor({
             // (no double-click-to-edit dance). CustomSelect renders a
             // themed popover instead of the native dropdown so dark/
             // light themes don't end up with hardcoded option colors.
-            const typeOptions = buildTypeOptions(eff.type);
+            const typeOptions = buildTypeOptions(typeCatalog, eff.type);
             const isEditingDefault =
               editingCell?.type === "existing" &&
               editingCell.colName === col.name &&
@@ -668,6 +688,7 @@ export function AlterTableEditor({
                   {isEditingName ? (
                     <input
                       autoFocus
+                      aria-label={`Rename column ${col.name}`}
                       defaultValue={eff.name}
                       onBlur={(e) => {
                         handleRenameColumn(col.name, e.target.value);
@@ -744,6 +765,7 @@ export function AlterTableEditor({
                       handleSetNullable(col.name, e.target.checked)
                     }
                     disabled={dropped}
+                    aria-label={`${eff.name} nullable`}
                   />
                 </div>
                 <div
@@ -761,6 +783,7 @@ export function AlterTableEditor({
                   {isEditingDefault ? (
                     <input
                       autoFocus
+                      aria-label={`Default value of ${eff.name}`}
                       defaultValue={eff.default ?? ""}
                       placeholder="null"
                       onBlur={(e) => {
@@ -798,6 +821,7 @@ export function AlterTableEditor({
                   className="btn-icon drop-column-btn"
                   onClick={() => markDropColumn(col.name)}
                   title={dropped ? "Undo drop" : "Drop column"}
+                  aria-label={dropped ? `Undo drop of column ${col.name}` : `Drop column ${col.name}`}
                 >
                   <X size={12} />
                 </button>
@@ -814,7 +838,11 @@ export function AlterTableEditor({
         </div>
       )}
 
-      {error && <div className="test-result error">{error}</div>}
+      {error && (
+        <div className="test-result error" role="alert">
+          {error}
+        </div>
+      )}
     </>
   );
 

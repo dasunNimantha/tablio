@@ -1,6 +1,6 @@
 .alter-table-dialog {
   width: 820px;
-  max-width: 96vw;
+  max-width: calc(96 * var(--vw));
 }
 
 .dialog-loading {

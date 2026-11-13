@@ -1,5 +1,15 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useId, useMemo } from "react";
 import { api, ColumnDefinition } from "../../lib/tauri";
+import { useConnectionStore } from "../../stores/connectionStore";
+import {
+  buildCreateTableSql,
+  columnTypesFor,
+  defaultColumnType,
+  defaultIdType,
+  supportsNullability,
+  validateColumnNames,
+} from "../../lib/columnTypes";
+import { Modal } from "../Modal/Modal";
 import { X, Plus, Trash2, Loader2, Eye, EyeOff } from "lucide-react";
 import "./CreateTableDialog.css";
 
@@ -11,16 +21,6 @@ interface Props {
   onCreated: () => void;
 }
 
-const PG_TYPES = [
-  "integer", "bigint", "smallint", "serial", "bigserial",
-  "text", "varchar(255)", "char(1)",
-  "boolean",
-  "timestamp", "timestamptz", "date", "time",
-  "numeric", "real", "double precision",
-  "uuid", "json", "jsonb",
-  "bytea",
-];
-
 interface ColumnRow {
   name: string;
   data_type: string;
@@ -29,9 +29,9 @@ interface ColumnRow {
   default_value: string;
 }
 
-const emptyColumn = (): ColumnRow => ({
+const emptyColumn = (dataType: string): ColumnRow => ({
   name: "",
-  data_type: "text",
+  data_type: dataType,
   is_nullable: true,
   is_primary_key: false,
   default_value: "",
@@ -44,24 +44,48 @@ export function CreateTableDialog({
   onClose,
   onCreated,
 }: Props) {
+  const dbType = useConnectionStore(
+    (s) => s.connections.find((c) => c.id === connectionId)?.db_type,
+  );
+  const typeOptions = columnTypesFor(dbType);
+  const newColumnType = defaultColumnType(dbType);
+  const showNullability = supportsNullability(dbType);
+
+  const initialColumns = useMemo<ColumnRow[]>(
+    () => [
+      {
+        name: "id",
+        data_type: defaultIdType(dbType),
+        is_nullable: false,
+        is_primary_key: true,
+        default_value: "",
+      },
+      emptyColumn(defaultColumnType(dbType)),
+    ],
+    [dbType],
+  );
+
   const [tableName, setTableName] = useState("");
-  const [columns, setColumns] = useState<ColumnRow[]>([
-    { name: "id", data_type: "serial", is_nullable: false, is_primary_key: true, default_value: "" },
-    emptyColumn(),
-  ]);
+  const [columns, setColumns] = useState<ColumnRow[]>(initialColumns);
   const [showPreview, setShowPreview] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
+  const [submitted, setSubmitted] = useState(false);
   const previewRef = useRef<HTMLDivElement>(null);
+  const tableNameRef = useRef<HTMLInputElement>(null);
+  const titleId = useId();
+  const idBase = useId();
+
+  const dirty =
+    tableName.trim() !== "" || JSON.stringify(columns) !== JSON.stringify(initialColumns);
 
   useEffect(() => {
     if (showPreview) {
       const frame = window.requestAnimationFrame(() => {
-        const dialog = dialogRef.current;
         const preview = previewRef.current;
-        if (!dialog || !preview) return;
-        dialog.scrollTo({
+        const scroller = preview?.closest(".create-table-dialog");
+        if (!preview || !scroller) return;
+        scroller.scrollTo({
           top: Math.max(0, preview.offsetTop - 16),
           behavior: "smooth",
         });
@@ -78,34 +102,43 @@ export function CreateTableDialog({
     });
   };
 
-  const addColumn = () => setColumns((prev) => [...prev, emptyColumn()]);
+  const addColumn = () => setColumns((prev) => [...prev, emptyColumn(newColumnType)]);
 
   const removeColumn = (idx: number) => {
     if (columns.length <= 1) return;
     setColumns((prev) => prev.filter((_, i) => i !== idx));
   };
 
+  // A row with no name that the user never touched is skipped (the dialog
+  // starts with one). A row with a type/default/PK set but no name is an
+  // error: dropping it silently would lose the user's input.
+  const isPristineBlank = (c: ColumnRow) =>
+    c.name.trim() === "" &&
+    c.data_type === newColumnType &&
+    !c.default_value.trim() &&
+    !c.is_primary_key;
+  const unnamed = columns
+    .map((c, i) => (c.name.trim() === "" && !isPristineBlank(c) ? i : -1))
+    .filter((i) => i >= 0);
+  const { duplicates, message: duplicateMessage } = validateColumnNames(columns);
+  const columnsError =
+    duplicateMessage ??
+    (unnamed.length > 0
+      ? `Column ${unnamed.map((i) => i + 1).join(", ")} ${unnamed.length > 1 ? "have" : "has"} no name — name ${unnamed.length > 1 ? "them" : "it"} or remove the row`
+      : null);
+  const columnsErrorId = `${idBase}-columns-error`;
+
   const validColumns = columns.filter((c) => c.name.trim() !== "");
 
-  const generateDDL = (): string => {
-    const pkCols = validColumns.filter((c) => c.is_primary_key);
-    const colDefs = validColumns.map((c) => {
-      let def = `    "${c.name}" ${c.data_type}`;
-      if (!c.is_nullable) def += " NOT NULL";
-      if (c.default_value) def += ` DEFAULT ${c.default_value}`;
-      return def;
-    });
-    if (pkCols.length > 0) {
-      colDefs.push(
-        `    PRIMARY KEY (${pkCols.map((c) => `"${c.name}"`).join(", ")})`
-      );
-    }
-    return `CREATE TABLE "${schema}"."${tableName}" (\n${colDefs.join(",\n")}\n);`;
-  };
-
   const handleCreate = async () => {
+    setSubmitted(true);
     if (!tableName.trim()) {
       setError("Table name is required");
+      tableNameRef.current?.focus();
+      return;
+    }
+    if (columnsError) {
+      setError(null);
       return;
     }
     if (validColumns.length === 0) {
@@ -117,7 +150,7 @@ export function CreateTableDialog({
     setError(null);
     try {
       const colDefs: ColumnDefinition[] = validColumns.map((c) => ({
-        name: c.name,
+        name: c.name.trim(),
         data_type: c.data_type,
         is_nullable: c.is_nullable,
         is_primary_key: c.is_primary_key,
@@ -128,7 +161,7 @@ export function CreateTableDialog({
         connection_id: connectionId,
         database,
         schema,
-        table_name: tableName,
+        table_name: tableName.trim(),
         columns: colDefs,
       });
 
@@ -141,143 +174,178 @@ export function CreateTableDialog({
     }
   };
 
+  const typeList = (current: string) =>
+    typeOptions.includes(current) ? typeOptions : [current, ...typeOptions];
+
   return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div
-        className="dialog create-table-dialog"
-        ref={dialogRef}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="dialog-header">
-          <h2>Create Table</h2>
-          <button className="btn-icon" onClick={onClose}>
-            <X size={18} />
-          </button>
+    <Modal
+      onClose={onClose}
+      className="dialog create-table-dialog"
+      labelledBy={titleId}
+      busy={creating}
+      closeOnOverlayClick={!dirty}
+      initialFocusRef={tableNameRef}
+    >
+      <div className="dialog-header">
+        <h2 id={titleId}>Create Table</h2>
+        <button className="btn-icon" onClick={onClose} aria-label="Close" title="Close">
+          <X size={18} />
+        </button>
+      </div>
+
+      <div className="dialog-body">
+        <div className="form-row">
+          <div className="form-group flex-1">
+            <label htmlFor={`${idBase}-schema`}>Schema</label>
+            <input id={`${idBase}-schema`} value={`${database}.${schema}`} disabled />
+          </div>
+          <div className="form-group flex-1">
+            <label htmlFor={`${idBase}-table`}>Table Name</label>
+            <input
+              id={`${idBase}-table`}
+              ref={tableNameRef}
+              value={tableName}
+              onChange={(e) => setTableName(e.target.value)}
+              placeholder="my_table"
+              aria-invalid={submitted && !tableName.trim() ? true : undefined}
+            />
+          </div>
         </div>
 
-        <div className="dialog-body">
-          <div className="form-row">
-            <div className="form-group flex-1">
-              <label>Schema</label>
-              <input value={`${database}.${schema}`} disabled />
-            </div>
-            <div className="form-group flex-1">
-              <label>Table Name</label>
-              <input
-                value={tableName}
-                onChange={(e) => setTableName(e.target.value)}
-                placeholder="my_table"
-                autoFocus
-              />
-            </div>
-          </div>
-
-          <div className="form-group">
-            <label>Columns</label>
-            <div className="create-table-columns">
-              <div className="create-table-columns-header">
-                <span style={{ flex: 2 }}>Name</span>
-                <span style={{ flex: 2 }}>Type</span>
+        <div className="form-group">
+          <span className="form-group-label" id={`${idBase}-columns`}>Columns</span>
+          <div
+            className="create-table-columns"
+            role="group"
+            aria-labelledby={`${idBase}-columns`}
+            aria-describedby={columnsError ? columnsErrorId : undefined}
+          >
+            <div className="create-table-columns-header" aria-hidden="true">
+              <span style={{ flex: 2 }}>Name</span>
+              <span style={{ flex: 2 }}>Type</span>
+              {showNullability && (
                 <span style={{ width: 60, textAlign: "center" }}>Nullable</span>
-                <span style={{ width: 40, textAlign: "center" }}>PK</span>
-                <span style={{ flex: 1 }}>Default</span>
-                <span style={{ width: 32 }}></span>
-              </div>
-              {columns.map((col, idx) => (
+              )}
+              <span style={{ width: 40, textAlign: "center" }}>PK</span>
+              {showNullability && <span style={{ flex: 1 }}>Default</span>}
+              <span style={{ width: 32 }}></span>
+            </div>
+            {columns.map((col, idx) => {
+              const label = col.name.trim() || `column ${idx + 1}`;
+              const invalid = duplicates.has(idx) || unnamed.includes(idx);
+              return (
                 <div key={idx} className="create-table-column-row">
                   <input
                     style={{ flex: 2 }}
                     value={col.name}
                     onChange={(e) => updateColumn(idx, "name", e.target.value)}
                     placeholder="column_name"
+                    aria-label={`Column ${idx + 1} name`}
+                    aria-invalid={invalid || undefined}
+                    className={invalid ? "input-invalid" : undefined}
                   />
                   <select
                     style={{ flex: 2 }}
                     value={col.data_type}
                     onChange={(e) => updateColumn(idx, "data_type", e.target.value)}
+                    aria-label={`Type of ${label}`}
                   >
-                    {PG_TYPES.map((t) => (
+                    {typeList(col.data_type).map((t) => (
                       <option key={t} value={t}>
                         {t}
                       </option>
                     ))}
                   </select>
-                  <div style={{ width: 60, display: "flex", justifyContent: "center" }}>
-                    <input
-                      type="checkbox"
-                      checked={col.is_nullable}
-                      onChange={(e) => updateColumn(idx, "is_nullable", e.target.checked)}
-                    />
-                  </div>
+                  {showNullability && (
+                    <div style={{ width: 60, display: "flex", justifyContent: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={col.is_nullable}
+                        onChange={(e) => updateColumn(idx, "is_nullable", e.target.checked)}
+                        aria-label={`${label} nullable`}
+                      />
+                    </div>
+                  )}
                   <div style={{ width: 40, display: "flex", justifyContent: "center" }}>
                     <input
                       type="checkbox"
                       checked={col.is_primary_key}
-                      onChange={(e) =>
-                        updateColumn(idx, "is_primary_key", e.target.checked)
-                      }
+                      onChange={(e) => updateColumn(idx, "is_primary_key", e.target.checked)}
+                      aria-label={`${label} primary key`}
                     />
                   </div>
-                  <input
-                    style={{ flex: 1 }}
-                    value={col.default_value}
-                    onChange={(e) => updateColumn(idx, "default_value", e.target.value)}
-                    placeholder="default"
-                  />
+                  {showNullability && (
+                    <input
+                      style={{ flex: 1 }}
+                      value={col.default_value}
+                      onChange={(e) => updateColumn(idx, "default_value", e.target.value)}
+                      placeholder="default"
+                      aria-label={`${label} default value`}
+                    />
+                  )}
                   <button
                     className="btn-icon"
                     onClick={() => removeColumn(idx)}
                     disabled={columns.length <= 1}
+                    aria-label={`Remove column ${label}`}
+                    title={`Remove column ${label}`}
                   >
                     <Trash2 size={12} />
                   </button>
                 </div>
-              ))}
-              <button
-                className="btn-ghost add-column-btn"
-                onClick={addColumn}
-              >
-                <Plus size={14} /> Add Column
-              </button>
-            </div>
+              );
+            })}
+            <button className="btn-ghost add-column-btn" onClick={addColumn}>
+              <Plus size={14} /> Add Column
+            </button>
           </div>
-
-          {showPreview && (
-            <div className="ddl-preview" ref={previewRef}>
-              <pre>{generateDDL()}</pre>
-            </div>
-          )}
-
-          {error && (
-            <div className="test-result error">
-              {error}
+          {columnsError && (
+            <div
+              id={columnsErrorId}
+              className="create-table-columns-error"
+              role={submitted ? "alert" : undefined}
+            >
+              {columnsError}
             </div>
           )}
         </div>
 
-        <div className="dialog-footer">
-          <button
-            className={`btn-ghost ${showPreview ? "active-filter" : ""}`}
-            onClick={() => setShowPreview(!showPreview)}
-          >
-            {showPreview ? <EyeOff size={14} /> : <Eye size={14} />}
-            {showPreview ? "Hide SQL" : "Preview SQL"}
-          </button>
-          <div className="dialog-footer-right">
-            <button className="btn-secondary" onClick={onClose}>
-              Cancel
-            </button>
-            <button
-              className="btn-primary"
-              onClick={handleCreate}
-              disabled={creating}
-            >
-              {creating && <Loader2 size={14} className="spin" />}
-              Create Table
-            </button>
+        {showPreview && (
+          <div className="ddl-preview" ref={previewRef}>
+            <pre>{buildCreateTableSql(dbType, database, schema, tableName, validColumns)}</pre>
           </div>
+        )}
+
+        {error && (
+          <div className="test-result error" role="alert">
+            {error}
+          </div>
+        )}
+      </div>
+
+      <div className="dialog-footer">
+        <button
+          className={`btn-ghost ${showPreview ? "active-filter" : ""}`}
+          onClick={() => setShowPreview(!showPreview)}
+          aria-pressed={showPreview}
+        >
+          {showPreview ? <EyeOff size={14} /> : <Eye size={14} />}
+          {showPreview ? "Hide SQL" : "Preview SQL"}
+        </button>
+        <div className="dialog-footer-right">
+          <button className="btn-secondary" onClick={onClose} disabled={creating}>
+            Cancel
+          </button>
+          <button
+            className="btn-primary"
+            onClick={handleCreate}
+            disabled={creating || !!columnsError}
+          >
+            {creating && <Loader2 size={14} className="spin" />}
+            Create Table
+          </button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }
