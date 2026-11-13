@@ -5,7 +5,7 @@ import {
   XlsxWorkbookPreview,
   XlsxColumnType,
 } from "../../lib/tauri";
-import { X, FileSpreadsheet, Loader2, CheckCircle } from "lucide-react";
+import { X, FileSpreadsheet, Loader2, CheckCircle, AlertTriangle } from "lucide-react";
 import "./ImportDialog.css";
 
 interface Props {
@@ -17,7 +17,23 @@ interface Props {
   onImported: () => void;
 }
 
-const MAX_FILE_BYTES = 100 * 1024 * 1024;
+const MB = 1024 * 1024;
+/**
+ * CSV is read and parsed in the renderer, so its cap only guards memory
+ * in this process.
+ */
+const MAX_CSV_BYTES = 100 * MB;
+/**
+ * Excel files are parsed by the backend: the bytes cross the IPC bridge
+ * as a JSON number array (~4x the file size), once for the preview and
+ * again for the chosen sheet, and an .xlsx is a zip whose XML usually
+ * inflates 5-10x while parsing. 25 MB of xlsx is already well over a
+ * million cells, so anything larger is rejected before it is read.
+ * Must match `MAX_BYTES` in `src-tauri/src/commands/xlsx_import.rs`.
+ */
+export const MAX_XLSX_BYTES = 25 * MB;
+/** Example error-cell references shown in the warning. */
+const ERROR_CELL_EXAMPLES = 5;
 const ACCEPTED_EXTS = [".csv", ".xlsx", ".xls"] as const;
 
 type SourceKind = "csv" | "xlsx";
@@ -27,6 +43,13 @@ interface ParsedSheet {
   rows: unknown[][];
   inferredTypes?: XlsxColumnType[];
   totalRows?: number;
+  /** Excel error cells (`"B5: #N/A"`), imported as NULL. */
+  errorCells?: string[];
+  errorCellCount?: number;
+}
+
+function formatMb(bytes: number): string {
+  return `${(bytes / MB).toFixed(1)} MB`;
 }
 
 function detectKind(name: string): SourceKind | null {
@@ -173,25 +196,29 @@ export function ImportDialog({
 
     resetSourceState();
 
-    if (file.size > MAX_FILE_BYTES) {
-      setSourceFile(file);
-      setSourceKind(null);
-      setParseError(
-        `File is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max ${MAX_FILE_BYTES / 1024 / 1024} MB.`
-      );
-      return;
-    }
-
     const kind = detectKind(file.name);
     setSourceFile(file);
-    setSourceKind(kind);
 
     if (kind === null) {
+      setSourceKind(null);
       setParseError(
         `Unsupported file type. Choose a ${ACCEPTED_EXTS.join(", ")} file.`
       );
       return;
     }
+
+    // Checked before the file is read into memory or sent to the backend.
+    const limit = kind === "xlsx" ? MAX_XLSX_BYTES : MAX_CSV_BYTES;
+    if (file.size > limit) {
+      setSourceKind(null);
+      setParseError(
+        kind === "xlsx"
+          ? `File is too large (${formatMb(file.size)}). Excel imports are limited to ${limit / MB} MB; save the sheet as CSV (up to ${MAX_CSV_BYTES / MB} MB) or split the workbook.`
+          : `File is too large (${formatMb(file.size)}). CSV imports are limited to ${limit / MB} MB.`
+      );
+      return;
+    }
+    setSourceKind(kind);
 
     setParsing(true);
     try {
@@ -225,6 +252,8 @@ export function ImportDialog({
       rows: payload.rows,
       inferredTypes: payload.inferred_types,
       totalRows: payload.rows.length,
+      errorCells: payload.error_cells ?? [],
+      errorCellCount: payload.error_cell_count ?? 0,
     });
     seedColumnMap(payload.headers);
   };
@@ -335,7 +364,7 @@ export function ImportDialog({
               </label>
             </div>
             <p className="import-file-hint">
-              Supported: CSV, Excel (.xlsx, .xls). Max {MAX_FILE_BYTES / 1024 / 1024} MB.
+              Supported: CSV (max {MAX_CSV_BYTES / MB} MB), Excel .xlsx / .xls (max {MAX_XLSX_BYTES / MB} MB).
             </p>
           </div>
 
@@ -370,6 +399,20 @@ export function ImportDialog({
                   {sourceData.totalRows.toLocaleString()} data rows
                 </p>
               )}
+            </div>
+          )}
+
+          {sourceKind === "xlsx" && !parsing && (sourceData?.errorCellCount ?? 0) > 0 && (
+            <div className="import-error-cells" role="alert" data-testid="import-error-cells">
+              <AlertTriangle size={16} />
+              <span>
+                {sourceData!.errorCellCount === 1
+                  ? "1 cell contains"
+                  : `${sourceData!.errorCellCount!.toLocaleString()} cells contain`}{" "}
+                an Excel error and will be imported as NULL:{" "}
+                {sourceData!.errorCells!.slice(0, ERROR_CELL_EXAMPLES).join(", ")}
+                {sourceData!.errorCellCount! > Math.min(sourceData!.errorCells!.length, ERROR_CELL_EXAMPLES) && ", …"}
+              </span>
             </div>
           )}
 

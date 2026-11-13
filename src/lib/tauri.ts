@@ -223,6 +223,8 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
           ],
           total_data_rows: 2,
           inferred_types: ["number", "string", "bool"],
+          error_cells: [],
+          error_cell_count: 0,
         },
       } as T;
     case "parse_xlsx_sheet":
@@ -234,6 +236,8 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
           [2, "Bob", false],
         ],
         inferred_types: ["number", "string", "bool"],
+        error_cells: [],
+        error_cell_count: 0,
       } as T;
     default:
       throw new Error(`Unknown mock command: ${cmd}`);
@@ -657,6 +661,10 @@ export interface XlsxSheetPreview {
   preview_rows: unknown[][];
   total_data_rows: number;
   inferred_types: XlsxColumnType[];
+  /** First few data cells holding an Excel error, as `"B5: #N/A"`. */
+  error_cells: string[];
+  /** Total number of error cells (imported as NULL). */
+  error_cell_count: number;
 }
 
 export interface XlsxWorkbookPreview {
@@ -675,6 +683,9 @@ export interface XlsxSheetPayload {
   headers: string[];
   rows: unknown[][];
   inferred_types: XlsxColumnType[];
+  /** See {@link XlsxSheetPreview.error_cells}. */
+  error_cells: string[];
+  error_cell_count: number;
 }
 
 export interface SavedQuery {
