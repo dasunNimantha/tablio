@@ -8,27 +8,27 @@ Codename: stable
 Architectures: amd64
 Components: main
 Description: Tablio APT repository
-Date: Fri, 13 Nov 2026 11:01:48 +0000
+Date: Fri, 13 Nov 2026 18:53:35 +0000
 MD5Sum:
- 0f4327c9f4c7906e186fc5ffada13fb6              171 Release
- b23e25c144250cff70e38d9a50e54211            10675 main/binary-amd64/Packages
- c47d2acafb92c3bde7fb225af432255b             3055 main/binary-amd64/Packages.gz
+ ef058f82bd710a6b751ec14c273e87f0              171 Release
+ 348159ab253446c610b6424e4bff33ae            11070 main/binary-amd64/Packages
+ 2d87824da0dd0dcf2847709c1274bdcd             3161 main/binary-amd64/Packages.gz
 SHA1:
- c4ff9dd3f0da74862884e937878b97fe8d184030              171 Release
- 34df8c1cdb70cdb44a43b49525dd4a1464603ed5            10675 main/binary-amd64/Packages
- e2acbd1da84297a5e11ba8fe083c624d729434c8             3055 main/binary-amd64/Packages.gz
+ 703d9e33eadea62937e3632737c01199015f84b8              171 Release
+ 51915dae0cfdbcb7537fce75dea5d0a5fe9c99ea            11070 main/binary-amd64/Packages
+ a20e48ac34f1e0c054383ce23913570fe2b39fe1             3161 main/binary-amd64/Packages.gz
 SHA256:
- 04b6589c9dcaf522cdde01d5e1fd3e0a8e9f882728e988e2e89fba60795459ea              171 Release
- 4f734e9ff61ee93c2e91aa721e518074f2809fc19d0103b1466f9d7688cd078c            10675 main/binary-amd64/Packages
- 9c1e02a0d79a2096e4d4a9298f188287086c9a15f52c22acb0ed62758f4172d6             3055 main/binary-amd64/Packages.gz
+ 3e6c360fef166f4703d41ce8766da60a77287e227b7bae62224af56954fdcab1              171 Release
+ 3def24f6e0c04c8ac54b1a6019a5b77d3f6a63b61443193e1b0fea72be6d90ff            11070 main/binary-amd64/Packages
+ 2faa429d6b5e59d9adcd79ab821c8b82db5bb22489f3d0dfd0f4c08e4ef84ded             3161 main/binary-amd64/Packages.gz
 SHA512:
- dd7a99c311d643576e2bf9e0b9963bb89c838360336f8a8bba083eb5ae77cb1f31e44190173c065d28ac410f6f6802532c85e168040d5cb6261ce83df4f8864b              171 Release
- c591b68b0a008a9fd42d1d1d16dea7231e5b912fa84bdc0a03be89651d3f0d19939ceb67bcddc85128dd10ca7574be6b12a1022e6651c365b0bd5ce658a15a18            10675 main/binary-amd64/Packages
- 34e36b0279716d571fd8c865572bd8062860c2d3069b8128242d4c7d060bd1e0962b9a635d004ac6162402d5db45fb90b342555b0780a8285f65eb010277f70a             3055 main/binary-amd64/Packages.gz
+ 4e02b83b1ffa0b00df5c1ff29adca8ae8c95098b530891a0bb12dc3171f2f2121c8dd2a8ca3da8961c390eab43d16ef1bf20d385d87d2181a90835f5d316c949              171 Release
+ 3d50600c30a4e2e101256fb4fb8a3c1f4fb1eb902c2707eadfa94b6b0d10ddbb5506d0047fac335518689ad0f1a9b9892e6ff6712b3ebeb69686f736e34e099d            11070 main/binary-amd64/Packages
+ 6ad56e186ac4996cee3cccd12614df5ae714df67e2281716569836d51a74310fd337feee0886f3c5be1dab7ff865698b5e159f84e050a7a240cc0be0f349e733             3161 main/binary-amd64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQT5yxjUytMSkSNF5aszsmWK21FtiQUCavbuHQAKCRAzsmWK21Ft
-iaUvAP9pSEcKoesHIHVG2Q+CBqlRkO8Hd22ffnFgfFBzL8B7kAD/Wr8dXFyj9ID1
-NAqo4x0WIpTVGA4pEa2RV70YcQz1iwg=
-=19+h
+iHUEARYKAB0WIQT5yxjUytMSkSNF5aszsmWK21FtiQUCavdcsAAKCRAzsmWK21Ft
+iT7AAP99VDdsLZ0LfeDkYoLPxeL+udahILaR2XFXFPgmUWLHggD/Sz52ORrhanO8
+UIzoYLHRn2Rs42SReCFQJCcvfDessA0=
+=2dTX
 -----END PGP SIGNATURE-----
