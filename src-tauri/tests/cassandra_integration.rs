@@ -1350,3 +1350,64 @@ async fn cassandra_multi_row_edit_and_console_keep_plain_statements() {
 
     teardown_keyspace(&driver, &ks).await;
 }
+
+#[tokio::test]
+async fn cassandra_console_shows_rows_by_result_not_keyword() {
+    let driver = create_driver().await;
+    let ks = setup_keyspace(&driver).await;
+    let tbl = unique_table("conrows");
+    driver
+        .execute_query(
+            "",
+            &format!("CREATE TABLE {ks}.{tbl} (id int PRIMARY KEY, v text)"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(
+            "",
+            &format!("INSERT INTO {ks}.{tbl} (id, v) VALUES (1, 'a')"),
+        )
+        .await
+        .unwrap();
+
+    // A leading comment used to hide the SELECT.
+    let r = driver
+        .execute_query("", &format!("-- note\nSELECT id, v FROM {ks}.{tbl}"))
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.rows.len(), 1);
+
+    // An empty result keeps its header.
+    let r = driver
+        .execute_query("", &format!("SELECT id, v FROM {ks}.{tbl} WHERE id = 99"))
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.columns, vec!["id", "v"]);
+    assert!(r.rows.is_empty());
+
+    // An LWT answers with `[applied]`.
+    let r = driver
+        .execute_query(
+            "",
+            &format!("UPDATE {ks}.{tbl} SET v = 'b' WHERE id = 1 IF EXISTS"),
+        )
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.columns[0], "[applied]");
+
+    // Plain writes still report no rows.
+    let r = driver
+        .execute_query(
+            "",
+            &format!("INSERT INTO {ks}.{tbl} (id, v) VALUES (2, 'x')"),
+        )
+        .await
+        .unwrap();
+    assert!(!r.is_select);
+
+    teardown_keyspace(&driver, &ks).await;
+}

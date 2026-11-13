@@ -647,6 +647,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       if (!isCurrent()) return;
       setResult(res);
       setExplainResult(null);
+      res.notices?.forEach((n) => addToast(n, "info"));
       if (res.is_select) {
         const parsed = parseSimpleSelect(queryToRun);
         if (parsed && !parsed.schema) {
@@ -696,7 +697,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     } finally {
       endRequest(reqId);
     }
-  }, [connectionId, database, getQueryText, beginRequest, endRequest, startCancellable, isCancellation]);
+  }, [connectionId, database, getQueryText, beginRequest, endRequest, startCancellable, isCancellation, addToast]);
 
   const handleReExecute = useCallback(async () => {
     const queryToRun = lastQueryRef.current;
@@ -709,7 +710,10 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       const res = await api.executeQuery({
         connection_id: connectionId, database, sql: queryToRun, request_id: requestId,
       });
-      if (reqId === requestSeqRef.current) setResult(res);
+      if (reqId === requestSeqRef.current) {
+        setResult(res);
+        res.notices?.forEach((n) => addToast(n, "info"));
+      }
     } catch (e) {
       if (reqId !== requestSeqRef.current) return;
       if (isCancellation(e)) setCancelled(true);
@@ -717,7 +721,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     } finally {
       endRequest(reqId);
     }
-  }, [connectionId, database, beginRequest, endRequest, startCancellable, isCancellation]);
+  }, [connectionId, database, beginRequest, endRequest, startCancellable, isCancellation, addToast]);
 
   useEffect(() => { executeRef.current = executeCurrentStatement; }, [executeCurrentStatement]);
 

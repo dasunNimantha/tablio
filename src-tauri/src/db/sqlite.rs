@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::db::cancel::{
     cancelled_error, finish, run_interruptible, unless_cancelled, CancellationToken, Interruptible,
 };
+use crate::db::console::{console_result, ResultSet};
 use crate::db::DatabaseDriver;
 use crate::models::*;
 use crate::util::path::expand_tilde;
@@ -14,6 +15,8 @@ use crate::util::sql::{
     ensure_row_matched, i64_to_json, script_transaction_state, split_sql_statements,
     statement_is_select_like, ScriptTxn,
 };
+use futures_util::TryStreamExt;
+use sqlx::{Executor, SqlSafeStr, Statement};
 
 pub struct SqliteDriver {
     pool: SqlitePool,
@@ -96,11 +99,8 @@ impl SqliteDriver {
         // Empty input or only comments / whitespace.
         if statements.is_empty() {
             return Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                rows_affected: 0,
                 execution_time_ms: start.elapsed().as_millis() as u64,
-                is_select: false,
+                ..Default::default()
             });
         }
 
@@ -285,51 +285,66 @@ async fn sqlite_run_statements(
         return Err(cancelled_error());
     }
 
-    // SELECT / WITH / PRAGMA / EXPLAIN return rows; everything else
-    // just emits rows_affected.
+    // Rows decide whether the result is a row set, so `INSERT ...
+    // RETURNING` shows its rows; a zero-row SELECT / WITH / PRAGMA /
+    // EXPLAIN still shows its header.
     let last = last.clone();
-    let last_is_select =
-        statement_is_select_like(&last, &["SELECT", "WITH", "PRAGMA", "EXPLAIN", "VALUES"]);
+    let select_like = statement_is_select_like(&last, SQLITE_SELECT_KEYWORDS);
 
-    if last_is_select {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(last))
-            .fetch_all(&mut **conn)
-            .await?;
-        let elapsed = start.elapsed().as_millis() as u64;
-
-        let columns: Vec<String> = rows
-            .first()
-            .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
-            .unwrap_or_default();
-
-        let col_count = columns.len();
-        let data_rows: Vec<Vec<serde_json::Value>> = rows
-            .iter()
-            .map(|r| sqlite_row_to_json_values(r, col_count))
-            .collect();
-
-        Ok(QueryResult {
-            columns,
-            rows: data_rows,
-            rows_affected: 0,
-            execution_time_ms: elapsed,
-            is_select: true,
-        })
-    } else {
-        let result = sqlx::query(sqlx::AssertSqlSafe(last))
-            .execute(&mut **conn)
-            .await?;
-        let elapsed = start.elapsed().as_millis() as u64;
-
-        Ok(QueryResult {
-            columns: vec![],
-            rows: vec![],
-            rows_affected: total_affected.saturating_add(result.rows_affected()),
-            execution_time_ms: elapsed,
-            is_select: false,
-        })
+    let mut set: Option<ResultSet> = None;
+    let mut affected: u64 = 0;
+    {
+        let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(last.as_str())).fetch_many(&mut **conn);
+        while let Some(item) = stream.try_next().await? {
+            match item {
+                sqlx::Either::Left(done) => {
+                    affected = affected.saturating_add(done.rows_affected());
+                }
+                sqlx::Either::Right(row) => {
+                    let set = set.get_or_insert_with(|| ResultSet {
+                        columns: row.columns().iter().map(|c| c.name().to_string()).collect(),
+                        rows: Vec::new(),
+                    });
+                    let values = sqlite_row_to_json_values(&row, set.columns.len());
+                    set.rows.push(values);
+                }
+            }
+        }
     }
+    let mut fallback_columns = Vec::new();
+    if set.is_none() {
+        // The prepared statement names its result columns even when no
+        // row came back.
+        if let Ok(stmt) = (&mut **conn)
+            .prepare(sqlx::AssertSqlSafe(last.clone()).into_sql_str())
+            .await
+        {
+            fallback_columns = stmt
+                .columns()
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect();
+        }
+    }
+    let select_like = select_like || !fallback_columns.is_empty();
+    let elapsed = start.elapsed().as_millis() as u64;
+    let rows_affected = if select_like {
+        0
+    } else {
+        total_affected.saturating_add(affected)
+    };
+    Ok(console_result(
+        set.into_iter().collect(),
+        select_like,
+        fallback_columns,
+        rows_affected,
+        elapsed,
+    ))
 }
+
+/// Leading keywords of statements the console shows as a row set even
+/// when they return no rows.
+const SQLITE_SELECT_KEYWORDS: &[&str] = &["SELECT", "WITH", "PRAGMA", "EXPLAIN", "VALUES"];
 
 fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))

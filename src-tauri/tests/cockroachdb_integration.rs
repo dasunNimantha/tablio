@@ -2074,3 +2074,51 @@ async fn crdb_console_cancel_before_start_is_reported() {
     assert!(tablio_lib::db::cancel::is_cancelled_error(&err));
     driver.execute_query(&db, "SELECT 1").await.unwrap();
 }
+
+#[tokio::test]
+async fn crdb_console_result_shapes_and_session_reset() {
+    let (driver, db) = crdb_driver!();
+    let tbl = unique_table("crdb_ret");
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE \"{SCHEMA}\".\"{tbl}\" (id INT PRIMARY KEY, v INT)"),
+        )
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(
+            &db,
+            &format!("INSERT INTO \"{SCHEMA}\".\"{tbl}\" VALUES (1, 10) RETURNING id, v"),
+        )
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.columns, vec!["id", "v"]);
+    assert_eq!(r.rows.len(), 1);
+
+    let r = driver
+        .execute_query(&db, "SELECT 1 AS a WHERE false")
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.columns, vec!["a"]);
+
+    let r = driver
+        .execute_query(&db, "SET application_name = 'tablio_leak_probe'")
+        .await
+        .unwrap();
+    assert!(!r.notices.is_empty());
+    for _ in 0..4 {
+        let r = driver
+            .execute_query(&db, "SHOW application_name")
+            .await
+            .unwrap();
+        assert_ne!(r.rows[0][0], serde_json::json!("tablio_leak_probe"));
+    }
+
+    driver
+        .execute_query(&db, &format!("DROP TABLE \"{SCHEMA}\".\"{tbl}\""))
+        .await
+        .unwrap();
+}

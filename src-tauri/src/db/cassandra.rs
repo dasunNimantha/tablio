@@ -816,46 +816,32 @@ impl DatabaseDriver for CassandraDriver {
 
     async fn execute_query(&self, _database: &str, sql: &str) -> Result<QueryResult> {
         let start = Instant::now();
-        let trimmed = sql.trim().to_uppercase();
-
-        let is_select = trimmed.starts_with("SELECT")
-            || trimmed.starts_with("DESCRIBE")
-            || trimmed.starts_with("LIST");
-
-        if is_select {
-            let result = self
-                .session
-                .query_unpaged(sql, &[])
-                .await
-                .map_err(|e| anyhow!("{}", e))?
-                .into_rows_result()
-                .map_err(|e| anyhow!("{}", e))?;
-
-            let (columns, rows) = rows_from_result(&result);
-            let elapsed = start.elapsed().as_millis() as u64;
-
-            Ok(QueryResult {
-                columns,
-                rows_affected: rows.len() as u64,
-                rows,
+        // Whether there are rows to show is decided by the response, not
+        // the leading keyword: a statement after a `-- comment`, `LIST
+        // ROLES` or an LWT (`... IF EXISTS`, which answers `[applied]`)
+        // all return rows, and a zero-row SELECT still names its columns.
+        let result = self
+            .session
+            .query_unpaged(sql, &[])
+            .await
+            .map_err(|e| anyhow!("{}", e))?;
+        let elapsed = start.elapsed().as_millis() as u64;
+        if !result.is_rows() {
+            return Ok(QueryResult {
                 execution_time_ms: elapsed,
-                is_select: true,
-            })
-        } else {
-            self.session
-                .query_unpaged(sql, &[])
-                .await
-                .map_err(|e| anyhow!("{}", e))?;
-            let elapsed = start.elapsed().as_millis() as u64;
-
-            Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                rows_affected: 0,
-                execution_time_ms: elapsed,
-                is_select: false,
-            })
+                ..Default::default()
+            });
         }
+        let result = result.into_rows_result().map_err(|e| anyhow!("{}", e))?;
+        let (columns, rows) = rows_from_result(&result);
+        Ok(QueryResult {
+            columns,
+            rows_affected: rows.len() as u64,
+            rows,
+            execution_time_ms: elapsed,
+            is_select: true,
+            notices: Vec::new(),
+        })
     }
 
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {

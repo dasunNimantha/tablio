@@ -3970,3 +3970,113 @@ async fn pg_psql_restore_stops_at_first_error_and_reports_it() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Console: session state, result shapes, COPY
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pg_console_set_does_not_leak_into_the_pool() {
+    let driver = pg_driver!();
+    let r = driver
+        .execute_query(
+            DB,
+            "SET application_name = 'tablio_leak_probe'; SHOW application_name",
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!("tablio_leak_probe"));
+    assert!(
+        r.notices.iter().any(|n| n.contains("session state")),
+        "{:?}",
+        r.notices
+    );
+    // `statement_timeout` too short for anything: later queries on the
+    // same pool must not inherit it.
+    driver
+        .execute_query(DB, "SET statement_timeout = 1")
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        let r = driver
+            .execute_query(
+                DB,
+                "SELECT current_setting('application_name'), pg_sleep(0.01)::text",
+            )
+            .await
+            .expect("no inherited statement_timeout");
+        assert_ne!(r.rows[0][0], serde_json::json!("tablio_leak_probe"));
+        assert!(r.notices.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn pg_console_shows_rows_of_returning_and_empty_headers() {
+    let driver = pg_driver!();
+    let tbl = unique_table("pg_ret");
+    driver
+        .execute_query(
+            DB,
+            &format!("CREATE TABLE {tbl} (id serial PRIMARY KEY, v int)"),
+        )
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(
+            DB,
+            &format!("INSERT INTO {tbl} (v) VALUES (10), (20) RETURNING id, v"),
+        )
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.columns, vec!["id", "v"]);
+    assert_eq!(r.rows.len(), 2);
+
+    let r = driver
+        .execute_query(DB, "SELECT 1 AS a, 'x' AS b WHERE false")
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.columns, vec!["a", "b"]);
+    assert!(r.rows.is_empty());
+
+    // RETURNING with no rows still names its columns.
+    let r = driver
+        .execute_query(
+            DB,
+            &format!("-- c\nDELETE FROM {tbl} WHERE v = -1 RETURNING id"),
+        )
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.columns, vec!["id"]);
+
+    let r = driver
+        .execute_query(DB, &format!("UPDATE {tbl} SET v = v + 1"))
+        .await
+        .unwrap();
+    assert!(!r.is_select);
+    assert_eq!(r.rows_affected, 2);
+
+    driver
+        .execute_query(DB, &format!("DROP TABLE {tbl}"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pg_console_copy_stdout_has_a_clear_error() {
+    let driver = pg_driver!();
+    let err = driver
+        .execute_query(DB, "COPY (SELECT 1) TO STDOUT")
+        .await
+        .expect_err("COPY TO STDOUT is not supported");
+    assert!(err.to_string().contains("Export"), "{err}");
+    let err = driver
+        .execute_query(DB, "copy pg_catalog.pg_am from stdin")
+        .await
+        .expect_err("COPY FROM STDIN is not supported");
+    assert!(err.to_string().contains("STDIN"), "{err}");
+    // The connection is fine afterwards.
+    driver.execute_query(DB, "SELECT 1").await.unwrap();
+}

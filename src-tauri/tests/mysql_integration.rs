@@ -3141,3 +3141,119 @@ async fn mysql_console_cancel_before_start_is_reported() {
     assert!(tablio_lib::db::cancel::is_cancelled_error(&err));
     driver.execute_query(&db, "SELECT 1").await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Console: session state, result shapes, comments
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mysql_console_set_does_not_leak_into_the_pool() {
+    let (driver, db) = mysql_driver!();
+    let r = driver
+        .execute_query(&db, "SET SESSION sql_mode = 'ANSI_QUOTES'")
+        .await
+        .unwrap();
+    assert!(
+        r.notices.iter().any(|n| n.contains("session state")),
+        "{:?}",
+        r.notices
+    );
+    // With ANSI_QUOTES "x" would be an identifier (unknown column).
+    for _ in 0..8 {
+        let r = driver
+            .execute_query(&db, "SELECT \"x\" AS v")
+            .await
+            .expect("sql_mode must not be inherited");
+        assert_eq!(r.rows[0][0], serde_json::json!("x"));
+    }
+}
+
+#[tokio::test]
+async fn mysql_console_autocommit_off_is_not_silently_rolled_back() {
+    let (driver, db) = mysql_driver!();
+    let tbl = unique_table("ac_off");
+    driver
+        .execute_query(
+            &db,
+            &format!("CREATE TABLE `{tbl}` (id INT PRIMARY KEY, v INT) ENGINE=InnoDB"),
+        )
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("INSERT INTO `{tbl}` VALUES (1, 1)"))
+        .await
+        .unwrap();
+    let err = driver
+        .execute_query(
+            &db,
+            &format!("SET autocommit = 0; UPDATE `{tbl}` SET v = 2 WHERE id = 1"),
+        )
+        .await
+        .expect_err("uncommitted changes must be reported");
+    assert!(err.to_string().contains("autocommit"), "{err}");
+    let r = driver
+        .execute_query(&db, &format!("SELECT v FROM `{tbl}`"))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!(1));
+    // With a COMMIT it is saved.
+    driver
+        .execute_query(
+            &db,
+            &format!("SET autocommit = 0; UPDATE `{tbl}` SET v = 3 WHERE id = 1; COMMIT"),
+        )
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(&db, &format!("SELECT v FROM `{tbl}`"))
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], serde_json::json!(3));
+    driver.drop_object(&db, &db, &tbl, "TABLE").await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_console_shows_rows_of_call_and_empty_headers() {
+    let (driver, db) = mysql_driver!();
+    let proc_name = unique_table("rows_proc");
+    driver
+        .execute_query(
+            &db,
+            &format!(
+                "CREATE PROCEDURE `{proc_name}`() BEGIN SELECT 1 AS a; SELECT 2 AS b, 3 AS c; END"
+            ),
+        )
+        .await
+        .unwrap();
+    let r = driver
+        .execute_query(&db, &format!("CALL `{proc_name}`()"))
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.columns, vec!["b", "c"]);
+    assert_eq!(r.rows.len(), 1);
+    assert!(
+        r.notices.iter().any(|n| n.contains("2 result sets")),
+        "{:?}",
+        r.notices
+    );
+    driver
+        .execute_query(&db, &format!("DROP PROCEDURE `{proc_name}`"))
+        .await
+        .unwrap();
+
+    let r = driver
+        .execute_query(&db, "SELECT 1 AS a, 'x' AS b FROM DUAL WHERE 1 = 0")
+        .await
+        .unwrap();
+    assert!(r.is_select);
+    assert_eq!(r.columns, vec!["a", "b"]);
+    assert!(r.rows.is_empty());
+
+    // `#` comments hide a `;`.
+    let r = driver
+        .execute_query(&db, "SELECT 1 AS a # c ;\n, 2 AS b")
+        .await
+        .unwrap();
+    assert_eq!(r.columns, vec!["a", "b"]);
+}

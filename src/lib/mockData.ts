@@ -305,6 +305,18 @@ export function generateQueryResult(sql: string): QueryResult {
       is_select: true,
     };
   }
+  if (lowerSql.startsWith("set ")) {
+    return {
+      columns: [],
+      rows: [],
+      rows_affected: 0,
+      execution_time_ms: Math.floor(Math.random() * 5 + 1),
+      is_select: false,
+      notices: [
+        "This script changed session state (SET, temporary tables, ...). That only applied to this run: the connection was closed afterwards so it doesn't affect later queries.",
+      ],
+    };
+  }
   return {
     columns: [],
     rows: [],

@@ -318,11 +318,22 @@ export interface TableData {
 }
 
 export interface QueryResult {
+  /** Column names; present for a zero-row result too. */
   columns: string[];
   rows: unknown[][];
   rows_affected: number;
   execution_time_ms: number;
+  /**
+   * The statement produced a row set (any statement: SELECT, INSERT ...
+   * RETURNING / OUTPUT, CALL, EXEC). A script returning several result
+   * sets shows the last one, with a notice.
+   */
   is_select: boolean;
+  /**
+   * Informational messages about the run (several result sets, session
+   * settings that were discarded afterwards). Omitted when there are none.
+   */
+  notices?: string[];
 }
 
 export interface SortSpec {

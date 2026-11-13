@@ -2431,3 +2431,45 @@ async fn sqlite_console_cancel_before_start_is_reported() {
     assert!(tablio_lib::db::cancel::is_cancelled_error(&err));
     driver.execute_query(DB, "SELECT 1").await.unwrap();
 }
+
+#[tokio::test]
+async fn sqlite_console_shows_returning_rows_and_empty_headers() {
+    let (driver, path) = create_driver().await;
+    let run = async {
+        driver
+            .execute_query(DB, "CREATE TABLE r (id INTEGER PRIMARY KEY, v INT)")
+            .await
+            .unwrap();
+        let r = driver
+            .execute_query(DB, "INSERT INTO r (v) VALUES (10), (20) RETURNING id, v")
+            .await
+            .unwrap();
+        assert!(r.is_select);
+        assert_eq!(r.columns, vec!["id", "v"]);
+        assert_eq!(r.rows.len(), 2);
+
+        let r = driver
+            .execute_query(DB, "SELECT id, v FROM r WHERE 0")
+            .await
+            .unwrap();
+        assert!(r.is_select);
+        assert_eq!(r.columns, vec!["id", "v"]);
+        assert!(r.rows.is_empty());
+
+        let r = driver
+            .execute_query(DB, "DELETE FROM r WHERE v < 0 RETURNING id")
+            .await
+            .unwrap();
+        assert!(r.is_select);
+        assert_eq!(r.columns, vec!["id"]);
+
+        let r = driver
+            .execute_query(DB, "UPDATE r SET v = v + 1")
+            .await
+            .unwrap();
+        assert!(!r.is_select);
+        assert_eq!(r.rows_affected, 2);
+    };
+    run.await;
+    let _ = std::fs::remove_file(&path);
+}
