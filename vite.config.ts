@@ -25,6 +25,15 @@ export default defineConfig(async () => ({
   },
   build: {
     chunkSizeWarningLimit: 2200,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          // Monaco is bundled (see src/lib/monacoSetup.ts); keep it in its
+          // own chunk rather than tripling the size of the app chunk.
+          groups: [{ name: "monaco", test: /node_modules[\\/]monaco-editor[\\/]/ }],
+        },
+      },
+    },
   },
   clearScreen: false,
   server: {
