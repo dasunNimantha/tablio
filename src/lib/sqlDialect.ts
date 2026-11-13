@@ -159,3 +159,27 @@ export function stringLiteral(dbType: DbType | undefined, value: string): string
   escaped = escaped.replace(/'/g, "''");
   return `'${escaped}'`;
 }
+
+/** sql-formatter language for a connection's dialect. */
+export type FormatterLanguage = "postgresql" | "mysql" | "mariadb" | "tidb" | "sqlite" | "transactsql" | "sql";
+
+export function formatterLanguage(dbType: DbType | undefined): FormatterLanguage {
+  switch (dbType) {
+    case "postgres":
+    case "cockroachdb":
+      return "postgresql";
+    case "mysql":
+      return "mysql";
+    case "mariadb":
+      return "mariadb";
+    case "tidb":
+      return "tidb";
+    case "sqlite":
+      return "sqlite";
+    case "mssql":
+      return "transactsql";
+    default:
+      // Cassandra (CQL) and unknown connections: the generic dialect.
+      return "sql";
+  }
+}

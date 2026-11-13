@@ -14,7 +14,18 @@ import { readZoomFactor } from "../../lib/zoom";
 import type { SourceTable } from "./simpleSelect";
 import { cellToText, compareCellValues, editorInputToValue, isNumericType } from "../../lib/cellValues";
 import { useReportTabDirty } from "../../hooks/useTabDirty";
+import {
+  LARGE_TEXT_EDITOR_PARAMS,
+  cellEditText,
+  colField,
+  colIndexFromId,
+  restoreLineEndings,
+  rowToObject,
+  shouldSuppressGridKey,
+  usesLargeTextEditor,
+} from "../../lib/gridData";
 import { pendingInsertToNewRow, type PendingInsert } from "../DataGrid/pendingInsert";
+import { nullCellSelector } from "../DataGrid/NullCell";
 import "../DataGrid/ag-grid-theme.css";
 import "./QueryConsole.css";
 
@@ -104,7 +115,8 @@ interface Props {
   connectionId: string;
   database: string;
   sourceTable: SourceTable | null;
-  onReExecute: () => void;
+  /** Re-runs the query after a save; resolves once the new result is in. */
+  onReExecute: () => void | Promise<void>;
   /** Owning tab, used to report unsaved edits before the tab closes. */
   tabId?: string;
   /** False while the owning tab is in the background: keyboard
@@ -122,10 +134,14 @@ function sameCellValue(a: unknown, b: unknown): boolean {
 
 let nextResultInsertId = 1;
 
+const ROW_NUM_COL = "__rownum";
+
 interface RowObj {
   __rowIdx: number;
   __isInserted?: boolean;
   __isDeleted?: boolean;
+  /** Pending inserts: which columns the user has set. */
+  __touched?: boolean[];
   [key: string]: unknown;
 }
 
@@ -201,6 +217,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
   const [deletedIndices, setDeletedIndices] = useState<Set<number>>(new Set());
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [tableColumns, setTableColumns] = useState<ColumnInfo[] | null>(null);
   const [fkMap, setFkMap] = useState<Map<string, ForeignKeyInfo>>(new Map());
 
@@ -290,9 +307,12 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
 
   // Row objects for unedited rows are built once per result and reused;
   // only edited / deleted / inserted rows get fresh objects.
+  // Values are keyed by column position (`colField`), not name: names
+  // can repeat (`SELECT a.id, b.id`) or contain "." (`price*1.1`,
+  // `"t.name"`), which ag-grid would read as a nested path.
   const baseRowObjs = useMemo((): RowObj[] => result.rows.map((row, i) => {
     const obj: RowObj = { __rowIdx: i, __isInserted: false, __isDeleted: false };
-    result.columns.forEach((col, colIdx) => { obj[col] = row[colIdx]; });
+    result.columns.forEach((_, colIdx) => { obj[colField(colIdx)] = row[colIdx]; });
     return obj;
   }), [result.rows, result.columns]);
 
@@ -302,13 +322,13 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
       const deleted = deletedIndices.has(i);
       if (!edits && !deleted) return base;
       const obj: RowObj = { ...base, __isDeleted: deleted };
-      edits?.forEach((v, c) => { obj[result.columns[c]] = v; });
+      edits?.forEach((v, c) => { obj[colField(c)] = v; });
       return obj;
     });
     insertedRows.forEach((ins, k) => {
       const i = result.rows.length + k;
-      const obj: RowObj = { __rowIdx: i, __isInserted: true, __isDeleted: deletedIndices.has(i) };
-      result.columns.forEach((col, colIdx) => { obj[col] = ins.values[colIdx]; });
+      const obj: RowObj = { __rowIdx: i, __isInserted: true, __isDeleted: deletedIndices.has(i), __touched: ins.touched };
+      result.columns.forEach((_, colIdx) => { obj[colField(colIdx)] = ins.values[colIdx]; });
       rows.push(obj);
     });
     return rows;
@@ -390,8 +410,12 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
   }, []);
 
   const handleSaveToDb = useCallback(async () => {
-    if (!isUpdatable || !sourceTable) return;
+    // The ref blocks a second click before `saving` re-renders.
+    if (!isUpdatable || !sourceTable || savingRef.current) return;
+    savingRef.current = true;
+    gridApiRef.current?.stopEditing();
     setSaving(true);
+    let savedCount = 0;
     try {
       const pkColNames = pkColumns.map((c) => c.name);
       const pkColIndices = pkColNames.map((name) => result.columns.indexOf(name));
@@ -443,13 +467,26 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
       };
 
       await api.applyChanges(changes);
-      addToast(`Saved ${updates.length + inserts.length + deletes.length} changes`);
-      setDeletedIndices(new Set());
-      setSelectedIndices(new Set());
-      onReExecute();
+      savedCount = updates.length + inserts.length + deletes.length;
     } catch (e) {
       addToast(String(e), "error");
+      savingRef.current = false;
+      setSaving(false);
+      return;
+    }
+    addToast(`Saved ${savedCount} change${savedCount === 1 ? "" : "s"}`);
+    try {
+      // Save stays disabled (and the saved edits stay visible) until the
+      // re-run lands; then nothing is pending any more, whether or not
+      // the re-run worked. Saving again would insert the rows twice.
+      await onReExecute();
     } finally {
+      setCellEdits(new Map());
+      setInsertedRows([]);
+      setDeletedIndices(new Set());
+      setSelectedIndices(new Set());
+      gridApiRef.current?.deselectAll();
+      savingRef.current = false;
       setSaving(false);
     }
   }, [isUpdatable, sourceTable, pkColumns, result, cellEdits, insertedRows, deletedIndices, connectionId, database, addToast, onReExecute]);
@@ -486,6 +523,7 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
 
   const columnDefs = useMemo((): ColDef[] => {
     const rowNumCol: ColDef = {
+      colId: ROW_NUM_COL,
       headerName: "#",
       width: 55,
       minWidth: 55,
@@ -497,9 +535,12 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
       suppressMovable: true,
       cellClass: "grid-row-number",
       headerClass: "grid-row-number",
+      // Visual position, so numbers stay 1..n after a client-side sort.
       valueGetter: (params) => {
         if (!params.data) return "";
-        return params.data.__rowIdx + 1;
+        if (params.data.__isDeleted) return "−";
+        if (params.data.__isInserted) return "+";
+        return (params.node?.rowIndex ?? params.data.__rowIdx) + 1;
       },
       onCellClicked: (params) => {
         const e = params.event as MouseEvent;
@@ -512,8 +553,17 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
       const colMeta = columnInfos[colIdx];
       const fk = fkMap.get(col);
       const isAutoGen = colMeta?.is_auto_generated || false;
+      const field = colField(colIdx);
+      // Untouched columns of a pending insert are left to the database.
+      const placeholderFor = (row: RowObj | undefined, value: unknown): string | null => {
+        if (!row?.__isInserted || row.__touched?.[colIdx]) return null;
+        if (value !== null && value !== undefined) return null;
+        if (isAutoGen) return "auto";
+        if (colMeta?.default_value !== null && colMeta?.default_value !== undefined) return "default";
+        return null;
+      };
       const def: ColDef = {
-        field: col,
+        colId: field,
         headerName: col,
         headerTooltip: colMeta ? `${col} (${colMeta.data_type})` : col,
         ...(tableColumns ? {
@@ -524,55 +574,64 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
             fk,
           },
         } : {}),
+        valueGetter: (params) => (params.data ? cellEditText(params.data[field]) : null),
         sortable: true,
         resizable: true,
         // Exact big integers / decimals arrive as strings; sort them
-        // numerically alongside regular numbers.
-        comparator: (a: unknown, b: unknown) =>
-          compareCellValues(a, b, !!colMeta && isNumericType(colMeta.data_type)),
+        // numerically alongside regular numbers. Compares the raw
+        // values, not the display text.
+        comparator: (_a: unknown, _b: unknown, nodeA, nodeB) =>
+          compareCellValues(nodeA?.data?.[field], nodeB?.data?.[field], !!colMeta && isNumericType(colMeta.data_type)),
         editable: (params) => {
-          if (!isUpdatable) return false;
+          if (!isUpdatable || savingRef.current) return false;
           if (!params.data) return false;
           if (params.data.__isDeleted) return false;
-          if (params.data.__isInserted && isAutoGen && (params.data[col] === null || params.data[col] === undefined)) return false;
+          if (params.data.__isInserted && isAutoGen && (params.data[field] === null || params.data[field] === undefined)) return false;
           return true;
         },
+        cellRendererSelector: nullCellSelector,
+        cellEditorSelector: (params) =>
+          usesLargeTextEditor(colMeta?.data_type, params.data?.[field])
+            ? { component: "agLargeTextCellEditor", popup: true, params: LARGE_TEXT_EDITOR_PARAMS }
+            : { component: "agTextCellEditor" },
         minWidth: 80,
         cellClassRules: {
-          "cell-null": (params) => params.value === null || params.value === undefined,
+          "cell-null": (params) => (params.value === null || params.value === undefined) && !placeholderFor(params.data, params.value),
           "cell-modified": (params) => {
             if (!params.data || params.data.__isInserted || params.data.__isDeleted) return false;
             return cellEditsRef.current.get(params.data.__rowIdx)?.has(colIdx) ?? false;
           },
           "cell-inserted": (params) => params.data?.__isInserted === true,
-          "cell-auto": (params) => {
-            return params.data?.__isInserted && isAutoGen && (params.value === null || params.value === undefined);
-          },
+          "cell-auto": (params) => placeholderFor(params.data, params.value) !== null,
           "cell-search-match": (params) => {
             const q = searchQueryRef.current;
             if (!q) return false;
-            const v = params.value;
-            const str = (v === null || v === undefined) ? "null" : typeof v === "object" ? JSON.stringify(v) : String(v);
+            const str = params.value === null || params.value === undefined ? "null" : String(params.value);
             return str.toLowerCase().includes(q.toLowerCase());
           },
           "cell-search-current": (params) => {
             const cur = searchCurrentRef.current;
-            if (!cur) return false;
-            return params.rowIndex === cur.rowIndex && params.colDef.field === cur.colId;
+            if (!cur || !params.data) return false;
+            return params.data.__rowIdx === cur.rowIndex && params.column.getColId() === cur.colId;
           },
         },
         valueFormatter: (params) => {
-          if (params.data?.__isInserted && isAutoGen && (params.value === null || params.value === undefined)) return "auto";
+          const placeholder = placeholderFor(params.data, params.value);
+          if (placeholder) return placeholder;
           if (params.value === null || params.value === undefined) return "NULL";
-          if (typeof params.value === "object") return JSON.stringify(params.value);
           return String(params.value);
         },
         valueSetter: (params) => {
           if (params.newValue === params.oldValue) return false;
-          if ((params.oldValue === null || params.oldValue === undefined) && params.newValue === "") return false;
+          if ((params.oldValue === null || params.oldValue === undefined) &&
+            (params.newValue === "" || params.newValue === null || params.newValue === undefined)) return false;
+          // Delete clears with null: empties text, NULL for other types.
+          const typed = params.newValue === null || params.newValue === undefined
+            ? ""
+            : restoreLineEndings(params.data[field], String(params.newValue));
           const parsed = colMeta
-            ? editorInputToValue(params.newValue, colMeta)
-            : { ok: true as const, value: params.newValue };
+            ? editorInputToValue(typed, colMeta)
+            : { ok: true as const, value: typed };
           if (!parsed.ok) {
             addToast(`${col}: ${parsed.error}`, "error");
             return false;
@@ -612,16 +671,11 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
     sortable: true,
     suppressHeaderMenuButton: true,
     cellDataType: false,
-    suppressKeyboardEvent: (params) => {
-      if (!params.editing) {
-        const key = params.event.key;
-        if (key === "Delete" || key === "Backspace" || key === "Enter" || key === "F2" ||
-          (key.length === 1 && !params.event.ctrlKey && !params.event.metaKey)) {
-          return true;
-        }
-      }
-      return false;
-    },
+    suppressKeyboardEvent: (params) => shouldSuppressGridKey({
+      editing: params.editing,
+      key: params.event.key,
+      hasRowSelection: selectedIndicesRef.current.size > 0,
+    }),
   }), []);
 
   const [searchMatchIdx, setSearchMatchIdx] = useState(-1);
@@ -647,8 +701,8 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
         const str = r < baseSearchText.length && !edits?.has(c)
           ? baseSearchText[r][c]
           : cellToText(row[c]).toLowerCase();
-        if (str.includes(q) && result.columns[c]) {
-          matches.push({ rowIndex: r, colId: result.columns[c] });
+        if (str.includes(q) && c < result.columns.length) {
+          matches.push({ rowIndex: r, colId: colField(c) });
         }
       }
     }
@@ -664,7 +718,9 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
     searchCurrentRef.current = match;
     const api = gridApiRef.current;
     if (!api) return;
-    api.ensureIndexVisible(match.rowIndex, "middle");
+    // `rowIndex` is the data row; find where it is shown (sorting moves it).
+    const node = api.getRowNode(String(match.rowIndex));
+    if (node) api.ensureNodeVisible(node, "middle");
     api.ensureColumnVisible(match.colId);
     api.refreshCells({ force: true });
   }, [searchMatches]);
@@ -755,50 +811,58 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
     gridApiRef.current = params.api;
   }, []);
 
+  // Row numbers show the visual position; recompute them after a sort.
+  const onSortChanged = useCallback(() => {
+    gridApiRef.current?.refreshCells({ columns: [ROW_NUM_COL], force: true });
+  }, []);
+
   const onCellContextMenu = useCallback((event: CellContextMenuEvent) => {
     if (!event.data) return;
     const e = event.event as MouseEvent;
     if (!e) return;
     e.preventDefault();
     const z = readZoomFactor();
-    const colIdx = event.column ? result.columns.indexOf(event.column.getColId()) : -1;
+    const colIdx = colIndexFromId(event.column?.getColId());
     setContextMenu({ x: e.clientX / z, y: e.clientY / z, rowIdx: event.data.__rowIdx, colIdx });
-  }, [result.columns]);
+  }, []);
 
   const handleCopyRowAsJson = useCallback(() => {
     if (contextMenu === null) return;
-    const obj: Record<string, unknown> = {};
-    result.columns.forEach((col, i) => {
-      obj[col] = editingRows[contextMenu.rowIdx]?.[i];
-    });
+    // Duplicate names become id, id_2, ... instead of overwriting.
+    const obj = rowToObject(result.columns, editingRows[contextMenu.rowIdx] ?? []);
     navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
     setContextMenu(null);
   }, [contextMenu, result.columns, editingRows]);
 
   const handleCopyCell = useCallback(() => {
     if (contextMenu === null) return;
-    const focusedCell = gridApiRef.current?.getFocusedCell();
-    if (focusedCell) {
-      const colId = focusedCell.column.getColId();
-      const colIdx = result.columns.indexOf(colId);
-      if (colIdx >= 0) {
-        const val = editingRows[contextMenu.rowIdx]?.[colIdx];
-        const str = val === null || val === undefined ? "NULL" : typeof val === "object" ? JSON.stringify(val) : String(val);
-        navigator.clipboard.writeText(str);
-      }
+    // The right-clicked cell (the focused cell can be elsewhere).
+    const colIdx = contextMenu.colIdx;
+    if (colIdx >= 0) {
+      const val = editingRows[contextMenu.rowIdx]?.[colIdx];
+      navigator.clipboard.writeText(cellEditText(val) ?? "NULL");
     }
     setContextMenu(null);
-  }, [contextMenu, result.columns, editingRows]);
+  }, [contextMenu, editingRows]);
 
-  const formatRowAsInsert = useCallback((row: unknown[]): string => {
+  const formatRowAsInsert = useCallback((row: unknown[], include?: boolean[]): string => {
     if (!sourceTable) return "";
     // Dialect-aware: previously emitted PG-style `"..."` quoting and
     // `TRUE` / `FALSE` literals regardless of the source connection,
     // so the snippet wasn't runnable as-is on default-mode MySQL or
     // MSSQL.
     const dbType = connections.find((c) => c.id === connectionId)?.db_type;
-    const cols = result.columns.map((c) => quoteIdent(dbType, c)).join(", ");
-    const vals = row
+    const tblName = quoteQualified(dbType, sourceTable.schema, sourceTable.table);
+    // Pending inserts leave untouched columns to their DEFAULT, as Save does.
+    const idx = result.columns.map((_, i) => i).filter((i) => !include || include[i]);
+    if (idx.length === 0) {
+      return dbType === "mysql" || dbType === "mariadb" || dbType === "tidb"
+        ? `INSERT INTO ${tblName} () VALUES ();`
+        : `INSERT INTO ${tblName} DEFAULT VALUES;`;
+    }
+    const cols = idx.map((i) => quoteIdent(dbType, result.columns[i])).join(", ");
+    const vals = idx
+      .map((i) => row[i])
       .map((v) => {
         if (v === null) return "NULL";
         if (typeof v === "number") return String(v);
@@ -813,9 +877,12 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
   const handleCopyAsInsert = useCallback(() => {
     if (contextMenu === null) return;
     const row = editingRows[contextMenu.rowIdx];
-    if (row) navigator.clipboard.writeText(formatRowAsInsert(row));
+    const ins = contextMenu.rowIdx >= result.rows.length
+      ? insertedRows[contextMenu.rowIdx - result.rows.length]
+      : undefined;
+    if (row) navigator.clipboard.writeText(formatRowAsInsert(row, ins?.touched));
     setContextMenu(null);
-  }, [contextMenu, editingRows, formatRowAsInsert]);
+  }, [contextMenu, editingRows, formatRowAsInsert, result.rows.length, insertedRows]);
 
   const handleToggleDeleteRow = useCallback((rowIdx: number) => {
     setDeletedIndices((prev) => {
@@ -912,7 +979,8 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
         <button
           className={`btn-ghost ${resultMode === "chart" ? "active-filter" : ""}`}
           onClick={onToggleChart}
-          title="Toggle Chart View"
+          disabled={result.rows.length === 0}
+          title={result.rows.length === 0 ? "No rows to chart" : "Toggle Chart View"}
         >
           <BarChart3 size={14} /> Chart
         </button>
@@ -964,7 +1032,8 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
           </button>
         </div>
       )}
-      <div className="ag-grid-wrapper" style={{ flex: 1 }}>
+      <div className="result-table-body">
+      <div className="ag-grid-wrapper">
         <AgGridReact
           theme={gridTheme}
           modules={[AllCommunityModule]}
@@ -976,6 +1045,8 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
           onGridReady={onGridReady}
           onCellClicked={onCellClicked}
           onCellContextMenu={onCellContextMenu}
+          onSortChanged={onSortChanged}
+          overlayNoRowsTemplate='<span class="result-no-rows">No rows</span>'
           preventDefaultOnContextMenu={true}
           animateRows={false}
           suppressCellFocus={false}
@@ -1072,17 +1143,21 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
         </div>
       )}
 
+      {/* Inside the grid body so the panel never covers the toolbar
+          (Chart / Export / Save stay reachable while it is open). */}
       {detailRowIdx !== null && editingRows[detailRowIdx] && (
         <RowDetailView
           columns={columnInfos}
           row={editingRows[detailRowIdx]}
           rowIndex={detailRowIdx}
           onClose={() => setDetailRowIdx(null)}
+          readOnly={!isUpdatable || saving || deletedIndices.has(detailRowIdx)}
           onCellChange={(colIndex, newValue) =>
             handleCellChange(detailRowIdx, colIndex, newValue)
           }
         />
       )}
+      </div>
     </div>
   );
 }

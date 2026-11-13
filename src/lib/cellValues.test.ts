@@ -112,6 +112,36 @@ describe("editorInputToValue", () => {
     expect(editorInputToValue("", intNotNull).ok).toBe(false);
   });
 
+  it("sends edited JSON back as its exact text", () => {
+    const json = { data_type: "jsonb", is_nullable: true };
+    expect(editorInputToValue('{ "b": 1, "a": [1, 2] }', json))
+      .toEqual({ ok: true, value: '{ "b": 1, "a": [1, 2] }' });
+    expect(editorInputToValue("[1,\n 2]", json)).toEqual({ ok: true, value: "[1,\n 2]" });
+    expect(editorInputToValue("42", json)).toEqual({ ok: true, value: "42" });
+  });
+
+  it("keeps the JSON null literal distinct from SQL NULL in JSON columns", () => {
+    const json = { data_type: "jsonb", is_nullable: true };
+    expect(editorInputToValue("null", json)).toEqual({ ok: true, value: "null" });
+    expect(editorInputToValue(" NULL ", json).ok).toBe(false); // not valid JSON
+    expect(editorInputToValue("", json)).toEqual({ ok: true, value: null });
+    expect(editorInputToValue(null, json)).toEqual({ ok: true, value: null });
+    // Other non-text types still read the word as SQL NULL.
+    expect(editorInputToValue("null", { data_type: "integer", is_nullable: true })).toEqual({ ok: true, value: null });
+  });
+
+  it("accepts non-finite float text as sent by the backend", () => {
+    const f = { data_type: "double precision", is_nullable: true };
+    for (const v of ["NaN", "Infinity", "-Infinity"]) expect(editorInputToValue(v, f)).toEqual({ ok: true, value: v });
+  });
+
+  it("rejects invalid JSON and never stores [object Object]", () => {
+    const json = { data_type: "json", is_nullable: true };
+    expect(editorInputToValue("[object Object]", json).ok).toBe(false);
+    expect(editorInputToValue("{a:1}", json)).toEqual({ ok: false, error: "Invalid JSON" });
+    expect(editorInputToValue("", json)).toEqual({ ok: true, value: null });
+  });
+
   it("rejects invalid numbers and keeps big integers exact", () => {
     expect(editorInputToValue("12abc", int).ok).toBe(false);
     expect(editorInputToValue("123456789012345678901", { data_type: "numeric", is_nullable: true }))

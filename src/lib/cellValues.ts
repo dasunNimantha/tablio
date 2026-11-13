@@ -120,6 +120,17 @@ export function parseCellInput(raw: string, dataType: string | null | undefined)
       if (["false", "f", "0", "no", "n"].includes(lower)) return { ok: true, value: false };
       return { ok: false, error: "Expected boolean (true/false/t/f/1/0)" };
     }
+    case "json": {
+      // JSON/JSONB values travel as their raw JSON text in both
+      // directions; validate it here but send the text exactly as
+      // typed so key order and formatting are the user's.
+      try {
+        JSON.parse(s);
+      } catch {
+        return { ok: false, error: "Invalid JSON" };
+      }
+      return { ok: true, value: raw };
+    }
     default:
       return { ok: true, value: raw };
   }
@@ -146,7 +157,11 @@ export function editorInputToValue(raw: unknown, col: EditableColumn): ParseResu
   const s = typeof raw === "string" ? raw : String(raw);
   if (!isTextLike(col.data_type)) {
     const t = s.trim();
-    if (t === "" || t.toLowerCase() === "null") {
+    // For JSON columns `null` is a valid JSON document (the JSON null
+    // literal), distinct from SQL NULL (the explicit "Set NULL" action
+    // or an empty editor).
+    const sqlNullWord = valueCategory(col.data_type) !== "json" && t.toLowerCase() === "null";
+    if (t === "" || sqlNullWord) {
       return col.is_nullable ? { ok: true, value: null } : { ok: false, error: "This column is NOT NULL — value required" };
     }
   }

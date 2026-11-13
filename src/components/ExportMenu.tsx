@@ -28,8 +28,9 @@ export function ExportMenu({ onExport }: Props) {
         className="btn-ghost"
         onClick={() => setOpen(!open)}
         title="Export Data"
+        aria-label="Export"
       >
-        <Download size={14} /> Export
+        <Download size={14} /> <span className="btn-label">Export</span>
       </button>
       {open && (
         <div className="export-menu-dropdown">

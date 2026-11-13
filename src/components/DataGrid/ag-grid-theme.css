@@ -96,6 +96,22 @@
   font-style: italic;
 }
 
+/* Real NULL renders as a small muted pill (see NullCell), so it can't
+   be mistaken for the text "NULL", which renders as plain text. */
+.ag-grid-wrapper .cell-null-pill {
+  display: inline-block;
+  line-height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  font-size: 0.82em;
+  font-style: normal;
+  letter-spacing: 0.02em;
+  color: var(--cell-null);
+  background: color-mix(in srgb, var(--cell-null) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cell-null) 30%, transparent);
+  vertical-align: middle;
+}
+
 .ag-grid-wrapper .cell-modified {
   background: var(--cell-modified) !important;
 }
@@ -111,8 +127,21 @@
 
 .ag-grid-wrapper .row-deleted {
   background: var(--cell-deleted) !important;
+  opacity: 0.6;
+}
+
+/* Cells are positioned boxes, so the row's text-decoration doesn't
+   reach them: strike each cell (the row number shows "−"). */
+.ag-grid-wrapper .row-deleted .ag-cell {
   text-decoration: line-through;
-  opacity: 0.5;
+  text-decoration-thickness: 1.5px;
+}
+
+.ag-grid-wrapper .row-deleted .grid-row-number {
+  text-decoration: none;
+  color: var(--error) !important;
+  font-weight: 600;
+  font-size: 14px;
 }
 
 .ag-grid-wrapper .row-inserted .ag-cell {

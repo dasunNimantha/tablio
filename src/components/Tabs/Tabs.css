@@ -88,8 +88,37 @@
   flex-shrink: 0;
 }
 
-.tab:hover .tab-close {
+.tab:hover .tab-close,
+.tab:focus-visible .tab-close,
+.tab.active .tab-close {
   opacity: 1;
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Unsaved changes: hollow ring in the close slot, hidden on hover so
+   the X is reachable. */
+.tab.dirty .tab-close {
+  opacity: 1;
+}
+
+.tab-dirty-marker {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid var(--text-secondary);
+  box-sizing: border-box;
+}
+
+.tab.dirty:not(:hover) .tab-close-x {
+  display: none;
+}
+
+.tab.dirty:hover .tab-dirty-marker {
+  display: none;
 }
 
 .tab-close:hover {

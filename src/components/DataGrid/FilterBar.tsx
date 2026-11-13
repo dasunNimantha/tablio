@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { Plus, X, Play } from "lucide-react";
 import { ColumnInfo } from "../../lib/tauri";
 import { buildWhereClause as buildWhereClauseFromConditions, NO_VALUE_OPS, type FilterCondition } from "../../lib/filterBuilder";
@@ -8,6 +7,10 @@ import "./FilterBar.css";
 
 interface Props {
   columns: ColumnInfo[];
+  /** Conditions are owned by the grid so closing and reopening the bar
+   *  keeps what the applied filter was built from. */
+  conditions: FilterCondition[];
+  onConditionsChange: (next: FilterCondition[]) => void;
   onApply: (filter: string | null) => void;
   onClose: () => void;
   /** Optional — when provided, filters are emitted in dialect-correct
@@ -29,10 +32,14 @@ const OPERATORS = [
   { value: "IS NOT NULL", label: "IS NOT NULL" },
 ];
 
-export function FilterBar({ columns, onApply, onClose, dbType }: Props) {
-  const [conditions, setConditions] = useState<FilterCondition[]>([
-    { id: "1", column: columns[0]?.name || "", operator: "=", value: "", join: "AND" },
-  ]);
+/** The single empty condition a fresh filter bar starts with. */
+export function defaultFilterConditions(columns: ColumnInfo[]): FilterCondition[] {
+  return [{ id: "1", column: columns[0]?.name || "", operator: "=", value: "", join: "AND" }];
+}
+
+export function FilterBar({ columns, conditions, onConditionsChange, onApply, onClose, dbType }: Props) {
+  const setConditions = (update: (prev: FilterCondition[]) => FilterCondition[]) =>
+    onConditionsChange(update(conditions));
 
   const addCondition = () => {
     setConditions((prev) => [
@@ -50,9 +57,7 @@ export function FilterBar({ columns, onApply, onClose, dbType }: Props) {
   const removeCondition = (id: string) => {
     setConditions((prev) => {
       const next = prev.filter((c) => c.id !== id);
-      return next.length === 0
-        ? [{ id: "1", column: columns[0]?.name || "", operator: "=", value: "", join: "AND" }]
-        : next;
+      return next.length === 0 ? defaultFilterConditions(columns) : next;
     });
   };
 
@@ -71,9 +76,7 @@ export function FilterBar({ columns, onApply, onClose, dbType }: Props) {
   };
 
   const handleClear = () => {
-    setConditions([
-      { id: "1", column: columns[0]?.name || "", operator: "=", value: "", join: "AND" },
-    ]);
+    onConditionsChange(defaultFilterConditions(columns));
     onApply(null);
   };
 
