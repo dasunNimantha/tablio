@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { openTable } from "./helpers";
+import { openTable, openLargeTextEditor } from "./helpers";
 
 // These run several edits and saves each; allow for a loaded machine.
 test.describe.configure({ timeout: 60_000 });
@@ -108,8 +108,7 @@ test.describe("Data grid — multi-line and JSON editing", () => {
   });
 
   test("multi-line text is edited in a textarea and keeps its CRLF line breaks", async ({ page }) => {
-    await cell(page, 0, 2).dblclick();
-    const textarea = page.locator(".ag-large-text textarea");
+    const textarea = await openLargeTextEditor(page, cell(page, 0, 2));
     await expect(textarea).toBeVisible();
     await expect(textarea).toHaveValue("Line one\nLine two");
     await textarea.press("End");
@@ -127,8 +126,7 @@ test.describe("Data grid — multi-line and JSON editing", () => {
   });
 
   test("JSON is edited as its text and saved as text", async ({ page }) => {
-    await cell(page, 1, 3).dblclick();
-    const textarea = page.locator(".ag-large-text textarea");
+    const textarea = await openLargeTextEditor(page, cell(page, 1, 3));
     await expect(textarea).toHaveValue("[1, 2, 3]");
     await textarea.fill('{"a": [1, 2]}');
     await textarea.press("Enter");
@@ -140,8 +138,7 @@ test.describe("Data grid — multi-line and JSON editing", () => {
   });
 
   test("typed null in a JSON cell is the JSON null literal, Set NULL is SQL NULL", async ({ page }) => {
-    await cell(page, 1, 3).dblclick();
-    const textarea = page.locator(".ag-large-text textarea");
+    const textarea = await openLargeTextEditor(page, cell(page, 1, 3));
     await textarea.fill("null");
     await textarea.press("Enter");
     await cell(page, 2, 3).click({ button: "right" });
@@ -154,8 +151,7 @@ test.describe("Data grid — multi-line and JSON editing", () => {
   });
 
   test("invalid JSON is rejected", async ({ page }) => {
-    await cell(page, 1, 3).dblclick();
-    const textarea = page.locator(".ag-large-text textarea");
+    const textarea = await openLargeTextEditor(page, cell(page, 1, 3));
     await textarea.fill("{not json");
     await textarea.press("Enter");
     await expect(page.locator(".toast", { hasText: "Invalid JSON" })).toBeVisible();
@@ -164,8 +160,7 @@ test.describe("Data grid — multi-line and JSON editing", () => {
   });
 
   test("a structured value opens as JSON text, not [object Object]", async ({ page }) => {
-    await cell(page, 0, 4).dblclick();
-    await expect(page.locator(".ag-large-text textarea")).toHaveValue('{"owner":"ui"}');
+    await expect(await openLargeTextEditor(page, cell(page, 0, 4))).toHaveValue('{"owner":"ui"}');
   });
 });
 

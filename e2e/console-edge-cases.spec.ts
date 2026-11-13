@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { openQueryConsole } from "./helpers";
+import { openQueryConsole, openLargeTextEditor } from "./helpers";
 
 // These run several edits and saves each; allow for a loaded machine.
 test.describe.configure({ timeout: 60_000 });
@@ -165,8 +165,7 @@ test.describe("Result grid — editing", () => {
 
   test("multi-line text keeps its line breaks", async ({ page }) => {
     await run(page, "SELECT * FROM app_settings");
-    await rcell(page, 2, 2).dblclick();
-    const textarea = page.locator(".ag-large-text textarea");
+    const textarea = await openLargeTextEditor(page, rcell(page, 2, 2));
     await expect(textarea).toHaveValue("First\nSecond\nThird");
     await textarea.press("ControlOrMeta+End");
     await textarea.press("Shift+Enter");

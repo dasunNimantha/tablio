@@ -1,4 +1,4 @@
-import { Page } from "@playwright/test";
+import { expect, type Locator, Page } from "@playwright/test";
 
 export async function connectToLocalPostgres(page: Page) {
   const conn = page.locator(".tree-label", { hasText: "Local Postgres" });
@@ -225,4 +225,19 @@ export async function fillConnectionForm(
     const dbInput = dialog.locator("label", { hasText: /Database|Keyspace/ }).locator("..").locator("input");
     await dbInput.fill(fields.database);
   }
+}
+
+/**
+ * Double-click a grid cell and return the large-text (textarea) editor.
+ * Retries the double-click: right after results render, ag-grid may not
+ * have wired its editors yet and a double-click only selects the cell's
+ * text (seen on slower CI runners).
+ */
+export async function openLargeTextEditor(page: Page, cell: Locator): Promise<Locator> {
+  const textarea = page.locator(".ag-large-text textarea");
+  await expect(async () => {
+    if (!(await textarea.isVisible())) await cell.dblclick();
+    await expect(textarea).toBeVisible({ timeout: 1000 });
+  }).toPass({ timeout: 10_000 });
+  return textarea;
 }
