@@ -9,6 +9,10 @@
 .grid-toolbar {
   display: flex;
   align-items: center;
+  /* Lets the buttons collapse to icons when the grid itself is narrow
+     (window width alone doesn't tell: the sidebar takes a share). */
+  container-type: inline-size;
+  container-name: grid-toolbar;
   padding: 0 var(--gutter-sm) 0 var(--gutter-lg);
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
@@ -30,11 +34,41 @@
 
 .grid-toolbar .btn-ghost,
 .grid-toolbar .btn-primary,
-.grid-toolbar .btn-discard {
+.grid-toolbar .btn-discard,
+.grid-toolbar .btn-delete-selected {
   font-weight: 400;
   height: 30px;
   font-size: 13px;
   white-space: nowrap;
+  /* Never squeeze a button: labels used to run together and icons
+     shrank to dots at 1024-1280px. */
+  flex-shrink: 0;
+}
+
+.grid-toolbar button svg {
+  flex-shrink: 0;
+}
+
+/* Narrow grids: icon-only buttons (every button keeps a title tooltip
+   and an aria-label). Save / Discard keep their text. */
+@container grid-toolbar (max-width: 1080px) {
+  .grid-toolbar-right .btn-label {
+    display: none;
+  }
+  .grid-toolbar-right .btn-ghost {
+    padding: 0 8px;
+  }
+}
+
+@container grid-toolbar (max-width: 760px) {
+  .grid-toolbar-changes .btn-label {
+    display: none;
+  }
+}
+
+.grid-readonly-badge {
+  flex-shrink: 0;
+  margin-right: auto;
 }
 
 .btn-discard {
@@ -87,6 +121,13 @@
   min-width: 0;
   justify-content: flex-end;
   flex-wrap: nowrap;
+  /* Last resort for very narrow panes: scroll rather than overlap. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.grid-toolbar-right::-webkit-scrollbar {
+  display: none;
 }
 
 .grid-toolbar-changes {
@@ -109,12 +150,37 @@
 }
 
 .grid-error-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gutter-sm);
   padding: var(--gutter-sm) var(--gutter-lg);
   background: rgba(240, 100, 100, 0.07);
   border-bottom: 1px solid rgba(240, 100, 100, 0.12);
   color: var(--error);
   font-size: 15px;
   font-family: var(--font-mono);
+}
+
+.grid-error-banner-text {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.grid-error-banner-close {
+  flex-shrink: 0;
+  color: var(--error);
+}
+
+/* Grid + row detail panel: the panel is positioned in here so it never
+   covers the toolbar above. */
+.grid-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
 .grid-table-wrapper {
