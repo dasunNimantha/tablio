@@ -80,3 +80,7 @@ doc = false
 # locate it via path conventions, but workspace membership would force
 # the libfuzzer-sys dep into the parent build's lockfile.
 [workspace]
+
+# sqlx-core with TCP_NODELAY on its sockets; see vendor/sqlx-core/TABLIO_PATCH.md.
+[patch.crates-io]
+sqlx-core = { path = "../vendor/sqlx-core" }
