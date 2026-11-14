@@ -71,7 +71,7 @@ tempfile = "3"
 # is the zbus-based one (pure Rust, no libdbus needed at build or run
 # time) driven by zbus' own async-io executor, so it never touches the
 # tokio runtime.
-keyring = { version = "3.6", features = [
+keyring = { version = "4.0", features = [
     "apple-native",
     "windows-native",
     "async-secret-service",
