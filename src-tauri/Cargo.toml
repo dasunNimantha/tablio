@@ -88,7 +88,7 @@ keyring = { version = "3.6", features = [
 # session (see `KeyringStore::get_all`). Same crate and features `keyring`
 # already uses there, so this adds nothing to the build.
 [target.'cfg(target_os = "linux")'.dependencies]
-secret-service = { version = "4", features = ["rt-async-io-crypto-rust"] }
+secret-service = { version = "5", features = ["rt-async-io-crypto-rust"] }
 
 [target.'cfg(windows)'.dependencies]
 pageant = "0.2"
