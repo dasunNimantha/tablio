@@ -994,6 +994,28 @@ impl MssqlDriver {
     }
 }
 
+/// Run a catalog query through `sp_executesql` with `@schema` (and
+/// `@table` when given) as parameters. The statement text then stays
+/// the same from one table to the next, so SQL Server reuses its plan:
+/// compiling these multi-join catalog queries takes ~200 ms, far more
+/// than running them.
+fn parameterized(sql: &str, schema: &str, table: Option<&str>) -> String {
+    let lit = |v: &str| format!("N'{}'", v.replace('\'', "''"));
+    match table {
+        Some(t) => format!(
+            "EXEC sp_executesql {}, N'@schema sysname, @table sysname', @schema = {}, @table = {}",
+            lit(sql),
+            lit(schema),
+            lit(t)
+        ),
+        None => format!(
+            "EXEC sp_executesql {}, N'@schema sysname', @schema = {}",
+            lit(sql),
+            lit(schema)
+        ),
+    }
+}
+
 /// Columns of the tables and views of `schema` (or of just `table`),
 /// read from `sys.columns` with the expressions
 /// `INFORMATION_SCHEMA.COLUMNS` uses for the fields we keep, plus the
@@ -1014,10 +1036,12 @@ impl MssqlDriver {
 ///   from `column_id` once a column was dropped.
 fn mssql_columns_sql(database: &str, schema: &str, table: Option<&str>) -> String {
     let db = bracket(database);
-    let table_filter = table
-        .map(|t| format!(" AND o.name = N'{}'", t.replace('\'', "''")))
-        .unwrap_or_default();
-    format!(
+    let table_filter = if table.is_some() {
+        " AND o.name = @table"
+    } else {
+        ""
+    };
+    let sql = format!(
         "SELECT o.name, c.name,
                 ISNULL(st.name, ut.name) AS data_type,
                 CASE c.is_nullable WHEN 1 THEN 'YES' ELSE 'NO' END AS is_nullable,
@@ -1038,10 +1062,10 @@ fn mssql_columns_sql(database: &str, schema: &str, table: Option<&str>) -> Strin
          LEFT JOIN {db}.sys.types st ON st.user_type_id = c.system_type_id
          LEFT JOIN {db}.sys.default_constraints dc ON dc.object_id = c.default_object_id
          LEFT JOIN {db}.sys.sql_modules dm ON dm.object_id = c.default_object_id
-         WHERE o.type IN ('U', 'V') AND s.name = N'{schema}'{table_filter}
-         ORDER BY o.name, ordinal",
-        schema = schema.replace('\'', "''"),
-    )
+         WHERE o.type IN ('U', 'V') AND s.name = @schema{table_filter}
+         ORDER BY o.name, ordinal"
+    );
+    parameterized(&sql, schema, table)
 }
 
 fn mssql_column_from_row(r: &[serde_json::Value]) -> Option<(String, ColumnInfo)> {
@@ -1076,10 +1100,12 @@ fn mssql_column_from_row(r: &[serde_json::Value]) -> Option<(String, ColumnInfo)
 fn mssql_foreign_keys_sql(database: &str, schema: &str, table: Option<&str>) -> String {
     let db = bracket(database);
     let db_lit = database.replace('\'', "''");
-    let table_filter = table
-        .map(|t| format!(" AND pt.name = N'{}'", t.replace('\'', "''")))
-        .unwrap_or_default();
-    format!(
+    let table_filter = if table.is_some() {
+        " AND pt.name = @table"
+    } else {
+        ""
+    };
+    let sql = format!(
         "SELECT pt.name AS tname, fk.name, cp.name AS col,
                 OBJECT_SCHEMA_NAME(fk.referenced_object_id, DB_ID(N'{db_lit}')) AS rschema,
                 OBJECT_NAME(fk.referenced_object_id, DB_ID(N'{db_lit}')) AS rtable,
@@ -1092,10 +1118,10 @@ fn mssql_foreign_keys_sql(database: &str, schema: &str, table: Option<&str>) -> 
          INNER JOIN {db}.sys.schemas ps ON pt.schema_id = ps.schema_id
          INNER JOIN {db}.sys.columns cp ON fkc.parent_object_id = cp.object_id AND fkc.parent_column_id = cp.column_id
          INNER JOIN {db}.sys.columns cr ON fkc.referenced_object_id = cr.object_id AND fkc.referenced_column_id = cr.column_id
-         WHERE ps.name = N'{schema}'{table_filter}
-         ORDER BY pt.name, fk.name, fkc.constraint_column_id",
-        schema = schema.replace('\'', "''"),
-    )
+         WHERE ps.name = @schema{table_filter}
+         ORDER BY pt.name, fk.name, fkc.constraint_column_id"
+    );
+    parameterized(&sql, schema, table)
 }
 
 fn mssql_foreign_key_from_row(r: &[serde_json::Value]) -> Option<(String, ForeignKeyInfo)> {
