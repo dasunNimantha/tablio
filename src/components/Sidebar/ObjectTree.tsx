@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from "react";
+import { useStore } from "zustand";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
 import { useShallow } from "zustand/react/shallow";
@@ -15,12 +16,10 @@ import { ConnectionDialog } from "../ConnectionDialog";
 import {
   ChevronRight,
   ChevronDown,
-  Database,
   Table2,
   FolderOpen,
   Folder,
   Eye,
-  Terminal,
   Loader2,
   Zap,
   SearchIcon,
@@ -32,12 +31,20 @@ import {
   Trash2,
   Check,
   X,
-  Layers,
-  AlertTriangle,
-  RotateCw,
-  GitBranch,
   ShieldCheck,
 } from "lucide-react";
+import {
+  createTreeStore,
+  NO_FILTER,
+  TreeContext,
+  type TreeContextValue,
+  type TreeItemEntry,
+  type TreeNode,
+  type TreeRowHandlers,
+  type TreeState,
+  type TreeStore,
+} from "./treeModel";
+import { TreeRow } from "./TreeRows";
 import "./Sidebar.css";
 
 const MAX_FOLDER_NAME_LENGTH = 50;
@@ -47,6 +54,8 @@ const FOCUS_REFRESH_MIN_INTERVAL_MS = 5_000;
  *  the parent as skewed. Picked conservatively so that small fixtures with
  *  natural variance (e.g. one ~3x partition) don't false-positive. */
 const PARTITION_SKEW_RATIO = 5;
+/** Typing pauses this long before the filter is applied to the tree. */
+const FILTER_DEBOUNCE_MS = 120;
 
 /** Buckets a flat TableInfo[] into top-level rows + a parent->children map.
  *  A row is "top-level" when it has no `parent_table` *or* its parent isn't
@@ -155,47 +164,6 @@ const buildTableNode = (
   };
 };
 
-interface TreeNode {
-  id: string;
-  label: string;
-  type:
-    | "connection"
-    | "database"
-    | "schema"
-    | "table-group"
-    | "view-group"
-    | "function-group"
-    | "partition-group"
-    | "table"
-    | "view"
-    | "function";
-  connectionId: string;
-  connectionColor: string;
-  database?: string;
-  schema?: string;
-  tableName?: string;
-  tableType?: string;
-  /** Partition strategy when this node represents a partitioned parent. */
-  partitionStrategy?: "range" | "list" | "hash" | null;
-  /** Human-readable bound when this node is a partition child. */
-  partitionBound?: string | null;
-  /** True when this is the DEFAULT partition. */
-  isDefaultPartition?: boolean;
-  /** Estimated row count for tables / partitions. */
-  rowCountEstimate?: number | null;
-  /** Disk size including indexes/toast (bytes) for tables / partitions. */
-  totalBytes?: number | null;
-  /** Set on partitioned-parent nodes: the partition children, used to build
-      the synthetic Partitions sub-collection on expand. */
-  partitionChildren?: TableInfo[];
-  /** Set on partition-group nodes: pre-built children to render. */
-  preloadedChildren?: TreeNode[];
-  /** True if a partitioned parent shows skewed sizes across its partitions. */
-  hasSkewWarning?: boolean;
-  /** True if the DEFAULT partition under this parent has rows in it. */
-  hasDefaultPartitionRows?: boolean;
-}
-
 interface ContextMenuState {
   x: number;
   y: number;
@@ -204,21 +172,23 @@ interface ContextMenuState {
   returnFocusTo: HTMLElement | null;
 }
 
-/** What the keyboard handler needs to know about each rendered tree row. */
-interface TreeItemEntry {
-  expandable: boolean;
-  expanded: boolean;
-  toggle: () => void;
-  activate: () => void;
-  openMenu: (el: HTMLElement) => void;
-  rename?: () => void;
-}
-
 /** Context-menu position for a row opened from the keyboard. */
 function menuPointFor(el: HTMLElement): { x: number; y: number } {
   const r = el.getBoundingClientRect();
   const z = readZoomFactor();
   return { x: (r.left + Math.min(r.width / 2, 120)) / z, y: r.bottom / z };
+}
+
+/** A stable `setState(prev => next)` for one field of the tree store. */
+function useStoreSetter<K extends keyof TreeState>(store: TreeStore, key: K) {
+  return useCallback(
+    (update: (prev: TreeState[K]) => TreeState[K]) => {
+      const prev = store.getState()[key];
+      const next = update(prev);
+      if (next !== prev) store.setState({ [key]: next } as Pick<TreeState, K>);
+    },
+    [store, key],
+  );
 }
 
 interface ObjectTreeProps {
@@ -255,14 +225,15 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     returnFocusTo: HTMLElement | null;
   } | null>(null);
   const addToast = useToastStore((s) => s.addToast);
-  const [errorNodes, setErrorNodes] = useState<Record<string, string>>({});
-  const [focusedId, setFocusedId] = useState<string | null>(null);
+  // Expansion, loaded children, load state, focus and the applied filter
+  // live in a per-tree store that each row subscribes to (see TreeRow), so
+  // a change re-renders only the rows it affects.
+  const [store] = useState(createTreeStore);
   const treeRef = useRef<HTMLDivElement>(null);
   const renamingBusyRef = useRef(false);
-  // Rebuilt on every render by renderNode / the folder rows; read by the
-  // tree's keyboard handler.
+  // Keyboard metadata of mounted rows (registered by the rows themselves
+  // and by the folder rows below); read by the tree's keyboard handler.
   const treeItems = useRef(new Map<string, TreeItemEntry>());
-  treeItems.current = new Map();
   const [dragOverGroup, setDragOverGroup] = useState<string | null>(null);
   const [draggingConnId, setDraggingConnId] = useState<string | null>(null);
   const [emptyGroups, setEmptyGroups] = useState<Set<string>>(() => {
@@ -274,9 +245,13 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   const dragCounterRef = useRef<Record<string, number>>({});
   const newFolderInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [childrenMap, setChildrenMap] = useState<Record<string, TreeNode[]>>({});
-  const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set());
+  const setExpanded = useStoreSetter(store, "expanded");
+  const setChildrenMap = useStoreSetter(store, "childrenMap");
+  const setLoadingNodes = useStoreSetter(store, "loadingNodes");
+  const setErrorNodes = useStoreSetter(store, "errorNodes");
+  // Only folder rows are rendered here; other rows read focus themselves.
+  const focusedGroupId = useStore(store, (s) => (s.focusedId?.startsWith("group:") ? s.focusedId : null));
+  const setFocusedId = useCallback((id: string | null) => store.setState({ focusedId: id }), [store]);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [showTypeFilter, setShowTypeFilter] = useState(false);
@@ -646,7 +621,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
 
         setChildrenMap((prev) => ({ ...prev, [nodeId]: children }));
       } catch (err) {
-        // Shown as an error row with Retry under the node (see renderNode).
+        // Shown as an error row with Retry under the node (see TreeRow).
         console.error("Failed to load tree children:", err);
         setErrorNodes((prev) => ({ ...prev, [nodeId]: errorText(err) }));
       } finally {
@@ -657,26 +632,26 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         });
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [fetchChildren]
+    [fetchChildren, setExpanded, setChildrenMap, setLoadingNodes, setErrorNodes]
   );
 
   const expandNode = useCallback(
     async (node: TreeNode) => {
       const nodeId = node.id;
+      const { expanded, childrenMap } = store.getState();
       if (expanded.has(nodeId)) return;
       setExpanded((prev) => new Set(prev).add(nodeId));
       if (childrenMap[nodeId]) return;
       await loadChildren(node);
     },
-    [expanded, childrenMap, loadChildren]
+    [store, setExpanded, loadChildren]
   );
 
   const toggleExpand = useCallback(
     async (node: TreeNode) => {
       const nodeId = node.id;
 
-      if (expanded.has(nodeId)) {
+      if (store.getState().expanded.has(nodeId)) {
         setExpanded((prev) => {
           const next = new Set(prev);
           next.delete(nodeId);
@@ -687,7 +662,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
 
       await expandNode(node);
     },
-    [expanded, expandNode]
+    [store, setExpanded, expandNode]
   );
 
   /** Connect, open the server's Activity tab and (optionally) expand the
@@ -923,11 +898,6 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     openTab(tab);
   };
 
-  const expandedRef = useRef(expanded);
-  expandedRef.current = expanded;
-  const childrenMapRef = useRef(childrenMap);
-  childrenMapRef.current = childrenMap;
-
   /** Re-fetch `root` and every expanded descendant in place, so schema
    *  changes made outside the app show up without collapsing the tree.
    *  Cached children of collapsed descendants are dropped and reload lazily.
@@ -936,7 +906,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     async (root: TreeNode, opts?: { silent?: boolean }): Promise<boolean> => {
       const prefix = `${root.id}:`;
       const inSubtree = (id: string) => id === root.id || id.startsWith(prefix);
-      const expandedNow = expandedRef.current;
+      const expandedNow = store.getState().expanded;
       const refreshed = new Set<string>();
       let failed = false;
       let firstError: unknown = null;
@@ -957,7 +927,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
             continue;
           }
           refreshed.add(node.id);
-          const previous = childrenMapRef.current[node.id];
+          const previous = store.getState().childrenMap[node.id];
           if (previous && structureSignature(previous) !== structureSignature(children)) {
             structureChanged = true;
           }
@@ -971,7 +941,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       } finally {
         const stale = failed
           ? []
-          : Object.keys(childrenMapRef.current).filter((id) => inSubtree(id) && !refreshed.has(id));
+          : Object.keys(store.getState().childrenMap).filter((id) => inSubtree(id) && !refreshed.has(id));
         if (stale.length > 0) {
           setChildrenMap((prev) => {
             const next = { ...prev };
@@ -998,7 +968,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       }
       return structureChanged;
     },
-    [fetchChildren, addToast]
+    [store, fetchChildren, addToast, setChildrenMap, setExpanded, setLoadingNodes]
   );
 
   const connectionsRef = useRef(connections);
@@ -1018,7 +988,8 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     async (connectionId: string, silent: boolean) => {
       const conn = connectionsRef.current.find((c) => c.id === connectionId);
       if (!conn || !activeConnectionsRef.current.has(connectionId)) return;
-      if (!expandedRef.current.has(conn.id) && !childrenMapRef.current[conn.id]) return;
+      const { expanded, childrenMap } = store.getState();
+      if (!expanded.has(conn.id) && !childrenMap[conn.id]) return;
       if (refreshingRef.current.has(connectionId)) return;
       refreshingRef.current.add(connectionId);
       try {
@@ -1040,7 +1011,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         refreshingRef.current.delete(connectionId);
       }
     },
-    [refreshSubtree, invalidateSchema]
+    [store, refreshSubtree, invalidateSchema]
   );
 
   const seenSchemaVersionsRef = useRef(schemaVersions);
@@ -1080,6 +1051,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
   });
 
   const handleRefreshNode = async (node: TreeNode) => {
+    const { expanded, childrenMap } = store.getState();
     if (!expanded.has(node.id) && !childrenMap[node.id]) {
       expandNode(node);
       return;
@@ -1104,11 +1076,8 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     setContextMenu({ ...menuPointFor(el), node, returnFocusTo: el });
   };
 
-  /** Props shared by every `role="treeitem"` (roving tabindex). The tree
-   *  is "flat" in ARIA terms: each treeitem is just its row, with the
-   *  hierarchy given by aria-level / aria-setsize / aria-posinset, so a
-   *  row's accessible name is its own label and never swallows the text
-   *  of its descendants. */
+  /** Props of a folder row (`role="treeitem"`, roving tabindex). Object
+   *  rows render themselves; see TreeRow. */
   const treeItemProps = (
     id: string,
     opts: { level: number; label: string; expanded?: boolean; className?: string; pos?: [number, number] },
@@ -1118,9 +1087,9 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     "aria-expanded": opts.expanded,
     "aria-posinset": opts.pos?.[0],
     "aria-setsize": opts.pos?.[1],
-    "aria-selected": focusedId === id,
+    "aria-selected": focusedGroupId === id,
     "aria-label": opts.label,
-    tabIndex: focusedId === id ? 0 : -1,
+    tabIndex: focusedGroupId === id ? 0 : -1,
     "data-tree-id": id,
     className: `tree-item${opts.className ? ` ${opts.className}` : ""}`,
     onFocus: (e: React.FocusEvent<HTMLElement>) => {
@@ -1128,278 +1097,16 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     },
   });
 
-  /** Buttons inside a row are only tab stops while that row is current. */
-  const rowTabIndex = (id: string) => (focusedId === id ? 0 : -1);
-
-  /** Non-object rows ("(empty)", load errors) are treeitems too, so arrow
-   *  keys don't skip them; Enter on an error row retries. */
-  const registerPlaceholder = (id: string, activate?: () => void) => () => {
+  /** An empty folder's placeholder row is a treeitem too, so arrow keys
+   *  don't skip it. */
+  const registerPlaceholder = (id: string) => () => {
     treeItems.current.set(id, {
       expandable: false,
       expanded: false,
       toggle: () => {},
-      activate: activate ?? (() => {}),
+      activate: () => {},
       openMenu: () => {},
     });
-  };
-
-  interface RenderNodeOptions {
-    /** aria-level of this node (folders shift connections down a level). */
-    level: number;
-    /** [position, set size] among the node's siblings. */
-    pos?: [number, number];
-    labelSuffix?: React.ReactNode;
-    /** Extra controls rendered at the end of the row (connection actions). */
-    actions?: React.ReactNode;
-    rowClassName?: string;
-    labelClassName?: string;
-    /** Overrides the default expandability (inactive connections can't expand). */
-    expandable?: boolean;
-    icon?: React.ReactNode;
-  }
-
-  const renderNode = (node: TreeNode, depth: number, opts: RenderNodeOptions) => {
-    const { level, labelSuffix } = opts;
-    // A node is expandable when it ships preloadedChildren (partitioned
-    // parent / partition-group) or when it's a non-leaf branch type.
-    const isPartitionedParent = node.type === "table" && !!node.preloadedChildren;
-    const baseLeaf =
-      node.type === "table" || node.type === "view" || node.type === "function";
-    const isLeaf = opts.expandable === undefined ? baseLeaf && !isPartitionedParent : !opts.expandable;
-    const children = isPartitionedParent
-      ? node.preloadedChildren!
-      : childrenMap[node.id];
-    const q = searchQuery.trim().toLowerCase();
-    const selfMatches = hasActiveFilter && q && node.label.toLowerCase().includes(q);
-    const descendantMatches = hasActiveFilter && !selfMatches && children?.some((c) => nodeMatchesFilter(c, q));
-    const isExpanded = !isLeaf && (expanded.has(node.id) || (hasActiveFilter && !!descendantMatches));
-    const isLoading = loadingNodes.has(node.id);
-    const loadError = errorNodes[node.id];
-
-    const getIconInfo = (): { icon: React.ReactNode; cls: string } => {
-      if (isLoading) return { icon: <Loader2 size={15} className="spin" />, cls: "" };
-      switch (node.type) {
-        case "connection":
-          return { icon: <Database size={15} />, cls: "icon-connection" };
-        case "database":
-          return { icon: <Database size={15} />, cls: "icon-database" };
-        case "schema":
-          return { icon: <Layers size={15} />, cls: "icon-schema" };
-        case "table":
-          return { icon: <Table2 size={15} />, cls: "icon-table" };
-        case "view":
-          return { icon: <Eye size={15} />, cls: "icon-view" };
-        case "function":
-          return { icon: <Zap size={15} />, cls: "icon-function" };
-        case "partition-group":
-          return { icon: <GitBranch size={15} />, cls: "icon-partition-group" };
-        case "table-group":
-        case "view-group":
-        case "function-group":
-          return { icon: isExpanded ? <FolderOpen size={15} /> : <Folder size={15} />, cls: "icon-folder" };
-        default:
-          return { icon: <Database size={15} />, cls: "icon-database" };
-      }
-    };
-    const iconInfo = getIconInfo();
-
-    // Sidebar shows only the lightweight summary: a strategy chip on the
-    // partitioned parent, a "default" chip and italic on default partitions,
-    // a warning icon when the parent has problems, and a count on the
-    // Partitions sub-collection. Row count and size are intentionally omitted
-    // because the row count is a stale planner estimate that confuses users
-    // when it disagrees with a live COUNT(*); both metrics live in the
-    // Schema page and the Partitions tab where they can be presented
-    // accurately and with the context that they're estimates.
-    const isDefaultPartition = node.type === "table" && !!node.isDefaultPartition;
-    const showStrategyChip = isPartitionedParent && !!node.partitionStrategy;
-    const showWarning = node.hasDefaultPartitionRows || node.hasSkewWarning;
-
-    const partitionGroupCount =
-      node.type === "partition-group" ? children?.length ?? 0 : null;
-
-    const activate = () => {
-      // Partitioned parent tables are still tables — opening their data
-      // tab on a single click matches a regular table; expansion happens
-      // via the chevron (or double-click on a non-leaf branch type).
-      if (baseLeaf) {
-        handleDoubleClick(node);
-      } else if (node.type === "connection" && isLeaf) {
-        handleDoubleClick(node);
-      } else {
-        toggleExpand(node);
-      }
-    };
-    treeItems.current.set(node.id, {
-      expandable: !isLeaf,
-      expanded: isExpanded,
-      toggle: () => toggleExpand(node),
-      activate,
-      openMenu: (el) => openContextMenuFor(node, el),
-    });
-    const tab = rowTabIndex(node.id);
-    // The accessible name includes any visible chip text so it matches
-    // what's on screen (WCAG 2.5.3).
-    const rowName = [
-      node.label,
-      showStrategyChip ? node.partitionStrategy : null,
-      isDefaultPartition ? "default" : null,
-      partitionGroupCount ? String(partitionGroupCount) : null,
-    ]
-      .filter(Boolean)
-      .join(" ");
-    const childList = isExpanded && children ? filterNodes(children) : [];
-
-    return (
-      <div key={node.id} className="tree-subtree">
-        <div
-          {...treeItemProps(node.id, {
-            level,
-            label: rowName,
-            expanded: isLeaf ? undefined : isExpanded,
-            pos: opts.pos,
-            className: `tree-node ${isLeaf ? "leaf" : ""} ${isDefaultPartition ? "tree-node-default-partition" : ""}${opts.rowClassName ? ` ${opts.rowClassName}` : ""}`,
-          })}
-          style={{ paddingLeft: depth * 12 + 6 }}
-          onClick={() => {
-            if (node.type === "connection" && isLeaf) return; // inactive: double-click connects
-            activate();
-          }}
-          onDoubleClick={() => !baseLeaf && handleDoubleClick(node)}
-          onContextMenu={(e) => handleContextMenu(e, node)}
-        >
-          {!isLeaf && (
-            <span
-              className="tree-chevron"
-              aria-hidden="true"
-              onClick={(e) => {
-                e.stopPropagation();
-                toggleExpand(node);
-              }}
-            >
-              {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-            </span>
-          )}
-          {/* Disconnected connections sit flush, as before (no spacer). */}
-          {isLeaf && node.type !== "connection" && <span className="tree-chevron-spacer" aria-hidden="true" />}
-          {opts.icon ?? (
-            <span className={`tree-icon ${iconInfo.cls}`} aria-hidden="true">
-              {iconInfo.icon}
-            </span>
-          )}
-          <span className={`tree-label${opts.labelClassName ? ` ${opts.labelClassName}` : ""}`} title={node.label}>
-            {node.label}
-          </span>
-          {/* Word break for assistive tech between the label and chips
-              (whitespace-only text is dropped from the flex layout). */}
-          {" "}
-          {labelSuffix}
-          {showStrategyChip && (
-            <button
-              className={`tree-chip tree-chip-partition-${node.partitionStrategy} tree-chip-clickable`}
-              tabIndex={tab}
-              onClick={(e) => {
-                e.stopPropagation();
-                handleOpenPartitions(node);
-              }}
-              // Visible text names it; the title adds what it does.
-              title="Open Partitions view"
-            >
-              {node.partitionStrategy}
-            </button>
-          )}
-          {isDefaultPartition && (
-            <span className="tree-chip tree-chip-default" title="Default partition">
-              default
-            </span>
-          )}
-          {partitionGroupCount != null && partitionGroupCount > 0 && (
-            <span className="tree-meta">{partitionGroupCount}</span>
-          )}
-          {showWarning && (
-            <span
-              className="tree-warning"
-              role="img"
-              aria-label={
-                node.hasDefaultPartitionRows
-                  ? "Default partition has rows — likely a bound mismatch"
-                  : "Partition sizes are skewed"
-              }
-              title={
-                node.hasDefaultPartitionRows
-                  ? "Default partition has rows — likely a bound mismatch"
-                  : "Partition sizes are skewed"
-              }
-            >
-              <AlertTriangle size={12} aria-hidden="true" />
-            </span>
-          )}
-          {node.type === "database" && (
-            <button
-              className="btn-icon tree-action"
-              tabIndex={tab}
-              onClick={(e) => {
-                e.stopPropagation();
-                handleOpenQueryTab(node.connectionId, node.connectionColor, node.database!);
-              }}
-              title="New Query"
-              aria-label={`New query on ${node.label}`}
-            >
-              <Terminal size={12} />
-            </button>
-          )}
-          {opts.actions}
-        </div>
-        {isExpanded && (children || loadError) && (
-          <div className="tree-children">
-            {loadError && !children ? (
-              <div
-                {...treeItemProps(`${node.id}::error`, {
-                  level: level + 1,
-                  label: `Couldn't load ${node.label}: ${loadError}`,
-                  className: "tree-node tree-error",
-                })}
-                style={{ paddingLeft: (depth + 1) * 12 + 6 }}
-                ref={registerPlaceholder(`${node.id}::error`, () => loadChildren(node))}
-              >
-                <AlertTriangle size={13} aria-hidden="true" className="tree-error-icon" />
-                <span className="tree-label tree-error-text" title={loadError}>
-                  Couldn't load: {loadError}
-                </span>
-                <button
-                  className="btn-icon tree-error-retry"
-                  tabIndex={rowTabIndex(`${node.id}::error`)}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    loadChildren(node);
-                  }}
-                  title="Retry"
-                  aria-label={`Retry loading ${node.label}`}
-                >
-                  <RotateCw size={12} />
-                </button>
-              </div>
-            ) : children!.length === 0 ? (
-              <div
-                {...treeItemProps(`${node.id}::empty`, {
-                  level: level + 1,
-                  label: "(empty)",
-                  className: "tree-node tree-empty",
-                })}
-                style={{ paddingLeft: (depth + 1) * 12 + 6 }}
-                ref={registerPlaceholder(`${node.id}::empty`)}
-              >
-                <span className="tree-label text-muted">(empty)</span>
-              </div>
-            ) : (
-              childList.map((child, i) =>
-                renderNode(child, depth + 1, { level: level + 1, pos: [i + 1, childList.length] }),
-              )
-            )}
-          </div>
-        )}
-      </div>
-    );
   };
 
   const renderContextMenu = () => {
@@ -1644,41 +1351,24 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     );
   };
 
-  const isTypeVisible = useCallback(
-    (node: TreeNode): boolean => {
-      if (node.type === "table" || node.type === "table-group") return typeFilters.tables;
-      if (node.type === "view" || node.type === "view-group") return typeFilters.views;
-      if (node.type === "function" || node.type === "function-group") return typeFilters.functions;
-      return true;
-    },
-    [typeFilters]
-  );
-
-  const nodeMatchesFilter = useCallback(
-    (node: TreeNode, q: string): boolean => {
-      if (!isTypeVisible(node)) return false;
-      const textMatch = !q || node.label.toLowerCase().includes(q);
-      if (textMatch && (node.type === "table" || node.type === "view" || node.type === "function")) return true;
-      if (textMatch && !q && node.type !== "table" && node.type !== "view" && node.type !== "function") return true;
-      // preloadedChildren is populated synchronously for partition trees;
-      // childrenMap for everything else that's been expanded at least once.
-      const children = node.preloadedChildren ?? childrenMap[node.id];
-      if (children) {
-        return children.some((child) => nodeMatchesFilter(child, q));
-      }
-      return !q;
-    },
-    [childrenMap, isTypeVisible]
-  );
-
   const allTypesEnabled = typeFilters.tables && typeFilters.views && typeFilters.functions;
-  const hasActiveFilter = !!searchQuery.trim() || !allTypesEnabled;
 
-  const filterNodes = (nodes: TreeNode[]): TreeNode[] => {
-    if (!hasActiveFilter) return nodes;
+  // Apply the filter to the tree. Typing is debounced so each keystroke
+  // only updates the input; clearing the text or toggling a type applies
+  // at once. Matches are computed once per filter value (see getMatcher).
+  useEffect(() => {
     const q = searchQuery.trim().toLowerCase();
-    return nodes.filter((n) => nodeMatchesFilter(n, q));
-  };
+    const apply = () => {
+      const active = !!q || !allTypesEnabled;
+      store.setState({ filter: active ? { active, q, ...typeFilters } : NO_FILTER });
+    };
+    if (!q || q === store.getState().filter.q) {
+      apply();
+      return;
+    }
+    const timer = setTimeout(apply, FILTER_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [store, searchQuery, typeFilters, allTypesEnabled]);
 
   const grouped = useMemo(() => {
     const groups: Record<string, typeof connections> = {};
@@ -1729,7 +1419,6 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
       connectionId: conn.id,
       connectionColor: conn.color,
     };
-    const tab = rowTabIndex(conn.id);
     const sshBadge = conn.ssh_enabled && (
       <span
         className={`tree-conn-ssh-badge${isActive ? "" : " tree-conn-ssh-badge--idle"}`}
@@ -1740,7 +1429,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         <ShieldCheck size={11} aria-hidden="true" />
       </span>
     );
-    const actions = (
+    const renderActions = (tab: number) => (
       <div className="tree-conn-actions">
         {isActive ? (
           <button
@@ -1809,20 +1498,25 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
             }}
           />
           <div style={{ flex: 1, minWidth: 0 }}>
-            {renderNode(node, 0, {
-              level,
-              pos,
-              labelSuffix: sshBadge,
-              actions,
-              rowClassName: "tree-conn-row",
-              expandable: isActive,
-              labelClassName: isActive ? undefined : "tree-label--inactive",
-              icon: isConn ? (
-                <span className="tree-icon" aria-hidden="true">
-                  <Loader2 size={14} className="spin" style={{ color: "var(--accent)" }} />
-                </span>
-              ) : undefined,
-            })}
+            <TreeRow
+              node={node}
+              depth={0}
+              level={level}
+              posinset={pos[0]}
+              setsize={pos[1]}
+              labelSuffix={sshBadge}
+              renderActions={renderActions}
+              rowClassName="tree-conn-row"
+              expandable={isActive}
+              labelClassName={isActive ? undefined : "tree-label--inactive"}
+              icon={
+                isConn ? (
+                  <span className="tree-icon" aria-hidden="true">
+                    <Loader2 size={14} className="spin" style={{ color: "var(--accent)" }} />
+                  </span>
+                ) : undefined
+              }
+            />
           </div>
         </div>
       </div>
@@ -1915,14 +1609,43 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
 
   // Keep exactly one tab stop in the tree: when the current row goes away
   // (collapsed parent, filter, disconnect) fall back to the first row.
-  useEffect(() => {
+  const ensureTabStop = useCallback(() => {
     const tree = treeRef.current;
     if (!tree) return;
     if (tree.querySelector("[role='treeitem'][tabindex='0']")) return;
     const first = tree.querySelector<HTMLElement>("[role='treeitem']");
     const id = first?.dataset.treeId ?? null;
-    if (id !== focusedId) setFocusedId(id);
-  });
+    if (id !== store.getState().focusedId) setFocusedId(id);
+  }, [store, setFocusedId]);
+  useEffect(ensureTabStop);
+
+  // Rows call ObjectTree's (re-created every render) actions through a ref.
+  const handlersRef = useRef<TreeRowHandlers>(null!);
+  handlersRef.current = {
+    handleDoubleClick: (node) => void handleDoubleClick(node),
+    toggleExpand: (node) => void toggleExpand(node),
+    loadChildren: (node) => void loadChildren(node),
+    handleContextMenu,
+    openContextMenuFor,
+    handleOpenPartitions,
+    handleOpenQueryTab,
+  };
+  const treeContext = useMemo<TreeContextValue>(() => {
+    let pending = false;
+    return {
+      store,
+      handlers: handlersRef,
+      items: treeItems.current,
+      scheduleTabStopCheck: () => {
+        if (pending) return;
+        pending = true;
+        setTimeout(() => {
+          pending = false;
+          ensureTabStop();
+        });
+      },
+    };
+  }, [store, ensureTabStop]);
 
   const renderGroup = (
     groupName: string,
@@ -2173,6 +1896,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
               className="object-tree"
               onKeyDown={onTreeKeyDown}
             >
+              <TreeContext.Provider value={treeContext}>
               {(() => {
                 const groups = Object.entries(grouped.groups).sort(([a], [b]) => a.localeCompare(b));
                 const total = groups.length + grouped.ungrouped.length;
@@ -2183,6 +1907,7 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
                   </>
                 );
               })()}
+              </TreeContext.Provider>
             </div>
             {groupContextMenu && (
               <ContextMenu
