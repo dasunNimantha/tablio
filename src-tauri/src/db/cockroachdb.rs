@@ -386,7 +386,46 @@ impl DatabaseDriver for CockroachdbDriver {
     ) -> Result<TableData> {
         let pool = self.get_pool(database).await?;
         let columns = self.list_columns(database, schema, table).await?;
-        pg_fetch_rows_impl(&pool, columns, schema, table, offset, limit, sort, filter).await
+        pg_fetch_rows_impl(
+            &pool, columns, schema, table, offset, limit, sort, filter, true,
+        )
+        .await
+    }
+
+    async fn stream_query(
+        &self,
+        database: &str,
+        sql: &str,
+        sink: &mut crate::db::stream::RowSink,
+    ) -> Result<()> {
+        let pool = self.get_pool(database).await?;
+        pg_stream_query(&pool, sql, sink).await
+    }
+
+    async fn fetch_export_page(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        columns: &[ColumnInfo],
+        offset: u64,
+        limit: u64,
+        sort: Vec<SortSpec>,
+        filter: Option<String>,
+    ) -> Result<TableData> {
+        let pool = self.get_pool(database).await?;
+        pg_fetch_rows_impl(
+            &pool,
+            columns.to_vec(),
+            schema,
+            table,
+            offset,
+            limit,
+            sort,
+            filter,
+            false,
+        )
+        .await
     }
 
     async fn list_triggers(

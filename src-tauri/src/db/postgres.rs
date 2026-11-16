@@ -199,6 +199,12 @@ impl PostgresDriver {
     }
 
     /// Per-database pool: each database on the server gets its own cached pool
+    /// Databases that currently have their own pool besides the main one
+    /// (for tests and diagnostics).
+    pub async fn extra_pool_databases(&self) -> Vec<String> {
+        self.db_pools.open_databases().await
+    }
+
     /// The database the main pool is connected to (`postgres` when the
     /// connection doesn't name one).
     fn initial_database(&self) -> &str {
@@ -415,7 +421,46 @@ impl DatabaseDriver for PostgresDriver {
     ) -> Result<TableData> {
         let pool = self.get_pool(database).await?;
         let columns = self.list_columns(database, schema, table).await?;
-        pg_fetch_rows_impl(&pool, columns, schema, table, offset, limit, sort, filter).await
+        pg_fetch_rows_impl(
+            &pool, columns, schema, table, offset, limit, sort, filter, true,
+        )
+        .await
+    }
+
+    async fn stream_query(
+        &self,
+        database: &str,
+        sql: &str,
+        sink: &mut crate::db::stream::RowSink,
+    ) -> Result<()> {
+        let pool = self.get_pool(database).await?;
+        pg_stream_query(&pool, sql, sink).await
+    }
+
+    async fn fetch_export_page(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        columns: &[ColumnInfo],
+        offset: u64,
+        limit: u64,
+        sort: Vec<SortSpec>,
+        filter: Option<String>,
+    ) -> Result<TableData> {
+        let pool = self.get_pool(database).await?;
+        pg_fetch_rows_impl(
+            &pool,
+            columns.to_vec(),
+            schema,
+            table,
+            offset,
+            limit,
+            sort,
+            filter,
+            false,
+        )
+        .await
     }
 
     async fn explain_query(&self, database: &str, sql: &str) -> Result<ExplainResult> {

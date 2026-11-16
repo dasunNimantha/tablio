@@ -3,6 +3,8 @@ use tablio_lib::db::mssql::MssqlDriver;
 use tablio_lib::db::DatabaseDriver;
 use tablio_lib::models::*;
 
+mod export_common;
+
 macro_rules! mssql_driver {
     () => {{
         let url = match std::env::var("TEST_MSSQL_URL") {
@@ -3965,4 +3967,62 @@ async fn mssql_console_result_is_capped_with_a_notice() {
         "missing truncation notice: {:?}",
         r.notices
     );
+    assert_eq!(r.total_rows, Some(60_000));
+}
+
+#[tokio::test]
+async fn mssql_streamed_exports_match_in_memory_exports() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("exp_stream");
+    let q = format!("{SCHEMA}.[{tbl}]");
+    driver
+        .execute_query(&db, &format!("CREATE TABLE {q} (id INT PRIMARY KEY, txt NVARCHAR(MAX), b VARBINARY(MAX), n DECIMAL(20,2), f FLOAT)"))
+        .await
+        .unwrap();
+    let values = export_common::tricky_value_rows(45, |hex| format!("0x{hex}"));
+    driver
+        .execute_query(
+            &db,
+            &format!("INSERT INTO {q} VALUES {}", values.join(", ")),
+        )
+        .await
+        .unwrap();
+    let driver: std::sync::Arc<dyn DatabaseDriver> = std::sync::Arc::new(driver);
+    export_common::assert_streamed_table_export_matches(
+        driver.clone(),
+        DbType::Mssql,
+        &db,
+        SCHEMA,
+        &tbl,
+        45,
+    )
+    .await;
+    export_common::assert_full_query_export(
+        driver.clone(),
+        &db,
+        "SELECT TOP 60000 1 AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b",
+        &format!("SELECT id, txt, b, n, f, id AS txt FROM {q} ORDER BY id"),
+    )
+    .await;
+    let count = format!("SELECT COUNT(*) FROM {q}");
+    export_common::assert_full_export_cannot_write(
+        driver.clone(),
+        &db,
+        &format!("WITH x AS (SELECT 1 AS id) DELETE FROM {q} WHERE id IN (SELECT id FROM x)"),
+        &count,
+        false,
+    )
+    .await;
+    export_common::assert_full_export_cannot_write(
+        driver.clone(),
+        &db,
+        &format!("DELETE FROM {q}"),
+        &count,
+        true,
+    )
+    .await;
+    driver
+        .execute_query(&db, &format!("DROP TABLE {q}"))
+        .await
+        .unwrap();
 }

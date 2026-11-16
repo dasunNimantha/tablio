@@ -45,8 +45,8 @@ impl ResultSet {
 /// Notice for a result cut at [`MAX_CONSOLE_ROWS`].
 pub fn truncated_notice(shown: usize, total: u64) -> String {
     format!(
-        "Showing the first {} of {} rows. Add a LIMIT or filter to see others; exporting \
-         these results also exports only the rows shown.",
+        "Showing the first {} of {} rows. Add a LIMIT or filter to see the others, or use \
+         Export to write all of them to a file (it runs the query again).",
         group_digits(shown as u64),
         group_digits(total)
     )
@@ -98,7 +98,8 @@ pub fn console_result(
     match sets.pop() {
         Some(set) => {
             let shown = set.rows.len();
-            if set.total_rows > shown as u64 {
+            let truncated = set.total_rows > shown as u64;
+            if truncated {
                 notices.push(truncated_notice(shown, set.total_rows));
             }
             QueryResult {
@@ -108,6 +109,7 @@ pub fn console_result(
                 execution_time_ms,
                 is_select: true,
                 notices,
+                total_rows: truncated.then_some(set.total_rows),
             }
         }
         None if select_like => QueryResult {
@@ -211,11 +213,15 @@ mod tests {
             )]
         );
         assert!(r.notices[0].starts_with("Showing the first 50,000 of 50,025 rows."));
+        assert_eq!(r.total_rows, Some((MAX_CONSOLE_ROWS + 25) as u64));
     }
 
     #[test]
     fn results_under_the_cap_have_no_notice() {
         let r = console_result(vec![set(&["a"], vec![vec![json!(1)]])], true, vec![], 0, 1);
         assert!(r.notices.is_empty());
+        assert_eq!(r.total_rows, None);
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v.get("total_rows").is_none());
     }
 }

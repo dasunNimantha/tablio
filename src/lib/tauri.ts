@@ -158,6 +158,8 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       return "id,name,value\n1,Item 1,42.50\n2,Item 2,99.99" as T;
     case "export_query_result_to_file":
       return null as T;
+    case "export_query_to_file":
+      return { rows: 0, warning: null } as T;
     case "alter_table":
       return undefined as T;
     case "list_functions":
@@ -366,6 +368,12 @@ export interface QueryResult {
    * settings that were discarded afterwards). Omitted when there are none.
    */
   notices?: string[];
+  /**
+   * Set when `rows` holds only the first rows of a larger result (the
+   * console keeps at most 50,000): how many rows the query returned in
+   * all. Exporting such a result runs the query again to write every row.
+   */
+  total_rows?: number;
 }
 
 export interface SortSpec {
@@ -534,6 +542,22 @@ export interface ExportResultRequest {
   rows: unknown[][];
   format: string;
   table_name: string | null;
+}
+
+/** Run a console query again and export all of its rows. */
+export interface QueryExportRequest {
+  connection_id: string;
+  database: string;
+  sql: string;
+  format: string;
+  table_name: string | null;
+}
+
+export interface QueryExportSummary {
+  /** Rows written to the file. */
+  rows: number;
+  /** Shown when the export had to alter data (XLSX cells cut to Excel's limit). */
+  warning: string | null;
 }
 
 export interface DropObjectRequest {
@@ -1024,6 +1048,13 @@ export const api = {
   /** Like `exportTableToFile`: resolves to a warning or `null`. */
   exportQueryResultToFile: (request: ExportResultRequest, filePath: string): Promise<string | null> =>
     invoke("export_query_result_to_file", { request, filePath }),
+
+  /**
+   * Runs a single-statement query again and streams every row it returns
+   * to `filePath`, for results the console showed only partly.
+   */
+  exportQueryToFile: (request: QueryExportRequest, filePath: string): Promise<QueryExportSummary> =>
+    invoke("export_query_to_file", { request, filePath }),
 
   alterTable: (request: AlterTableRequest): Promise<void> =>
     invoke("alter_table", { request }),

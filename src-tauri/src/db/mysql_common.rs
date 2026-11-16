@@ -6,6 +6,7 @@ use crate::db::cancel::{
     cancelled_error, run_interruptible, unless_cancelled, CancellationToken, Interruptible,
 };
 use crate::db::console::{console_result, ResultSet, SESSION_RESET_NOTICE};
+use crate::db::stream::{single_query, RowSink};
 use crate::models::*;
 use crate::util::sql::{
     ensure_row_matched, is_numeric_type_name, numeric_literal, script_changes_session,
@@ -586,6 +587,7 @@ pub async fn my_fetch_rows_impl(
     limit: u64,
     sort: Vec<SortSpec>,
     filter: Option<String>,
+    count_rows: bool,
 ) -> Result<TableData> {
     if let Some(ref f) = filter {
         if !f.trim().is_empty() {
@@ -636,10 +638,15 @@ pub async fn my_fetch_rows_impl(
         quote_ident(table),
         where_clause
     );
-    let count_row = sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
-        .fetch_one(pool)
-        .await?;
-    let total_rows: i64 = count_row.get("cnt");
+    // Exports page through the table and don't need the count.
+    let total_rows: i64 = if count_rows {
+        sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
+            .fetch_one(pool)
+            .await?
+            .get("cnt")
+    } else {
+        -1
+    };
 
     let sql = format!(
         "SELECT * FROM {}.{} {} {} LIMIT {} OFFSET {}",
@@ -916,6 +923,58 @@ async fn my_run_statements(
         rows_affected,
         elapsed,
     ))
+}
+
+/// [`DatabaseDriver::stream_query`](crate::db::DatabaseDriver::stream_query)
+/// for MySQL-protocol servers: one query, run against `database` inside
+/// a transaction that is never committed, so running it again can't
+/// change data. With `read_only_txn` it is `START TRANSACTION READ ONLY`
+/// and a write fails outright; TiDB only accepts that with
+/// `tidb_enable_noop_functions`, so there a write is rolled back
+/// instead. The connection is retired afterwards rather than restored
+/// (default database, transaction), which also rolls back.
+pub async fn my_stream_query(
+    pool: &MySqlPool,
+    database: &str,
+    sql: &str,
+    read_only_txn: bool,
+    sink: &mut RowSink,
+) -> Result<()> {
+    let stmt = single_query(sql, SqlDialect::MySql, MY_SELECT_KEYWORDS)?;
+    let mut conn = pool.acquire().await?;
+    conn.close_on_drop();
+    if !database.trim().is_empty() {
+        let use_sql = format!("USE {}", quote_ident(database));
+        sqlx::raw_sql(sqlx::AssertSqlSafe(use_sql.as_str()))
+            .execute(&mut *conn)
+            .await?;
+    }
+    let begin = if read_only_txn {
+        "START TRANSACTION READ ONLY"
+    } else {
+        "START TRANSACTION"
+    };
+    sqlx::raw_sql(begin).execute(&mut *conn).await?;
+    // Same text-protocol decoding as the console.
+    let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(stmt.as_str())).fetch_many(&mut *conn);
+    let mut in_set = false;
+    let mut n = 0;
+    while let Some(item) = stream.try_next().await? {
+        match item {
+            sqlx::Either::Left(_) => in_set = false,
+            sqlx::Either::Right(row) => {
+                if !in_set {
+                    let names: Vec<String> =
+                        row.columns().iter().map(|c| c.name().to_string()).collect();
+                    n = names.len();
+                    sink.columns(names, Vec::new()).await?;
+                    in_set = true;
+                }
+                sink.row(mysql_row_to_json_values(&row, n)).await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Leading keywords of statements the console shows as a row set even

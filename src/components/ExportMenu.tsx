@@ -6,9 +6,14 @@ export type ExportFormat = "csv" | "json" | "sql" | "xlsx";
 
 interface Props {
   onExport: (format: ExportFormat) => void;
+  /**
+   * The rows on screen are only part of the result: the export runs the
+   * query again and writes all `allRows` of them, which the menu says.
+   */
+  allRows?: number;
 }
 
-export function ExportMenu({ onExport }: Props) {
+export function ExportMenu({ onExport, allRows }: Props) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -34,6 +39,11 @@ export function ExportMenu({ onExport }: Props) {
       </button>
       {open && (
         <div className="export-menu-dropdown">
+          {allRows != null && (
+            <div className="export-menu-note">
+              Export all {allRows.toLocaleString()} rows
+            </div>
+          )}
           <button
             onClick={() => {
               onExport("csv");

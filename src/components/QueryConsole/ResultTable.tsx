@@ -990,7 +990,7 @@ export const ResultTable = memo(function ResultTable({ result, resultMode, onTog
         >
           <BarChart3 size={14} /> Chart
         </button>
-        <ExportMenu onExport={onExport} />
+        <ExportMenu onExport={onExport} allRows={result.total_rows} />
       </div>
       {showSearch && (
         <div className="grid-search-bar result-search-bar">

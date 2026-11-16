@@ -62,7 +62,9 @@ hmac = "0.13"
 sha1 = "0.11"
 data-encoding = "2.3"
 log = "0.4"
-rust_xlsxwriter = { version = "0.102", features = ["chrono"] }
+# `constant_memory`: exports stream rows to a temp file instead of
+# holding the whole worksheet in memory.
+rust_xlsxwriter = { version = "0.102", features = ["chrono", "constant_memory"] }
 calamine = { version = "0.38", features = ["dates"] }
 # Private (0600) temp files for dumps and atomic config writes.
 tempfile = "3"
@@ -96,6 +98,9 @@ pageant = "0.2"
 [dev-dependencies]
 which = "8"
 proptest = "1"
+# Reads worksheet XML (column widths) back in export tests; same version
+# and features calamine already pulls in.
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # sqlx-core with TCP_NODELAY on its sockets; see vendor/sqlx-core/TABLIO_PATCH.md.
 [patch.crates-io]

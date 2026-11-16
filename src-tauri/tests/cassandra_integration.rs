@@ -2,6 +2,8 @@ use tablio_lib::db::cassandra::CassandraDriver;
 use tablio_lib::db::DatabaseDriver;
 use tablio_lib::models::*;
 
+mod export_common;
+
 fn cassandra_url() -> String {
     std::env::var("TEST_CASSANDRA_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
 }
@@ -1648,4 +1650,51 @@ async fn cassandra_counter_edits_apply_the_difference() {
         ]
     );
     teardown_keyspace(&driver, &ks).await;
+}
+
+#[tokio::test]
+async fn cassandra_full_query_export_reads_every_page() {
+    let driver = create_driver().await;
+    let ks = setup_keyspace(&driver).await;
+    let tbl = format!("{ks}.{}", unique_table("exp_q"));
+    driver
+        .execute_query(
+            "",
+            &format!("CREATE TABLE {tbl} (id int PRIMARY KEY, txt text)"),
+        )
+        .await
+        .unwrap();
+    // 6,000 rows: more than one 5,000-row page.
+    for batch in 0..60 {
+        let inserts: String = (0..100)
+            .map(|i| {
+                let id = batch * 100 + i;
+                format!("INSERT INTO {tbl} (id, txt) VALUES ({id}, 'row, \"{id}\"');")
+            })
+            .collect();
+        driver
+            .execute_query("", &format!("BEGIN UNLOGGED BATCH {inserts} APPLY BATCH"))
+            .await
+            .unwrap();
+    }
+    let driver: std::sync::Arc<dyn DatabaseDriver> = std::sync::Arc::new(driver);
+    export_common::assert_full_query_export_of(
+        driver.clone(),
+        "",
+        &format!("SELECT id, txt FROM {tbl}"),
+        6_000,
+        &format!("SELECT id, txt, id AS other FROM {tbl} WHERE id IN (1, 2, 3)"),
+    )
+    .await;
+    export_common::assert_full_export_cannot_write(
+        driver.clone(),
+        "",
+        &format!("DELETE FROM {tbl} WHERE id = 1"),
+        &format!("SELECT COUNT(*) FROM {tbl}"),
+        true,
+    )
+    .await;
+    let _ = driver
+        .execute_query("", &format!("DROP KEYSPACE IF EXISTS {ks}"))
+        .await;
 }

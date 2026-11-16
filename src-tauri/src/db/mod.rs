@@ -12,6 +12,7 @@ pub mod pool;
 pub mod postgres;
 pub mod sqlite;
 pub mod ssh_tunnel;
+pub mod stream;
 pub mod tidb;
 
 use crate::models::*;
@@ -103,7 +104,42 @@ pub trait DatabaseDriver: Send + Sync {
         sort: Vec<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData>;
+    /// One page of `table` for an export. Like [`fetch_rows`](Self::fetch_rows),
+    /// but `columns` (the table's [`list_columns`](Self::list_columns),
+    /// read once by the caller) is not read again for every page, and the
+    /// matching rows are not counted: `total_rows` is `-1`. The default
+    /// falls back to `fetch_rows`.
+    async fn fetch_export_page(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        columns: &[ColumnInfo],
+        offset: u64,
+        limit: u64,
+        sort: Vec<SortSpec>,
+        filter: Option<String>,
+    ) -> Result<TableData> {
+        let _ = columns;
+        self.fetch_rows(database, schema, table, offset, limit, sort, filter)
+            .await
+    }
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult>;
+    /// Run a single console statement again and push every row it
+    /// returns to `sink`, without the console's row cap, so a result the
+    /// console truncated can be exported in full. The statement runs
+    /// read-only where the engine allows it (it is being run a second
+    /// time), and scripts of several statements are rejected. Rows are
+    /// decoded exactly as the console decodes them.
+    async fn stream_query(
+        &self,
+        database: &str,
+        sql: &str,
+        sink: &mut stream::RowSink,
+    ) -> Result<()> {
+        let _ = (database, sql, sink);
+        anyhow::bail!("Exporting every row of a query isn't supported for this database.")
+    }
     /// Like [`execute_query`](Self::execute_query), but stops early when
     /// `cancel` fires and then resolves to
     /// [`cancel::QueryCancelled`]. The default drops the in-flight
