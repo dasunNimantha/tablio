@@ -280,6 +280,8 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
   const [cancelling, setCancelling] = useState(false);
   const [sourceTable, setSourceTable] = useState<SourceTable | null>(null);
   const lastQueryRef = useRef("");
+  /** The query (and database) that produced `result`, for a full export. */
+  const resultSourceRef = useRef<{ sql: string; database: string } | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [showSavedQueries, setShowSavedQueries] = useState(false);
@@ -662,6 +664,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
         connection_id: connectionId, database, sql: queryToRun, request_id: requestId,
       });
       if (!isCurrent()) return;
+      resultSourceRef.current = { sql: queryToRun, database };
       setResult(res);
       setExplainResult(null);
       res.notices?.forEach((n) => addToast(n, "info"));
@@ -718,6 +721,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
         connection_id: connectionId, database, sql: queryToRun, request_id: requestId,
       });
       if (reqId === requestSeqRef.current) {
+        resultSourceRef.current = { sql: queryToRun, database };
         setResult(res);
         res.notices?.forEach((n) => addToast(n, "info"));
       }
@@ -789,6 +793,19 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
         filters: [{ name: label, extensions: [ext] }],
       });
       if (!filePath) return;
+      const source = resultSourceRef.current;
+      if (result.total_rows != null && source) {
+        // The grid holds only the first rows: run the query again and
+        // stream all of them to the file.
+        addToast(`Exporting all ${result.total_rows.toLocaleString()} rows…`, "info");
+        const { rows, warning } = await api.exportQueryToFile({
+          connection_id: connectionId, database: source.database, sql: source.sql,
+          format, table_name: null,
+        }, filePath);
+        addToast(`Exported all ${rows.toLocaleString()} rows as ${label}`);
+        if (warning) addToast(warning, "info");
+        return;
+      }
       const warning = await api.exportQueryResultToFile({
         columns: result.columns, rows: result.rows as unknown[][],
         format, table_name: null,
@@ -798,7 +815,7 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     } catch (e) {
       addToast(String(e), "error");
     }
-  }, [result, addToast]);
+  }, [result, connectionId, addToast]);
 
   const handleFormatSql = useCallback(() => {
     const text = editorRef.current?.getModel()?.getValue() ?? sql;

@@ -34,3 +34,10 @@
   background: var(--accent-muted);
   color: var(--accent);
 }
+
+.export-menu-note {
+  padding: 6px 14px 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
