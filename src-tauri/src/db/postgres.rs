@@ -199,6 +199,12 @@ impl PostgresDriver {
     }
 
     /// Per-database pool: each database on the server gets its own cached pool
+    /// Databases that currently have their own pool besides the main one
+    /// (for tests and diagnostics).
+    pub async fn extra_pool_databases(&self) -> Vec<String> {
+        self.db_pools.open_databases().await
+    }
+
     /// The database the main pool is connected to (`postgres` when the
     /// connection doesn't name one).
     fn initial_database(&self) -> &str {

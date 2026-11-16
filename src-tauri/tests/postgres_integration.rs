@@ -4413,34 +4413,16 @@ async fn pg_pools_for_other_databases_are_small_and_capped() {
 #[tokio::test]
 async fn pg_initial_database_reuses_the_main_pool() {
     // A connection without a database connects to `postgres`; browsing
-    // `postgres` must not open a second pool for it.
+    // `postgres` must not open a second pool for it. (Asked of the driver:
+    // counting server sessions raced with other tests connecting there.)
     let driver = pg_driver_no_db!();
-    let before = sessions_on_any(&driver, "postgres").await;
     driver.list_schemas("postgres").await.unwrap();
     driver.list_tables("postgres", "public").await.unwrap();
-    let after = sessions_on_any(&driver, "postgres").await;
     assert!(
-        after <= before + 1,
-        "a second pool was opened for postgres: {before} -> {after}"
+        driver.extra_pool_databases().await.is_empty(),
+        "a second pool was opened: {:?}",
+        driver.extra_pool_databases().await
     );
-}
-
-async fn sessions_on_any(driver: &PostgresDriver, db: &str) -> i64 {
-    let r = driver
-        .execute_query(
-            db,
-            &format!(
-                "SELECT count(*)::int8 FROM pg_stat_activity WHERE datname = '{db}' \
-                 AND application_name = current_setting('application_name') \
-                 AND usename = current_user"
-            ),
-        )
-        .await
-        .unwrap();
-    r.rows[0][0]
-        .as_i64()
-        .or_else(|| r.rows[0][0].as_str().and_then(|s| s.parse().ok()))
-        .unwrap()
 }
 
 // ===========================================================================
