@@ -3945,3 +3945,24 @@ async fn mssql_schema_graph_timing() {
 
     driver.execute_query(&db, &drop_all).await.unwrap();
 }
+
+#[tokio::test]
+async fn mssql_console_result_is_capped_with_a_notice() {
+    use tablio_lib::db::console::MAX_CONSOLE_ROWS;
+    let (driver, db) = mssql_driver!();
+    let r = driver
+        .execute_query(
+            &db,
+            "SELECT TOP 60000 1 AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b",
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.rows.len(), MAX_CONSOLE_ROWS);
+    assert!(
+        r.notices
+            .iter()
+            .any(|n| n.starts_with("Showing the first 50,000 of 60,000 rows.")),
+        "missing truncation notice: {:?}",
+        r.notices
+    );
+}

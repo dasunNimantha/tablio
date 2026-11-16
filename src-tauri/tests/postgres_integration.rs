@@ -4882,3 +4882,21 @@ async fn pg_schema_graph_timing() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn pg_console_result_is_capped_with_a_notice() {
+    use tablio_lib::db::console::MAX_CONSOLE_ROWS;
+    let driver = pg_driver!();
+    let r = driver
+        .execute_query(DB, "SELECT g FROM generate_series(1, 60000) g")
+        .await
+        .unwrap();
+    assert_eq!(r.rows.len(), MAX_CONSOLE_ROWS);
+    assert!(
+        r.notices
+            .iter()
+            .any(|n| n.starts_with("Showing the first 50,000 of 60,000 rows.")),
+        "missing truncation notice: {:?}",
+        r.notices
+    );
+}
