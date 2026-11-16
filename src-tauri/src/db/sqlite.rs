@@ -302,12 +302,11 @@ async fn sqlite_run_statements(
                     affected = affected.saturating_add(done.rows_affected());
                 }
                 sqlx::Either::Right(row) => {
-                    let set = set.get_or_insert_with(|| ResultSet {
-                        columns: row.columns().iter().map(|c| c.name().to_string()).collect(),
-                        rows: Vec::new(),
+                    let set = set.get_or_insert_with(|| {
+                        ResultSet::new(row.columns().iter().map(|c| c.name().to_string()).collect())
                     });
-                    let values = sqlite_row_to_json_values(&row, set.columns.len());
-                    set.rows.push(values);
+                    let n = set.columns.len();
+                    set.push_row(|| sqlite_row_to_json_values(&row, n));
                 }
             }
         }
