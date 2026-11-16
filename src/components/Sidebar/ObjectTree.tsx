@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from "react";
+import { flushSync } from "react-dom";
 import { useStore } from "zustand";
 import { useConnectionStore } from "../../stores/connectionStore";
 import { useTabStore, TabInfo } from "../../stores/tabStore";
@@ -1532,14 +1533,33 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     const entry = id ? treeItems.current.get(id) : undefined;
     const tree = treeRef.current;
     if (!entry || !tree) return;
-    const items = Array.from(tree.querySelectorAll<HTMLElement>("[role='treeitem']"));
-    const idx = items.indexOf(target);
     const levelOf = (el: HTMLElement) => Number(el.getAttribute("aria-level") ?? 1);
-    const focusAt = (i: number) => items[Math.max(0, Math.min(items.length - 1, i))]?.focus();
     const handled = () => {
       e.preventDefault();
       e.stopPropagation();
     };
+    /** Rows in document order, including the spacers of virtualised lists
+     *  that stand in for rows not currently rendered. */
+    const rowsAndGaps = () =>
+      Array.from(tree.querySelectorAll<HTMLElement>("[role='treeitem'], [data-tree-gap]"));
+    /** Focus the row `pick` chooses; if it lands on a spacer, render the
+     *  hidden row next to it (making it the tab stop renders it) and pick
+     *  again, so every row is reachable. */
+    const moveFocus = (pick: (els: HTMLElement[], idx: number) => HTMLElement | undefined, fromGap: "first" | "last") => {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const els = rowsAndGaps();
+        const next = pick(els, els.indexOf(target));
+        if (!next) return;
+        if (!next.hasAttribute("data-tree-gap")) {
+          next.focus();
+          return;
+        }
+        const reveal = fromGap === "first" ? next.dataset.gapFirst : next.dataset.gapLast;
+        if (!reveal) return;
+        flushSync(() => setFocusedId(reveal));
+      }
+    };
+    const clamp = (els: HTMLElement[], i: number) => els[Math.max(0, Math.min(els.length - 1, i))];
 
     if ((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") {
       handled();
@@ -1550,27 +1570,30 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
     switch (e.key) {
       case "ArrowDown":
         handled();
-        focusAt(idx + 1);
+        moveFocus((els, idx) => clamp(els, idx + 1), "first");
         return;
       case "ArrowUp":
         handled();
-        focusAt(idx - 1);
+        moveFocus((els, idx) => clamp(els, idx - 1), "last");
         return;
       case "Home":
         handled();
-        focusAt(0);
+        moveFocus((els) => els[0], "first");
         return;
       case "End":
         handled();
-        focusAt(items.length - 1);
+        moveFocus((els) => els[els.length - 1], "last");
         return;
       case "ArrowRight": {
         handled();
         if (entry.expandable && !entry.expanded) {
           entry.toggle();
         } else if (entry.expandable && entry.expanded) {
-          const next = items[idx + 1];
-          if (next && levelOf(next) === levelOf(target) + 1) next.focus();
+          moveFocus((els, idx) => {
+            const next = els[idx + 1];
+            if (next?.hasAttribute("data-tree-gap")) return next;
+            return next && levelOf(next) === levelOf(target) + 1 ? next : undefined;
+          }, "first");
         } else if (!entry.expandable && id && connections.some((c) => c.id === id)) {
           // A disconnected connection "expands" by connecting.
           entry.activate();
@@ -1582,7 +1605,9 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
         if (entry.expandable && entry.expanded) {
           entry.toggle();
         } else {
-          // Parent = nearest earlier row one level up.
+          // Parent = nearest earlier row one level up (always rendered).
+          const items = Array.from(tree.querySelectorAll<HTMLElement>("[role='treeitem']"));
+          const idx = items.indexOf(target);
           const level = levelOf(target);
           for (let i = idx - 1; i >= 0; i--) {
             if (levelOf(items[i]) < level) {

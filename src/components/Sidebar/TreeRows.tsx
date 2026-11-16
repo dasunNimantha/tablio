@@ -1,4 +1,4 @@
-import { memo, useContext, useEffect, useLayoutEffect, useMemo, type ReactNode } from "react";
+import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -19,6 +19,16 @@ import {
 } from "lucide-react";
 import { getMatcher, isLeafType, TreeContext, type TreeContextValue, type TreeItemEntry, type TreeNode } from "./treeModel";
 
+/** Child lists longer than this render only the rows near the viewport. */
+export const VIRTUALIZE_THRESHOLD = 200;
+/** A collapsed row's vertical pitch: 36px `.tree-node` + its 1px margin
+ *  (vertical margins between rows collapse to one). Rows that render are
+ *  measured; this is only the estimate for rows that never have. */
+const DEFAULT_ROW_EXTENT = 37;
+const ROW_MARGIN = 1;
+/** Extra rows rendered above and below the viewport, in CSS px. */
+const OVERSCAN_PX = 600;
+const INITIAL_WINDOW = 40;
 const NO_CHILDREN: TreeNode[] = [];
 
 function useTreeContext(): TreeContextValue {
@@ -311,6 +321,8 @@ export const TreeRow = memo(function TreeRow({
             <TreeErrorRow node={node} error={loadError} depth={depth + 1} level={level + 1} />
           ) : children!.length === 0 ? (
             <TreeEmptyRow id={`${node.id}::empty`} depth={depth + 1} level={level + 1} />
+          ) : childList.length > VIRTUALIZE_THRESHOLD ? (
+            <VirtualChildList items={childList} depth={depth + 1} level={level + 1} />
           ) : (
             childList.map((child, i) => (
               <TreeRow key={child.id} node={child} depth={depth + 1} level={level + 1} posinset={i + 1} setsize={childList.length} />
@@ -407,4 +419,194 @@ const TreeEmptyRow = memo(function TreeEmptyRow({ id, depth, level }: { id: stri
       <span className="tree-label text-muted">(empty)</span>
     </div>
   );
+});
+
+/** First index i with arr[i] > x (arr ascending). */
+function upperBound(arr: Float64Array, x: number): number {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] > x) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+
+function scrollParentOf(el: HTMLElement): HTMLElement | null {
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const { overflowY } = getComputedStyle(p);
+    if (overflowY === "auto" || overflowY === "scroll") return p;
+  }
+  return null;
+}
+
+/**
+ * A long child list that renders only the rows near the viewport (plus the
+ * focused row and its neighbours, so arrow keys always have a next row),
+ * with spacers standing in for the rest. Spacers carry `data-tree-gap` and
+ * the ids of the first / last row they hide, which the tree's keyboard
+ * handler uses to reveal rows (End, or arrowing into a gap).
+ */
+const VirtualChildList = memo(function VirtualChildList({
+  items,
+  depth,
+  level,
+}: {
+  items: TreeNode[];
+  depth: number;
+  level: number;
+}) {
+  const ctx = useTreeContext();
+  const n = items.length;
+
+  // Measured vertical extent of rows by id (expanded rows are taller).
+  const extents = useRef(new Map<string, number>());
+  const [measureVersion, setMeasureVersion] = useState(0);
+  // Row i starts at offsets[i]; measureVersion re-sums after a measurement.
+  const offsets = useMemo(() => {
+    const o = new Float64Array(n + 1);
+    for (let i = 0; i < n; i++) o[i + 1] = o[i] + (extents.current.get(items[i].id) ?? DEFAULT_ROW_EXTENT);
+    return o;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, n, measureVersion]);
+  const offsetsRef = useRef(offsets);
+  offsetsRef.current = offsets;
+
+  const [range, setRange] = useState(() => ({ start: 0, end: Math.min(n, INITIAL_WINDOW) }));
+  const indexById = useMemo(() => new Map(items.map((c, i) => [c.id, i])), [items]);
+  // The focused row only matters here when it (or a neighbour) is outside
+  // the window, so moving focus within the window doesn't re-render this.
+  const focusedIndex = useStore(ctx.store, (s) => {
+    const i = s.focusedId == null ? -1 : indexById.get(s.focusedId) ?? -1;
+    return i > range.start && i < range.end - 2 ? -1 : i;
+  });
+  const topGapRef = useRef<HTMLDivElement>(null);
+  const renderedRef = useRef<number[]>([]);
+
+  // Rows to render: the viewport window plus the focused row ± 1.
+  const segments: [number, number][] = [];
+  const add = (a: number, b: number) => {
+    a = Math.max(0, a);
+    b = Math.min(n, b);
+    if (a < b) segments.push([a, b]);
+  };
+  add(range.start, Math.min(range.end, n));
+  if (focusedIndex >= 0) add(focusedIndex - 1, focusedIndex + 2);
+  segments.sort((x, y) => x[0] - y[0]);
+  const merged: [number, number][] = [];
+  for (const seg of segments) {
+    const last = merged[merged.length - 1];
+    if (last && seg[0] <= last[1]) last[1] = Math.max(last[1], seg[1]);
+    else merged.push([seg[0], seg[1]]);
+  }
+
+  const gap = (a: number, b: number, key: string, ref?: React.Ref<HTMLDivElement>) => {
+    const count = b - a;
+    return (
+      <div
+        key={key}
+        ref={ref}
+        className="tree-virtual-gap"
+        aria-hidden="true"
+        // Margins between rows collapse to one; a spacer interrupts that,
+        // so it is one margin shorter than the rows it replaces.
+        style={{ height: count > 0 ? offsets[b] - offsets[a] - ROW_MARGIN : 0 }}
+        {...(count > 0 ? { "data-tree-gap": "", "data-gap-first": items[a].id, "data-gap-last": items[b - 1].id } : {})}
+      />
+    );
+  };
+
+  const out: ReactNode[] = [];
+  const rendered: number[] = [];
+  let cursor = 0;
+  merged.forEach(([a, b], si) => {
+    if (si === 0) out.push(gap(0, a, "gap-top", topGapRef));
+    else if (a > cursor) out.push(gap(cursor, a, `gap-${cursor}`));
+    for (let i = a; i < b; i++) {
+      rendered.push(i);
+      out.push(
+        <TreeRow key={items[i].id} node={items[i]} depth={depth} level={level} posinset={i + 1} setsize={n} />,
+      );
+    }
+    cursor = b;
+  });
+  if (merged.length === 0) out.push(gap(0, 0, "gap-top", topGapRef));
+  out.push(gap(cursor, n, "gap-bottom"));
+  renderedRef.current = rendered;
+
+  // Measure rendered rows and re-sum offsets when an extent changed: after
+  // every render here, and when a row's own subtree expands or collapses
+  // (which re-renders only that row, but resizes the list).
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const measure = useCallback(() => {
+    const list = topGapRef.current?.parentElement;
+    if (!list) return;
+    let changed = false;
+    let k = 0;
+    for (const el of Array.from(list.children) as HTMLElement[]) {
+      if (el.classList.contains("tree-virtual-gap")) continue;
+      const i = renderedRef.current[k++];
+      const item = i === undefined ? undefined : itemsRef.current[i];
+      if (!item) break;
+      const extent = el.offsetHeight + ROW_MARGIN;
+      const prev = extents.current.get(item.id) ?? DEFAULT_ROW_EXTENT;
+      if (Math.abs(prev - extent) > 0.5) {
+        extents.current.set(item.id, extent);
+        changed = true;
+      }
+    }
+    if (changed) setMeasureVersion((v) => v + 1);
+  }, []);
+  useLayoutEffect(measure);
+
+  // Track the viewport of the scroll container.
+  useLayoutEffect(() => {
+    const top = topGapRef.current;
+    const list = top?.parentElement;
+    const scroller = list ? scrollParentOf(list) : null;
+    if (!list || !scroller) {
+      setRange({ start: 0, end: n });
+      return;
+    }
+    const compute = () => {
+      const o = offsetsRef.current;
+      const lr = list.getBoundingClientRect();
+      const sr = scroller.getBoundingClientRect();
+      // Client rects are in zoomed pixels; offsets are in layout pixels.
+      const scale = list.offsetHeight > 0 ? lr.height / list.offsetHeight : 1;
+      const viewTop = (sr.top - lr.top) / scale - OVERSCAN_PX;
+      const viewBottom = (sr.bottom - lr.top) / scale + OVERSCAN_PX;
+      const start = Math.max(0, Math.min(n, upperBound(o, viewTop) - 1));
+      const end = Math.max(start, Math.min(n, upperBound(o, viewBottom)));
+      setRange((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
+    };
+    compute();
+    let frame = 0;
+    const onScroll = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        compute();
+      });
+    };
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    const ro =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            measure();
+            onScroll();
+          });
+    ro?.observe(scroller);
+    ro?.observe(list);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      scroller.removeEventListener("scroll", onScroll);
+      ro?.disconnect();
+    };
+  }, [n, offsets, measure]);
+
+  return <>{out}</>;
 });
