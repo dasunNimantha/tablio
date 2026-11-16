@@ -36,6 +36,9 @@ pub struct XlsxWorkbookPreview {
     pub sheet_names: Vec<String>,
     pub default_sheet: String,
     pub sheet: XlsxSheetPreview,
+    /// Identifies the uploaded workbook for `parse_xlsx_sheet`, so the
+    /// file is sent (and the default sheet parsed) only once.
+    pub token: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,27 +69,100 @@ pub struct XlsxSheetPayload {
     pub error_cell_count: usize,
 }
 
-#[tauri::command]
-pub async fn parse_xlsx_workbook(bytes: Vec<u8>) -> Result<XlsxWorkbookPreview, String> {
-    parse_workbook_impl(&bytes).map_err(|e| e.to_string())
+/// The last workbook the import dialog opened: its bytes, and the default
+/// sheet already parsed for the preview. One slot; opening another file
+/// replaces it.
+struct CachedWorkbook {
+    token: String,
+    bytes: std::sync::Arc<Vec<u8>>,
+    parsed: Option<(String, Sheet)>,
 }
 
+static CACHE: std::sync::Mutex<Option<CachedWorkbook>> = std::sync::Mutex::new(None);
+
+/// The file's bytes: sent as a raw IPC body (a `Uint8Array`), or as a
+/// JSON `{ "bytes": [...] }` body from older callers.
+fn request_bytes(request: &tauri::ipc::Request<'_>) -> Result<Vec<u8>, String> {
+    match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => Ok(bytes.clone()),
+        // A plain array when the webview falls back from the raw IPC
+        // channel to postMessage; `{ "bytes": [...] }` from older callers.
+        tauri::ipc::InvokeBody::Json(v) => {
+            let bytes = if v.is_array() {
+                v.clone()
+            } else {
+                v["bytes"].clone()
+            };
+            serde_json::from_value(bytes).map_err(|e| format!("Invalid workbook payload: {e}"))
+        }
+    }
+}
+
+/// Parse a workbook for the import preview.
+///
+/// The bytes arrive as a raw IPC body instead of a JSON number array
+/// (~3.5x the file size, sent twice before), parsing runs off the async
+/// runtime, and the parsed default sheet is kept so `parse_xlsx_sheet`
+/// doesn't receive or parse the file again.
+#[tauri::command]
+pub async fn parse_xlsx_workbook(
+    request: tauri::ipc::Request<'_>,
+) -> Result<XlsxWorkbookPreview, String> {
+    let bytes = request_bytes(&request)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (mut preview, sheet) = preview_with_sheet(&bytes)?;
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        preview.token = token.clone();
+        let cached = CachedWorkbook {
+            token,
+            bytes: std::sync::Arc::new(bytes),
+            parsed: Some((preview.default_sheet.clone(), sheet)),
+        };
+        *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(cached);
+        Ok::<_, anyhow::Error>(preview)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+/// The full payload for one sheet of the workbook `token` refers to.
 #[tauri::command]
 pub async fn parse_xlsx_sheet(
-    bytes: Vec<u8>,
+    token: String,
     sheet_name: String,
 ) -> Result<XlsxSheetPayload, String> {
-    parse_sheet_impl(&bytes, &sheet_name).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = {
+            let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            let cached = cache.as_mut().filter(|c| c.token == token).ok_or_else(|| {
+                anyhow::anyhow!("The workbook is no longer loaded; choose the file again.")
+            })?;
+            if cached
+                .parsed
+                .as_ref()
+                .is_some_and(|(name, _)| *name == sheet_name)
+            {
+                let (_, sheet) = cached.parsed.take().expect("checked above");
+                return Ok(payload_from_sheet(&sheet_name, sheet));
+            }
+            cached.bytes.clone()
+        };
+        parse_sheet_impl(&bytes, &sheet_name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e: anyhow::Error| e.to_string())
 }
 
 pub fn parse_workbook_impl(bytes: &[u8]) -> anyhow::Result<XlsxWorkbookPreview> {
-    if bytes.len() > MAX_BYTES {
-        anyhow::bail!(
-            "File is too large: {} MB (limit is {} MB)",
-            bytes.len() / 1024 / 1024,
-            MAX_BYTES / 1024 / 1024
-        );
-    }
+    preview_with_sheet(bytes).map(|(preview, _)| preview)
+}
+
+/// The preview of the workbook's default sheet, plus that sheet fully
+/// parsed (kept for the import itself).
+fn preview_with_sheet(bytes: &[u8]) -> anyhow::Result<(XlsxWorkbookPreview, Sheet)> {
+    check_size(bytes)?;
     let mut wb = calamine::open_workbook_auto_from_rs(Cursor::new(bytes))
         .map_err(|e| anyhow::anyhow!("Could not open workbook: {e}"))?;
 
@@ -95,16 +171,28 @@ pub fn parse_workbook_impl(bytes: &[u8]) -> anyhow::Result<XlsxWorkbookPreview> 
         anyhow::bail!("Workbook has no sheets");
     }
     let default_sheet = sheet_names[0].clone();
-    let preview = build_sheet_preview(&mut wb, &default_sheet)?;
-
-    Ok(XlsxWorkbookPreview {
-        sheet_names,
-        default_sheet,
-        sheet: preview,
-    })
+    let sheet = read_sheet(&mut wb, &default_sheet)?;
+    let preview = XlsxSheetPreview {
+        name: default_sheet.clone(),
+        headers: sheet.headers.clone(),
+        preview_rows: sheet.body.iter().take(PREVIEW_ROWS).cloned().collect(),
+        total_data_rows: sheet.body.len(),
+        inferred_types: sheet.inferred_types.clone(),
+        error_cells: sheet.error_cells.clone(),
+        error_cell_count: sheet.error_cell_count,
+    };
+    Ok((
+        XlsxWorkbookPreview {
+            sheet_names,
+            default_sheet,
+            sheet: preview,
+            token: String::new(),
+        },
+        sheet,
+    ))
 }
 
-pub fn parse_sheet_impl(bytes: &[u8], sheet_name: &str) -> anyhow::Result<XlsxSheetPayload> {
+fn check_size(bytes: &[u8]) -> anyhow::Result<()> {
     if bytes.len() > MAX_BYTES {
         anyhow::bail!(
             "File is too large: {} MB (limit is {} MB)",
@@ -112,42 +200,26 @@ pub fn parse_sheet_impl(bytes: &[u8], sheet_name: &str) -> anyhow::Result<XlsxSh
             MAX_BYTES / 1024 / 1024
         );
     }
-    let mut wb = calamine::open_workbook_auto_from_rs(Cursor::new(bytes))
-        .map_err(|e| anyhow::anyhow!("Could not open workbook: {e}"))?;
-    let sheet = read_sheet(&mut wb, sheet_name)?;
-    Ok(XlsxSheetPayload {
+    Ok(())
+}
+
+fn payload_from_sheet(sheet_name: &str, sheet: Sheet) -> XlsxSheetPayload {
+    XlsxSheetPayload {
         name: sheet_name.to_string(),
         headers: sheet.headers,
         rows: sheet.body,
         inferred_types: sheet.inferred_types,
         error_cells: sheet.error_cells,
         error_cell_count: sheet.error_cell_count,
-    })
+    }
 }
 
-/// Build a preview of `sheet_name`: headers, first `PREVIEW_ROWS` data
-/// rows, total data row count, and a per-column inferred type label
-/// for the UI. The full body is intentionally not returned here —
-/// the caller can fetch it via `parse_xlsx_sheet` once the user picks
-/// a sheet.
-fn build_sheet_preview<RS, R>(wb: &mut R, sheet_name: &str) -> anyhow::Result<XlsxSheetPreview>
-where
-    RS: std::io::Read + std::io::Seek,
-    R: Reader<RS>,
-    R::Error: std::fmt::Display,
-{
-    let sheet = read_sheet(wb, sheet_name)?;
-    let total = sheet.body.len();
-    let preview = sheet.body.into_iter().take(PREVIEW_ROWS).collect();
-    Ok(XlsxSheetPreview {
-        name: sheet_name.to_string(),
-        headers: sheet.headers,
-        preview_rows: preview,
-        total_data_rows: total,
-        inferred_types: sheet.inferred_types,
-        error_cells: sheet.error_cells,
-        error_cell_count: sheet.error_cell_count,
-    })
+pub fn parse_sheet_impl(bytes: &[u8], sheet_name: &str) -> anyhow::Result<XlsxSheetPayload> {
+    check_size(bytes)?;
+    let mut wb = calamine::open_workbook_auto_from_rs(Cursor::new(bytes))
+        .map_err(|e| anyhow::anyhow!("Could not open workbook: {e}"))?;
+    let sheet = read_sheet(&mut wb, sheet_name)?;
+    Ok(payload_from_sheet(sheet_name, sheet))
 }
 
 struct Sheet {
@@ -571,5 +643,42 @@ mod tests {
         // DateTime cells which read_sheet maps to ISO-8601 strings;
         // the inferred-type heuristic flags them as `date`.
         assert_eq!(preview.sheet.inferred_types, vec!["date"]);
+    }
+
+    #[tokio::test]
+    async fn sheet_payload_comes_from_the_cached_workbook() {
+        let bytes = make_workbook(
+            &["id", "name"],
+            (0..120)
+                .map(|i| vec![serde_json::json!(i), serde_json::json!(format!("n{i}"))])
+                .collect(),
+        );
+        let expected = parse_sheet_impl(&bytes, "Sheet1").unwrap();
+        let (preview, sheet) = preview_with_sheet(&bytes).unwrap();
+        assert_eq!(preview.sheet.total_data_rows, 120);
+        assert_eq!(preview.sheet.preview_rows.len(), PREVIEW_ROWS);
+        *CACHE.lock().unwrap() = Some(CachedWorkbook {
+            token: "t1".into(),
+            bytes: std::sync::Arc::new(bytes),
+            parsed: Some(("Sheet1".into(), sheet)),
+        });
+
+        // The parsed default sheet is handed over as-is...
+        let payload = parse_xlsx_sheet("t1".into(), "Sheet1".into())
+            .await
+            .unwrap();
+        assert_eq!(payload.rows, expected.rows);
+        assert_eq!(payload.headers, expected.headers);
+        assert!(CACHE.lock().unwrap().as_ref().unwrap().parsed.is_none());
+        // ...and asking again re-parses from the cached bytes.
+        let again = parse_xlsx_sheet("t1".into(), "Sheet1".into())
+            .await
+            .unwrap();
+        assert_eq!(again.rows, expected.rows);
+
+        let err = parse_xlsx_sheet("stale".into(), "Sheet1".into())
+            .await
+            .unwrap_err();
+        assert!(err.contains("no longer loaded"), "{err}");
     }
 }

@@ -83,7 +83,7 @@ describe("xlsx mock-mode commands", () => {
   });
 
   it("parseXlsxSheet echoes the requested sheet name + returns typed rows", async () => {
-    const payload = await api.parseXlsxSheet(new Uint8Array([0]), "Other");
+    const payload = await api.parseXlsxSheet("mock-workbook", "Other");
     expect(payload.name).toBe("Other");
     expect(payload.headers.length).toBe(payload.inferred_types.length);
     expect(payload.rows.length).toBeGreaterThan(0);
