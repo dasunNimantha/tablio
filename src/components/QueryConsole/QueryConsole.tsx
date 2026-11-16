@@ -424,23 +424,31 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       modelUriRef.current = uri;
       completionContexts(monaco).set(uri, completionContextRef.current);
     }
-    editor.addAction({
+    // `addAction` registers each command in Monaco's global
+    // CommandsRegistry and `editor.dispose()` does not remove it, so the
+    // command's closure kept this console (DOM, editor, result rows) alive
+    // after the tab closed. Dispose the actions with the editor.
+    const actions: { dispose(): void }[] = [];
+    editor.onDidDispose(() => {
+      for (const a of actions.splice(0)) a.dispose();
+    });
+    actions.push(editor.addAction({
       id: "execute-query",
       label: "Execute Query",
       keybindings: [2048 | 3],
       run: () => { executeRef.current(); },
-    });
+    }));
     // Escape stops a running query. The context key limits the binding
     // to while a query runs, and the suggest / find widgets keep their
     // own Escape (9 = KeyCode.Escape).
     executingContextKeyRef.current = editor.createContextKey<boolean>("tablioQueryRunning", false);
-    editor.addAction({
+    actions.push(editor.addAction({
       id: "cancel-query",
       label: "Stop Running Query",
       keybindings: [9],
       precondition: "tablioQueryRunning && !suggestWidgetVisible && !findWidgetVisible",
       run: () => { cancelRef.current(); },
-    });
+    }));
     // Ctrl/Cmd+S: update the loaded saved query in place, or open
     // the Save dialog for a brand-new query. The binding goes
     // through a ref so the action always sees the latest closure
@@ -448,19 +456,19 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
     // called once per editor lifetime; re-registering on every
     // state change risks duplicate actions / stuck keybindings).
     // 2048 = KeyMod.CtrlCmd, 49 = KeyCode.KeyS  → Ctrl/Cmd+S.
-    editor.addAction({
+    actions.push(editor.addAction({
       id: "save-query",
       label: "Save Query",
       keybindings: [2048 | 49],
       run: () => { saveOrUpdateRef.current(); },
-    });
+    }));
     // 2048 = CtrlCmd, 1024 = Shift, 36 = KeyCode.KeyF → Ctrl/Cmd+Shift+F.
-    editor.addAction({
+    actions.push(editor.addAction({
       id: "format-sql",
       label: "Format SQL",
       keybindings: [2048 | 1024 | 36],
       run: () => { formatRef.current(); },
-    });
+    }));
     layoutEditor();
   }, []);
 
