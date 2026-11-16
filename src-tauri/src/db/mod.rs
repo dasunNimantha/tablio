@@ -12,6 +12,7 @@ pub mod pool;
 pub mod postgres;
 pub mod sqlite;
 pub mod ssh_tunnel;
+pub mod stream;
 pub mod tidb;
 
 use crate::models::*;
@@ -88,6 +89,26 @@ pub trait DatabaseDriver: Send + Sync {
         sort: Vec<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData>;
+    /// One page of `table` for an export. Like [`fetch_rows`](Self::fetch_rows),
+    /// but `columns` (the table's [`list_columns`](Self::list_columns),
+    /// read once by the caller) is not read again for every page, and the
+    /// matching rows are not counted: `total_rows` is `-1`. The default
+    /// falls back to `fetch_rows`.
+    async fn fetch_export_page(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        columns: &[ColumnInfo],
+        offset: u64,
+        limit: u64,
+        sort: Vec<SortSpec>,
+        filter: Option<String>,
+    ) -> Result<TableData> {
+        let _ = columns;
+        self.fetch_rows(database, schema, table, offset, limit, sort, filter)
+            .await
+    }
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult>;
     /// Like [`execute_query`](Self::execute_query), but stops early when
     /// `cancel` fires and then resolves to

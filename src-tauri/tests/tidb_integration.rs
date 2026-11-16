@@ -2,6 +2,8 @@ use tablio_lib::db::tidb::TidbDriver;
 use tablio_lib::db::DatabaseDriver;
 use tablio_lib::models::*;
 
+mod export_common;
+
 macro_rules! tidb_driver {
     () => {{
         let url = match std::env::var("TEST_TIDB_URL") {
@@ -2526,4 +2528,37 @@ async fn tidb_console_result_is_capped_with_a_notice() {
         "missing truncation notice: {:?}",
         r.notices
     );
+}
+
+#[tokio::test]
+async fn tidb_streamed_exports_match_in_memory_exports() {
+    let (driver, db) = tidb_driver!();
+    let tbl = unique_table("exp_stream");
+    let q = format!("`{tbl}`");
+    driver
+        .execute_query(&db, &format!("CREATE TABLE {q} (id INT PRIMARY KEY, txt TEXT, b BLOB, n DECIMAL(20,2), f DOUBLE)"))
+        .await
+        .unwrap();
+    let values = export_common::tricky_value_rows(45, |hex| format!("X'{hex}'"));
+    driver
+        .execute_query(
+            &db,
+            &format!("INSERT INTO {q} VALUES {}", values.join(", ")),
+        )
+        .await
+        .unwrap();
+    let driver: std::sync::Arc<dyn DatabaseDriver> = std::sync::Arc::new(driver);
+    export_common::assert_streamed_table_export_matches(
+        driver.clone(),
+        DbType::Tidb,
+        &db,
+        &db,
+        &tbl,
+        45,
+    )
+    .await;
+    driver
+        .execute_query(&db, &format!("DROP TABLE {q}"))
+        .await
+        .unwrap();
 }

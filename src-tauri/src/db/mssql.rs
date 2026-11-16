@@ -829,6 +829,138 @@ async fn mssql_run_script(
 const MSSQL_RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl MssqlDriver {
+    /// [`DatabaseDriver::fetch_rows`] for a known column list, optionally
+    /// without counting the matching rows.
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_rows_with(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        columns: Vec<ColumnInfo>,
+        offset: u64,
+        limit: u64,
+        sort: Vec<SortSpec>,
+        filter: Option<String>,
+        count_rows: bool,
+    ) -> Result<TableData> {
+        if columns.is_empty() {
+            anyhow::bail!("Table has no columns (or table not found)");
+        }
+        let fq = three_part_table(database, schema, table);
+        let pk_cols: Vec<String> = columns
+            .iter()
+            .filter(|c| c.is_primary_key)
+            .map(|c| c.name.clone())
+            .collect();
+        // ORDER BY is mandatory for `OFFSET ... FETCH NEXT` on
+        // SQL Server, so unlike pg/my we always end up with a
+        // non-empty clause. Three-step ladder:
+        //   1. multi-column user sort (issue #57)
+        //   2. PK columns
+        //   3. first column of the table (last-resort
+        //      deterministic ordering)
+        let order = if !sort.is_empty() {
+            sort.iter()
+                .map(|s| {
+                    let data_type = columns
+                        .iter()
+                        .find(|c| c.name == s.column)
+                        .map(|c| c.data_type.as_str())
+                        .unwrap_or("");
+                    Ok(format!(
+                        "{} {}",
+                        mssql_sort_expr(&s.column, data_type)?,
+                        match s.direction {
+                            SortDirection::Asc => "ASC",
+                            SortDirection::Desc => "DESC",
+                        }
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join(", ")
+        } else if pk_cols.is_empty() {
+            // First column that can be sorted on; text / ntext / image /
+            // xml / spatial columns cannot appear in ORDER BY.
+            columns
+                .iter()
+                .find(|c| {
+                    let t = c.data_type.to_ascii_lowercase();
+                    !matches!(
+                        t.as_str(),
+                        "text" | "ntext" | "image" | "xml" | "geography" | "geometry"
+                    )
+                })
+                .map(|c| bracket(&c.name))
+                .unwrap_or_else(|| "(SELECT NULL)".to_string())
+        } else {
+            pk_cols
+                .iter()
+                .map(|c| bracket(c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        let mut where_clause = String::new();
+        if let Some(f) = filter {
+            let t = f.trim();
+            if !t.is_empty() {
+                if let Some(reason) = filter_unsafe_reason(t) {
+                    anyhow::bail!("Filter rejected: {}", reason);
+                }
+                debug_assert!(!filter_is_unsafe(t));
+                where_clause = format!(" WHERE {}", t);
+            }
+        }
+
+        // Exports page through the table and don't need the count.
+        let total_rows = if count_rows {
+            let count_sql = format!("SELECT COUNT_BIG(*) AS c FROM {}{}", fq, where_clause);
+            self.run_select(&count_sql)
+                .await?
+                .1
+                .first()
+                .and_then(|r| r.first())
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+        } else {
+            -1
+        };
+
+        let data_sql = format!(
+            "SELECT {} FROM {}{} ORDER BY {} OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
+            grid_select_list(&columns),
+            fq,
+            where_clause,
+            order,
+            offset,
+            limit
+        );
+        let (select_names, row_values) = self.run_select(&data_sql).await?;
+
+        let columns_out = if select_names.is_empty() {
+            columns.clone()
+        } else {
+            let ordered_columns: Vec<ColumnInfo> = select_names
+                .iter()
+                .filter_map(|name| columns.iter().find(|c| &c.name == name).cloned())
+                .collect();
+            if ordered_columns.len() == select_names.len() {
+                ordered_columns
+            } else {
+                columns.clone()
+            }
+        };
+
+        Ok(TableData {
+            columns: columns_out,
+            rows: row_values,
+            total_rows,
+            offset,
+            limit,
+        })
+    }
+
     /// Throw away the shared client after a cancel dropped it
     /// mid-protocol, open a fresh one and `KILL` the old session.
     async fn discard_session(&self) {
@@ -1497,117 +1629,35 @@ impl DatabaseDriver for MssqlDriver {
         filter: Option<String>,
     ) -> Result<TableData> {
         let columns = self.list_columns(database, schema, table).await?;
-        if columns.is_empty() {
-            anyhow::bail!("Table has no columns (or table not found)");
-        }
-        let fq = three_part_table(database, schema, table);
-        let pk_cols: Vec<String> = columns
-            .iter()
-            .filter(|c| c.is_primary_key)
-            .map(|c| c.name.clone())
-            .collect();
-        // ORDER BY is mandatory for `OFFSET ... FETCH NEXT` on
-        // SQL Server, so unlike pg/my we always end up with a
-        // non-empty clause. Three-step ladder:
-        //   1. multi-column user sort (issue #57)
-        //   2. PK columns
-        //   3. first column of the table (last-resort
-        //      deterministic ordering)
-        let order = if !sort.is_empty() {
-            sort.iter()
-                .map(|s| {
-                    let data_type = columns
-                        .iter()
-                        .find(|c| c.name == s.column)
-                        .map(|c| c.data_type.as_str())
-                        .unwrap_or("");
-                    Ok(format!(
-                        "{} {}",
-                        mssql_sort_expr(&s.column, data_type)?,
-                        match s.direction {
-                            SortDirection::Asc => "ASC",
-                            SortDirection::Desc => "DESC",
-                        }
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?
-                .join(", ")
-        } else if pk_cols.is_empty() {
-            // First column that can be sorted on; text / ntext / image /
-            // xml / spatial columns cannot appear in ORDER BY.
-            columns
-                .iter()
-                .find(|c| {
-                    let t = c.data_type.to_ascii_lowercase();
-                    !matches!(
-                        t.as_str(),
-                        "text" | "ntext" | "image" | "xml" | "geography" | "geometry"
-                    )
-                })
-                .map(|c| bracket(&c.name))
-                .unwrap_or_else(|| "(SELECT NULL)".to_string())
-        } else {
-            pk_cols
-                .iter()
-                .map(|c| bracket(c))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+        self.fetch_rows_with(
+            database, schema, table, columns, offset, limit, sort, filter, true,
+        )
+        .await
+    }
 
-        let mut where_clause = String::new();
-        if let Some(f) = filter {
-            let t = f.trim();
-            if !t.is_empty() {
-                if let Some(reason) = filter_unsafe_reason(t) {
-                    anyhow::bail!("Filter rejected: {}", reason);
-                }
-                debug_assert!(!filter_is_unsafe(t));
-                where_clause = format!(" WHERE {}", t);
-            }
-        }
-
-        let count_sql = format!("SELECT COUNT_BIG(*) AS c FROM {}{}", fq, where_clause);
-        let total_rows = self
-            .run_select(&count_sql)
-            .await?
-            .1
-            .first()
-            .and_then(|r| r.first())
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-
-        let data_sql = format!(
-            "SELECT {} FROM {}{} ORDER BY {} OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
-            grid_select_list(&columns),
-            fq,
-            where_clause,
-            order,
-            offset,
-            limit
-        );
-        let (select_names, row_values) = self.run_select(&data_sql).await?;
-
-        let columns_out = if select_names.is_empty() {
-            columns.clone()
-        } else {
-            let ordered_columns: Vec<ColumnInfo> = select_names
-                .iter()
-                .filter_map(|name| columns.iter().find(|c| &c.name == name).cloned())
-                .collect();
-            if ordered_columns.len() == select_names.len() {
-                ordered_columns
-            } else {
-                columns.clone()
-            }
-        };
-
-        Ok(TableData {
-            columns: columns_out,
-            rows: row_values,
-            total_rows,
+    async fn fetch_export_page(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        columns: &[ColumnInfo],
+        offset: u64,
+        limit: u64,
+        sort: Vec<SortSpec>,
+        filter: Option<String>,
+    ) -> Result<TableData> {
+        self.fetch_rows_with(
+            database,
+            schema,
+            table,
+            columns.to_vec(),
             offset,
             limit,
-        })
+            sort,
+            filter,
+            false,
+        )
+        .await
     }
 
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult> {

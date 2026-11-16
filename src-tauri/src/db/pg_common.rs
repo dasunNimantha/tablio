@@ -950,6 +950,7 @@ pub async fn pg_fetch_rows_impl(
     limit: u64,
     sort: Vec<SortSpec>,
     filter: Option<String>,
+    count_rows: bool,
 ) -> Result<TableData> {
     if let Some(ref f) = filter {
         if !f.trim().is_empty() {
@@ -1007,10 +1008,15 @@ pub async fn pg_fetch_rows_impl(
         quote_ident(table),
         where_clause
     );
-    let count_row = sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
-        .fetch_one(pool)
-        .await?;
-    let total_rows: i64 = count_row.get("cnt");
+    // Exports page through the table and don't need the count.
+    let total_rows: i64 = if count_rows {
+        sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
+            .fetch_one(pool)
+            .await?
+            .get("cnt")
+    } else {
+        -1
+    };
 
     let sql = format!(
         "SELECT * FROM {}.{} {} {} LIMIT {} OFFSET {}",

@@ -2,6 +2,8 @@ use tablio_lib::db::mssql::MssqlDriver;
 use tablio_lib::db::DatabaseDriver;
 use tablio_lib::models::*;
 
+mod export_common;
+
 macro_rules! mssql_driver {
     () => {{
         let url = match std::env::var("TEST_MSSQL_URL") {
@@ -3618,4 +3620,37 @@ async fn mssql_console_result_is_capped_with_a_notice() {
         "missing truncation notice: {:?}",
         r.notices
     );
+}
+
+#[tokio::test]
+async fn mssql_streamed_exports_match_in_memory_exports() {
+    let (driver, db) = mssql_driver!();
+    let tbl = unique_table("exp_stream");
+    let q = format!("{SCHEMA}.[{tbl}]");
+    driver
+        .execute_query(&db, &format!("CREATE TABLE {q} (id INT PRIMARY KEY, txt NVARCHAR(MAX), b VARBINARY(MAX), n DECIMAL(20,2), f FLOAT)"))
+        .await
+        .unwrap();
+    let values = export_common::tricky_value_rows(45, |hex| format!("0x{hex}"));
+    driver
+        .execute_query(
+            &db,
+            &format!("INSERT INTO {q} VALUES {}", values.join(", ")),
+        )
+        .await
+        .unwrap();
+    let driver: std::sync::Arc<dyn DatabaseDriver> = std::sync::Arc::new(driver);
+    export_common::assert_streamed_table_export_matches(
+        driver.clone(),
+        DbType::Mssql,
+        &db,
+        SCHEMA,
+        &tbl,
+        45,
+    )
+    .await;
+    driver
+        .execute_query(&db, &format!("DROP TABLE {q}"))
+        .await
+        .unwrap();
 }

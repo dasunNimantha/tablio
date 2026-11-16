@@ -2,6 +2,8 @@ use tablio_lib::db::sqlite::SqliteDriver;
 use tablio_lib::db::DatabaseDriver;
 use tablio_lib::models::*;
 
+mod export_common;
+
 async fn create_driver() -> (SqliteDriver, String) {
     let id = uuid::Uuid::new_v4().simple().to_string();
     let path = format!("/tmp/tablio_test_{}.db", &id[..8]);
@@ -2698,5 +2700,40 @@ async fn sqlite_console_result_is_capped_with_a_notice() {
         "missing truncation notice: {:?}",
         r.notices
     );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_streamed_table_export_matches_in_memory_export() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("exp_stream");
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY, txt TEXT, b BLOB, \
+                 n NUMERIC, f REAL)"
+            ),
+        )
+        .await
+        .unwrap();
+    let values = export_common::tricky_value_rows(45, |hex| format!("X'{hex}'"));
+    driver
+        .execute_query(
+            DB,
+            &format!("INSERT INTO \"{tbl}\" VALUES {}", values.join(", ")),
+        )
+        .await
+        .unwrap();
+    let driver: std::sync::Arc<dyn DatabaseDriver> = std::sync::Arc::new(driver);
+    export_common::assert_streamed_table_export_matches(
+        driver,
+        DbType::Sqlite,
+        DB,
+        SCHEMA,
+        &tbl,
+        45,
+    )
+    .await;
     let _ = std::fs::remove_file(&path);
 }

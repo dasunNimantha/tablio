@@ -23,6 +23,97 @@ pub struct SqliteDriver {
 }
 
 impl SqliteDriver {
+    /// [`DatabaseDriver::fetch_rows`] for a known column list, optionally
+    /// without counting the matching rows.
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_rows_with(
+        &self,
+        columns: Vec<ColumnInfo>,
+        table: &str,
+        offset: u64,
+        limit: u64,
+        sort: Vec<SortSpec>,
+        filter: Option<String>,
+        count_rows: bool,
+    ) -> Result<TableData> {
+        if let Some(reason) = filter.as_deref().and_then(sqlite_filter_rejection) {
+            anyhow::bail!("Filter rejected: {}", reason);
+        }
+
+        let where_clause = filter
+            .filter(|f| !f.trim().is_empty())
+            .map(|f| format!("WHERE {}", f))
+            .unwrap_or_default();
+
+        let order_clause = if !sort.is_empty() {
+            // Multi-column sort (issue #57).
+            let parts: Vec<String> = sort
+                .iter()
+                .map(|s| {
+                    let dir = match s.direction {
+                        SortDirection::Asc => "ASC",
+                        SortDirection::Desc => "DESC",
+                    };
+                    format!("{} {}", quote_ident(&s.column), dir)
+                })
+                .collect();
+            format!("ORDER BY {}", parts.join(", "))
+        } else {
+            // PK fallback for stable pagination.
+            let pk_cols: Vec<String> = columns
+                .iter()
+                .filter(|c| c.is_primary_key)
+                .map(|c| quote_ident(&c.name))
+                .collect();
+            if pk_cols.is_empty() {
+                String::new()
+            } else {
+                format!("ORDER BY {}", pk_cols.join(", "))
+            }
+        };
+
+        let count_sql = format!(
+            "SELECT COUNT(*) as cnt FROM {} {}",
+            quote_ident(table),
+            where_clause
+        );
+        // Exports page through the table and don't need the count.
+        let total_rows: i64 = if count_rows {
+            sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
+                .fetch_one(&self.pool)
+                .await?
+                .get("cnt")
+        } else {
+            -1
+        };
+
+        let sql = format!(
+            "SELECT * FROM {} {} {} LIMIT {} OFFSET {}",
+            quote_ident(table),
+            where_clause,
+            order_clause,
+            limit,
+            offset
+        );
+
+        let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
+            .fetch_all(&self.pool)
+            .await?;
+        let col_count = columns.len();
+        let data_rows: Vec<Vec<serde_json::Value>> = rows
+            .iter()
+            .map(|r| sqlite_row_to_json_values(r, col_count))
+            .collect();
+
+        Ok(TableData {
+            columns,
+            rows: data_rows,
+            total_rows,
+            offset,
+            limit,
+        })
+    }
+
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
         // The user-typed value can be either a bare filesystem path
         // (most common, e.g. `~/database.db` or `./foo.db`) or an
@@ -445,6 +536,16 @@ fn format_bytes(bytes: i64) -> String {
     }
 }
 
+/// Why a grid filter is refused, if it is.
+fn sqlite_filter_rejection(filter: &str) -> Option<&'static str> {
+    if filter.trim().is_empty() {
+        return None;
+    }
+    let reason = filter_unsafe_reason(filter);
+    debug_assert!(reason.is_some() || !filter_is_unsafe(filter));
+    reason
+}
+
 #[async_trait]
 impl DatabaseDriver for SqliteDriver {
     async fn list_roles(&self) -> Result<Vec<RoleInfo>> {
@@ -625,84 +726,27 @@ impl DatabaseDriver for SqliteDriver {
         sort: Vec<SortSpec>,
         filter: Option<String>,
     ) -> Result<TableData> {
-        if let Some(ref f) = filter {
-            if !f.trim().is_empty() {
-                if let Some(reason) = filter_unsafe_reason(f) {
-                    anyhow::bail!("Filter rejected: {}", reason);
-                }
-                debug_assert!(!filter_is_unsafe(f));
-            }
+        if let Some(reason) = filter.as_deref().and_then(sqlite_filter_rejection) {
+            anyhow::bail!("Filter rejected: {}", reason);
         }
-
         let columns = self.list_columns(database, schema, table).await?;
+        self.fetch_rows_with(columns, table, offset, limit, sort, filter, true)
+            .await
+    }
 
-        let where_clause = filter
-            .filter(|f| !f.trim().is_empty())
-            .map(|f| format!("WHERE {}", f))
-            .unwrap_or_default();
-
-        let order_clause = if !sort.is_empty() {
-            // Multi-column sort (issue #57).
-            let parts: Vec<String> = sort
-                .iter()
-                .map(|s| {
-                    let dir = match s.direction {
-                        SortDirection::Asc => "ASC",
-                        SortDirection::Desc => "DESC",
-                    };
-                    format!("{} {}", quote_ident(&s.column), dir)
-                })
-                .collect();
-            format!("ORDER BY {}", parts.join(", "))
-        } else {
-            // PK fallback for stable pagination.
-            let pk_cols: Vec<String> = columns
-                .iter()
-                .filter(|c| c.is_primary_key)
-                .map(|c| quote_ident(&c.name))
-                .collect();
-            if pk_cols.is_empty() {
-                String::new()
-            } else {
-                format!("ORDER BY {}", pk_cols.join(", "))
-            }
-        };
-
-        let count_sql = format!(
-            "SELECT COUNT(*) as cnt FROM {} {}",
-            quote_ident(table),
-            where_clause
-        );
-        let count_row = sqlx::query(sqlx::AssertSqlSafe(&*count_sql))
-            .fetch_one(&self.pool)
-            .await?;
-        let total_rows: i64 = count_row.get("cnt");
-
-        let sql = format!(
-            "SELECT * FROM {} {} {} LIMIT {} OFFSET {}",
-            quote_ident(table),
-            where_clause,
-            order_clause,
-            limit,
-            offset
-        );
-
-        let rows = sqlx::query(sqlx::AssertSqlSafe(&*sql))
-            .fetch_all(&self.pool)
-            .await?;
-        let col_count = columns.len();
-        let data_rows: Vec<Vec<serde_json::Value>> = rows
-            .iter()
-            .map(|r| sqlite_row_to_json_values(r, col_count))
-            .collect();
-
-        Ok(TableData {
-            columns,
-            rows: data_rows,
-            total_rows,
-            offset,
-            limit,
-        })
+    async fn fetch_export_page(
+        &self,
+        _database: &str,
+        _schema: &str,
+        table: &str,
+        columns: &[ColumnInfo],
+        offset: u64,
+        limit: u64,
+        sort: Vec<SortSpec>,
+        filter: Option<String>,
+    ) -> Result<TableData> {
+        self.fetch_rows_with(columns.to_vec(), table, offset, limit, sort, filter, false)
+            .await
     }
 
     async fn execute_query(&self, _database: &str, sql: &str) -> Result<QueryResult> {

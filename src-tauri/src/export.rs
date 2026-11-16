@@ -26,20 +26,22 @@ pub fn to_csv(columns: &[String], rows: &[Vec<Value>]) -> String {
     out.push('\n');
 
     for row in rows {
-        let line: Vec<String> = row
-            .iter()
-            .map(|v| match v {
-                Value::Null => String::new(),
-                Value::String(s) => csv_text_field(s),
-                Value::Bool(b) => b.to_string(),
-                Value::Number(n) => n.to_string(),
-                _ => csv_text_field(&v.to_string()),
-            })
-            .collect();
+        let line: Vec<String> = row.iter().map(csv_field).collect();
         out.push_str(&line.join(","));
         out.push('\n');
     }
     out
+}
+
+/// One value as a CSV field.
+fn csv_field(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::String(s) => csv_text_field(s),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        _ => csv_text_field(&v.to_string()),
+    }
 }
 
 /// A text value as a CSV field: formula-neutralised, quoted when needed,
@@ -73,30 +75,40 @@ pub fn to_json(columns: &[String], rows: &[Vec<Value>]) -> String {
     if rows.is_empty() {
         return "[]".to_string();
     }
-    let keys: Vec<String> = unique_keys(columns)
-        .iter()
-        .map(|k| serde_json::to_string(k).unwrap_or_else(|_| "\"\"".to_string()))
-        .collect();
+    let keys = json_keys(columns);
     let mut out = String::from("[\n");
     for (ri, row) in rows.iter().enumerate() {
-        out.push_str("  {");
-        let mut first = true;
-        for (key, val) in keys.iter().zip(row.iter()) {
-            out.push_str(if first { "\n" } else { ",\n" });
-            first = false;
-            let rendered = serde_json::to_string_pretty(val)
-                .unwrap_or_else(|_| "null".to_string())
-                .replace('\n', "\n    ");
-            out.push_str("    ");
-            out.push_str(key);
-            out.push_str(": ");
-            out.push_str(&rendered);
-        }
-        out.push_str(if first { "}" } else { "\n  }" });
+        push_json_object(&mut out, &keys, row);
         out.push_str(if ri + 1 < rows.len() { ",\n" } else { "\n" });
     }
     out.push(']');
     out
+}
+
+/// The JSON object keys for `columns`, already serialized as JSON strings.
+fn json_keys(columns: &[String]) -> Vec<String> {
+    unique_keys(columns)
+        .iter()
+        .map(|k| serde_json::to_string(k).unwrap_or_else(|_| "\"\"".to_string()))
+        .collect()
+}
+
+/// Append one row as an indented JSON object (no trailing separator).
+fn push_json_object(out: &mut String, keys: &[String], row: &[Value]) {
+    out.push_str("  {");
+    let mut first = true;
+    for (key, val) in keys.iter().zip(row.iter()) {
+        out.push_str(if first { "\n" } else { ",\n" });
+        first = false;
+        let rendered = serde_json::to_string_pretty(val)
+            .unwrap_or_else(|_| "null".to_string())
+            .replace('\n', "\n    ");
+        out.push_str("    ");
+        out.push_str(key);
+        out.push_str(": ");
+        out.push_str(&rendered);
+    }
+    out.push_str(if first { "}" } else { "\n  }" });
 }
 
 /// Column names made unique: a repeat becomes `name_2`, `name_3`, ...
@@ -327,32 +339,13 @@ pub fn to_sql_inserts_for(
         .collect::<Vec<_>>()
         .join(", ");
 
-    let qualified = match schema {
-        Some(s) if !s.is_empty() => format!("{}.{}", dialect.ident(s), dialect.ident(table_name)),
-        _ => dialect.ident(table_name),
-    };
+    let qualified = qualified_table(dialect, schema, table_name);
 
     for row in rows {
         let vals: Vec<String> = row
             .iter()
             .enumerate()
-            .map(|(i, v)| {
-                let kind = kinds.get(i).copied().unwrap_or_default();
-                match v {
-                    Value::Null => "NULL".to_string(),
-                    Value::Bool(b) => b.to_string(),
-                    Value::Number(n) => n.to_string(),
-                    Value::String(s) if kind == SqlColumnKind::Numeric && is_numeric_literal(s) => {
-                        s.clone()
-                    }
-                    Value::String(s) if kind == SqlColumnKind::Binary => match binary_hex(s) {
-                        Some(hex) => dialect.binary(hex),
-                        None => dialect.string(s),
-                    },
-                    Value::String(s) => dialect.string(s),
-                    _ => dialect.string(&v.to_string()),
-                }
-            })
+            .map(|(i, v)| sql_literal(dialect, kinds.get(i).copied().unwrap_or_default(), v))
             .collect();
 
         out.push_str(&format!(
@@ -363,6 +356,30 @@ pub fn to_sql_inserts_for(
         ));
     }
     out
+}
+
+/// `"schema"."table"`, or just the table when there is no schema.
+fn qualified_table(dialect: SqlExportDialect, schema: Option<&str>, table_name: &str) -> String {
+    match schema {
+        Some(s) if !s.is_empty() => format!("{}.{}", dialect.ident(s), dialect.ident(table_name)),
+        _ => dialect.ident(table_name),
+    }
+}
+
+/// One value as a SQL literal for a column of `kind`.
+fn sql_literal(dialect: SqlExportDialect, kind: SqlColumnKind, v: &Value) -> String {
+    match v {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) if kind == SqlColumnKind::Numeric && is_numeric_literal(s) => s.clone(),
+        Value::String(s) if kind == SqlColumnKind::Binary => match binary_hex(s) {
+            Some(hex) => dialect.binary(hex),
+            None => dialect.string(s),
+        },
+        Value::String(s) => dialect.string(s),
+        _ => dialect.string(&v.to_string()),
+    }
 }
 
 /// Excel sheet-name rules: max 31 chars, may not contain `: \ / ? * [ ]`.
@@ -424,7 +441,7 @@ pub fn to_xlsx(columns: &[String], rows: &[Vec<Value>], sheet_name: &str) -> Res
     for (row_idx, row) in rows.iter().enumerate() {
         let excel_row = (row_idx + 1) as u32;
         for (col_idx, val) in row.iter().enumerate() {
-            write_typed_cell(
+            let _width = write_typed_cell(
                 worksheet,
                 excel_row,
                 col_idx as u16,
@@ -455,16 +472,21 @@ pub struct XlsxExport {
 impl XlsxExport {
     /// User-facing warning about truncated cells, if any.
     pub fn warning(&self) -> Option<String> {
-        (self.truncated_cells > 0).then(|| {
-            format!(
-                "{} cell(s) held more than {} characters, Excel's limit, and were cut short \
-                 (marked \"{}\"). Export as CSV or JSON to keep the full text.",
-                self.truncated_cells,
-                XLSX_MAX_CELL_CHARS,
-                XLSX_TRUNCATION_MARKER.trim()
-            )
-        })
+        xlsx_truncation_warning(self.truncated_cells)
     }
+}
+
+/// User-facing warning for an xlsx export that cut `truncated_cells`.
+pub fn xlsx_truncation_warning(truncated_cells: usize) -> Option<String> {
+    (truncated_cells > 0).then(|| {
+        format!(
+            "{} cell(s) held more than {} characters, Excel's limit, and were cut short \
+             (marked \"{}\"). Export as CSV or JSON to keep the full text.",
+            truncated_cells,
+            XLSX_MAX_CELL_CHARS,
+            XLSX_TRUNCATION_MARKER.trim()
+        )
+    })
 }
 
 /// Excel's per-cell text limit, in UTF-16 code units.
@@ -494,6 +516,8 @@ fn fit_xlsx_text<'a>(s: &'a str, truncated: &mut usize) -> std::borrow::Cow<'a, 
 /// Largest integer magnitude Excel (an IEEE double) represents exactly.
 const MAX_EXACT_F64_INT: u64 = 1 << 53;
 
+/// Write one value and return the width `Worksheet::autofit()` would
+/// measure for the cell, in pixels before padding (0 for a blank).
 fn write_typed_cell(
     worksheet: &mut rust_xlsxwriter::Worksheet,
     row: u32,
@@ -502,13 +526,20 @@ fn write_typed_cell(
     datetime_fmt: &Format,
     datetime_utc_fmt: &Format,
     truncated: &mut usize,
-) -> Result<()> {
-    match val {
+) -> Result<u32> {
+    let number_width = |n: f64| 7 * n.to_string().len() as u32;
+    Ok(match val {
         Value::Null => {
             worksheet.write_blank(row, col, &Format::default())?;
+            0
         }
         Value::Bool(b) => {
             worksheet.write_boolean(row, col, *b)?;
+            if *b {
+                31
+            } else {
+                36
+            }
         }
         Value::Number(n) => {
             // Excel stores every number as f64. Integers beyond 2^53 would
@@ -516,19 +547,22 @@ fn write_typed_cell(
             if let Some(i) = n.as_i64() {
                 if i.unsigned_abs() <= MAX_EXACT_F64_INT {
                     worksheet.write_number(row, col, i as f64)?;
+                    number_width(i as f64)
                 } else {
-                    worksheet.write_string(row, col, i.to_string())?;
+                    write_text_cell(worksheet, row, col, &i.to_string())?
                 }
             } else if let Some(u) = n.as_u64() {
                 if u <= MAX_EXACT_F64_INT {
                     worksheet.write_number(row, col, u as f64)?;
+                    number_width(u as f64)
                 } else {
-                    worksheet.write_string(row, col, u.to_string())?;
+                    write_text_cell(worksheet, row, col, &u.to_string())?
                 }
             } else if let Some(f) = n.as_f64() {
                 worksheet.write_number(row, col, f)?;
+                number_width(f)
             } else {
-                worksheet.write_string(row, col, n.to_string())?;
+                write_text_cell(worksheet, row, col, &n.to_string())?
             }
         }
         Value::String(s) => match parse_iso_datetime(s) {
@@ -536,22 +570,81 @@ fn write_typed_cell(
             // to a text cell, which keeps every digit.
             Some(IsoDateTime::Naive(dt)) => {
                 worksheet.write_datetime_with_format(row, col, dt, datetime_fmt)?;
+                DATETIME_AUTOFIT_WIDTH
             }
             Some(IsoDateTime::Utc(dt)) => {
                 worksheet.write_datetime_with_format(row, col, dt, datetime_utc_fmt)?;
+                DATETIME_AUTOFIT_WIDTH
             }
-            None => {
-                worksheet.write_string(row, col, fit_xlsx_text(s, truncated).as_ref())?;
-            }
+            None => write_text_cell(worksheet, row, col, fit_xlsx_text(s, truncated).as_ref())?,
         },
         // No native Excel cell type for arrays / objects; fall back to
         // the JSON representation so the data isn't silently dropped.
         Value::Array(_) | Value::Object(_) => {
             let text = val.to_string();
-            worksheet.write_string(row, col, fit_xlsx_text(&text, truncated).as_ref())?;
+            write_text_cell(
+                worksheet,
+                row,
+                col,
+                fit_xlsx_text(&text, truncated).as_ref(),
+            )?
         }
+    })
+}
+
+/// Width `autofit()` gives a datetime cell (Excel's default date format).
+const DATETIME_AUTOFIT_WIDTH: u32 = 68;
+/// Widest column `autofit()` produces, in pixels.
+const MAX_AUTOFIT_WIDTH: u32 = 1790;
+/// Cell padding `autofit()` adds to a non-empty cell, in pixels.
+const AUTOFIT_PADDING: u32 = 7;
+
+fn write_text_cell(
+    worksheet: &mut rust_xlsxwriter::Worksheet,
+    row: u32,
+    col: u16,
+    text: &str,
+) -> Result<u32> {
+    worksheet.write_string(row, col, text)?;
+    Ok(text_autofit_width(text))
+}
+
+/// `autofit()`'s width for a text cell: its widest line.
+fn text_autofit_width(text: &str) -> u32 {
+    text.lines()
+        .map(|line| rust_xlsxwriter::utility::cell_autofit_width(line) - AUTOFIT_PADDING)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Column widths as `Worksheet::autofit()` computes them, gathered
+/// while rows are written. A constant-memory worksheet only keeps the
+/// current row, so its own `autofit()` would size columns by the last
+/// row alone.
+#[derive(Debug, Default)]
+struct AutofitWidths(Vec<u32>);
+
+impl AutofitWidths {
+    fn record(&mut self, col: u16, width: u32) {
+        if width == 0 {
+            return;
+        }
+        let width = (width + AUTOFIT_PADDING).min(MAX_AUTOFIT_WIDTH);
+        let col = col as usize;
+        if self.0.len() <= col {
+            self.0.resize(col + 1, 0);
+        }
+        self.0[col] = self.0[col].max(width);
     }
-    Ok(())
+
+    fn apply(&self, worksheet: &mut rust_xlsxwriter::Worksheet) -> Result<()> {
+        for (col, width) in self.0.iter().enumerate() {
+            if *width > 0 {
+                worksheet.set_column_autofit_width(col as u16, *width)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -594,6 +687,231 @@ fn parse_iso_datetime(s: &str) -> Option<IsoDateTime> {
         ));
     }
     None
+}
+
+// ── Streaming writers ─────────────────────────────────────────────────
+//
+// Exports write rows as they arrive, page by page, instead of building
+// the whole file in memory. The text formats produce exactly what
+// `to_csv` / `to_json` / `to_sql_inserts_for` produce for the same rows.
+
+/// Something rows can be written to in pages: the column header first,
+/// then any number of row batches.
+pub trait RowWriter {
+    /// Called once, before any rows. `kinds` may be empty (unknown types).
+    fn begin(&mut self, columns: &[String], kinds: &[SqlColumnKind]) -> Result<()>;
+    fn write_rows(&mut self, rows: &[Vec<Value>]) -> Result<()>;
+}
+
+/// Text output format of a [`TextExport`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextFormat {
+    Csv,
+    Json,
+    /// `INSERT` statements for `table` (optionally schema-qualified).
+    Sql {
+        dialect: SqlExportDialect,
+        schema: Option<String>,
+        table: String,
+    },
+}
+
+/// Streams CSV, JSON or SQL to `out`.
+pub struct TextExport<W: std::io::Write> {
+    out: W,
+    format: TextFormat,
+    kinds: Vec<SqlColumnKind>,
+    /// JSON: the serialized keys. SQL: unused.
+    json_keys: Vec<String>,
+    /// SQL: `INSERT INTO t (cols) VALUES (`.
+    sql_prefix: String,
+    rows: u64,
+    line: String,
+}
+
+impl<W: std::io::Write> TextExport<W> {
+    pub fn new(out: W, format: TextFormat) -> Self {
+        Self {
+            out,
+            format,
+            kinds: Vec::new(),
+            json_keys: Vec::new(),
+            sql_prefix: String::new(),
+            rows: 0,
+            line: String::new(),
+        }
+    }
+
+    /// Write whatever closes the output and return the writer.
+    pub fn finish(mut self) -> Result<W> {
+        if self.format == TextFormat::Json {
+            self.out
+                .write_all(if self.rows == 0 { b"[]" } else { b"\n]" })?;
+        }
+        self.out.flush()?;
+        Ok(self.out)
+    }
+}
+
+impl<W: std::io::Write> RowWriter for TextExport<W> {
+    fn begin(&mut self, columns: &[String], kinds: &[SqlColumnKind]) -> Result<()> {
+        self.kinds = kinds.to_vec();
+        match &self.format {
+            TextFormat::Csv => {
+                let header: Vec<String> = columns.iter().map(|c| csv_text_field(c)).collect();
+                self.out.write_all(header.join(",").as_bytes())?;
+                self.out.write_all(b"\n")?;
+            }
+            TextFormat::Json => self.json_keys = json_keys(columns),
+            TextFormat::Sql {
+                dialect,
+                schema,
+                table,
+            } => {
+                let cols_str = columns
+                    .iter()
+                    .map(|c| dialect.ident(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.sql_prefix = format!(
+                    "INSERT INTO {} ({}) VALUES (",
+                    qualified_table(*dialect, schema.as_deref(), table),
+                    cols_str
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn write_rows(&mut self, rows: &[Vec<Value>]) -> Result<()> {
+        for row in rows {
+            let line = &mut self.line;
+            line.clear();
+            match &self.format {
+                TextFormat::Csv => {
+                    for (i, v) in row.iter().enumerate() {
+                        if i > 0 {
+                            line.push(',');
+                        }
+                        line.push_str(&csv_field(v));
+                    }
+                    line.push('\n');
+                }
+                TextFormat::Json => {
+                    line.push_str(if self.rows == 0 { "[\n" } else { ",\n" });
+                    push_json_object(line, &self.json_keys, row);
+                }
+                TextFormat::Sql { dialect, .. } => {
+                    line.push_str(&self.sql_prefix);
+                    for (i, v) in row.iter().enumerate() {
+                        if i > 0 {
+                            line.push_str(", ");
+                        }
+                        let kind = self.kinds.get(i).copied().unwrap_or_default();
+                        line.push_str(&sql_literal(*dialect, kind, v));
+                    }
+                    line.push_str(");\n");
+                }
+            }
+            self.out.write_all(line.as_bytes())?;
+            self.rows += 1;
+        }
+        Ok(())
+    }
+}
+
+/// Streams rows into an `.xlsx` workbook in constant-memory mode: each
+/// row goes to a temp file as soon as the next one starts, so memory
+/// stays flat however many rows are written. Cells are typed exactly
+/// like [`to_xlsx`] and columns are sized like its `autofit()`. Text is
+/// stored as inline strings rather than in a shared-string table.
+pub struct XlsxStreamWriter {
+    workbook: Workbook,
+    next_row: u32,
+    widths: AutofitWidths,
+    truncated_cells: usize,
+    datetime_fmt: Format,
+    datetime_utc_fmt: Format,
+}
+
+impl XlsxStreamWriter {
+    /// `tempdir`: where the worksheet's row data is spooled (the
+    /// system temp directory when `None`).
+    pub fn new(sheet_name: &str, tempdir: Option<&std::path::Path>) -> Result<Self> {
+        let mut workbook = Workbook::new();
+        if let Some(dir) = tempdir {
+            workbook.set_tempdir(dir)?;
+        }
+        let worksheet = workbook.add_worksheet_with_constant_memory()?;
+        worksheet.set_name(sanitize_sheet_name(sheet_name))?;
+        Ok(Self {
+            workbook,
+            next_row: 0,
+            widths: AutofitWidths::default(),
+            truncated_cells: 0,
+            datetime_fmt: Format::new().set_num_format("yyyy-mm-dd hh:mm:ss"),
+            datetime_utc_fmt: Format::new().set_num_format("yyyy-mm-dd hh:mm:ss \"UTC\""),
+        })
+    }
+
+    fn worksheet(&mut self) -> Result<&mut rust_xlsxwriter::Worksheet> {
+        Ok(self.workbook.worksheet_from_index(0)?)
+    }
+
+    /// Size the columns, write the workbook to `path` and return how
+    /// many cells had to be cut to Excel's limit.
+    pub fn finish(mut self, path: &std::path::Path) -> Result<usize> {
+        let widths = std::mem::take(&mut self.widths);
+        widths.apply(self.worksheet()?)?;
+        self.workbook.save(path)?;
+        Ok(self.truncated_cells)
+    }
+}
+
+impl RowWriter for XlsxStreamWriter {
+    fn begin(&mut self, columns: &[String], _kinds: &[SqlColumnKind]) -> Result<()> {
+        let header_fmt = Format::new().set_bold();
+        let mut truncated = 0;
+        let mut widths = std::mem::take(&mut self.widths);
+        let worksheet = self.worksheet()?;
+        for (col_idx, col) in columns.iter().enumerate() {
+            let text = fit_xlsx_text(col, &mut truncated);
+            worksheet.write_string_with_format(0, col_idx as u16, text.as_ref(), &header_fmt)?;
+            widths.record(col_idx as u16, text_autofit_width(&text));
+        }
+        self.widths = widths;
+        self.truncated_cells += truncated;
+        self.next_row = 1;
+        Ok(())
+    }
+
+    fn write_rows(&mut self, rows: &[Vec<Value>]) -> Result<()> {
+        let Self {
+            workbook,
+            next_row,
+            widths,
+            truncated_cells,
+            datetime_fmt,
+            datetime_utc_fmt,
+        } = self;
+        let worksheet = workbook.worksheet_from_index(0)?;
+        for row in rows {
+            for (col_idx, val) in row.iter().enumerate() {
+                let width = write_typed_cell(
+                    worksheet,
+                    *next_row,
+                    col_idx as u16,
+                    val,
+                    datetime_fmt,
+                    datetime_utc_fmt,
+                    truncated_cells,
+                )?;
+                widths.record(col_idx as u16, width);
+            }
+            *next_row += 1;
+        }
+        Ok(())
+    }
 }
 
 fn escape_csv(s: &str) -> String {
@@ -1362,5 +1680,238 @@ mod tests {
         for t in ["text", "varchar(10)", "bit", "int"] {
             assert!(!is_binary_type(t), "{t}");
         }
+    }
+
+    // ── streaming writers ─────────────────────────────────────────────
+
+    /// Column names include a duplicate and a formula-looking name.
+    fn tricky_columns() -> Vec<String> {
+        [
+            "id", "txt", "id", "=calc", "bin", "num", "flag", "obj", "ts", "f",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    fn tricky_kinds() -> Vec<SqlColumnKind> {
+        use SqlColumnKind::*;
+        vec![
+            Numeric, Other, Numeric, Other, Binary, Numeric, Other, Other, Other, Other,
+        ]
+    }
+
+    /// `n` rows cycling through NULLs, quotes, separators, newlines,
+    /// unicode, binary, formula-guard cases, big numbers and dates.
+    fn tricky_rows(n: usize) -> Vec<Vec<Value>> {
+        use serde_json::json;
+        let texts = [
+            json!(null),
+            json!(""),
+            json!("a,b"),
+            json!("say \"hi\""),
+            json!("line1\nline2"),
+            json!("crlf\r\nend"),
+            json!("日本語 ñ 🎉"),
+            json!("=HYPERLINK(\"http://x\",\"y\")"),
+            json!("-12.5"),
+            json!("@SUM(A1)"),
+            json!("\tx"),
+            json!("O'Brien \\ path"),
+            json!("2024-05-01T12:30:00"),
+        ];
+        let bins = [
+            json!("\\xdeadbeef"),
+            json!("0xDEAD"),
+            json!("X'00ff'"),
+            json!("not hex"),
+            json!(null),
+        ];
+        let nums = [
+            json!("12345678901234567890.5"),
+            json!(9_007_199_254_740_993i64),
+            json!(-3),
+            json!(7.25),
+            json!("NaN"),
+            json!(null),
+        ];
+        (0..n)
+            .map(|i| {
+                vec![
+                    json!(i),
+                    texts[i % texts.len()].clone(),
+                    json!(i as i64 * 10),
+                    texts[(i + 5) % texts.len()].clone(),
+                    bins[i % bins.len()].clone(),
+                    nums[i % nums.len()].clone(),
+                    if i % 3 == 0 {
+                        json!(null)
+                    } else {
+                        json!(i % 2 == 0)
+                    },
+                    if i % 4 == 0 {
+                        json!({"k": [1, "two\n", null], "é": {"x": true}})
+                    } else {
+                        json!([i, "s"])
+                    },
+                    [
+                        json!("2024-05-01 12:30:00+02"),
+                        json!("2024-01-02"),
+                        json!("12:00"),
+                    ][i % 3]
+                        .clone(),
+                    json!(i as f64 / 3.0),
+                ]
+            })
+            .collect()
+    }
+
+    /// Stream `rows` through a fresh [`TextExport`] in pages of `page`.
+    fn stream_text(
+        format: TextFormat,
+        cols: &[String],
+        kinds: &[SqlColumnKind],
+        rows: &[Vec<Value>],
+        page: usize,
+    ) -> String {
+        let mut w = TextExport::new(Vec::new(), format);
+        w.begin(cols, kinds).unwrap();
+        for chunk in rows.chunks(page.max(1)) {
+            w.write_rows(chunk).unwrap();
+        }
+        String::from_utf8(w.finish().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn streamed_text_equals_in_memory_output() {
+        let cols = tricky_columns();
+        let kinds = tricky_kinds();
+        for n in [0, 1, 2, 7, 40] {
+            let rows = tricky_rows(n);
+            for page in [1, 3, 7, 1000] {
+                assert_eq!(
+                    stream_text(TextFormat::Csv, &cols, &kinds, &rows, page),
+                    to_csv(&cols, &rows),
+                    "csv n={n} page={page}"
+                );
+                let json = stream_text(TextFormat::Json, &cols, &kinds, &rows, page);
+                assert_eq!(json, to_json(&cols, &rows), "json n={n} page={page}");
+                let parsed: Vec<serde_json::Map<String, Value>> =
+                    serde_json::from_str(&json).expect("valid JSON array");
+                assert_eq!(parsed.len(), n);
+                for dialect in [
+                    SqlExportDialect::Standard,
+                    SqlExportDialect::Postgres,
+                    SqlExportDialect::MySql,
+                    SqlExportDialect::Sqlite,
+                    SqlExportDialect::Mssql,
+                    SqlExportDialect::Cassandra,
+                ] {
+                    for schema in [None, Some("my schema")] {
+                        let format = TextFormat::Sql {
+                            dialect,
+                            schema: schema.map(str::to_string),
+                            table: "t\"x".into(),
+                        };
+                        assert_eq!(
+                            stream_text(format, &cols, &kinds, &rows, page),
+                            to_sql_inserts_for(dialect, schema, "t\"x", &cols, &kinds, &rows),
+                            "sql {dialect:?} n={n} page={page}"
+                        );
+                    }
+                }
+            }
+            // Query results: no column kinds.
+            assert_eq!(
+                stream_text(
+                    TextFormat::Sql {
+                        dialect: SqlExportDialect::Standard,
+                        schema: None,
+                        table: "query_result".into(),
+                    },
+                    &cols,
+                    &[],
+                    &rows,
+                    3
+                ),
+                to_sql_inserts(None, "query_result", &cols, &rows)
+            );
+        }
+        // No columns at all (a statement without a result set).
+        assert_eq!(
+            stream_text(TextFormat::Csv, &[], &[], &[], 3),
+            to_csv(&[], &[])
+        );
+        assert_eq!(stream_text(TextFormat::Json, &[], &[], &[], 3), "[]");
+    }
+
+    /// Cells of the first sheet of an xlsx file, as calamine reads them.
+    fn xlsx_cells(bytes: &[u8]) -> Vec<Vec<calamine::Data>> {
+        use calamine::Reader;
+        let mut wb = calamine::open_workbook_auto_from_rs(std::io::Cursor::new(bytes)).unwrap();
+        let name = wb.sheet_names()[0].clone();
+        let range = wb.worksheet_range(&name).unwrap();
+        range.rows().map(|r| r.to_vec()).collect()
+    }
+
+    /// The `<cols>` element (column widths) of the first worksheet.
+    fn xlsx_cols_xml(bytes: &[u8]) -> String {
+        use std::io::Read;
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut xml = String::new();
+        zip.by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        match (xml.find("<cols>"), xml.find("</cols>")) {
+            (Some(a), Some(b)) => xml[a..b].to_string(),
+            _ => String::new(),
+        }
+    }
+
+    fn stream_xlsx(cols: &[String], rows: &[Vec<Value>], page: usize) -> (Vec<u8>, usize) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.xlsx");
+        let mut w = XlsxStreamWriter::new("my:table", Some(dir.path())).unwrap();
+        w.begin(cols, &[]).unwrap();
+        for chunk in rows.chunks(page) {
+            w.write_rows(chunk).unwrap();
+        }
+        let truncated = w.finish(&path).unwrap();
+        (std::fs::read(&path).unwrap(), truncated)
+    }
+
+    #[test]
+    fn streamed_xlsx_reads_back_like_in_memory_xlsx() {
+        let cols = tricky_columns();
+        let mut rows = tricky_rows(40);
+        // Over Excel's cell limit: cut and counted the same way.
+        rows[5][1] = Value::String("é".repeat(40_000));
+        rows[9][3] = Value::String("x".repeat(300));
+        let expected = to_xlsx(&cols, &rows, "my:table").unwrap();
+        let (bytes, truncated) = stream_xlsx(&cols, &rows, 7);
+
+        assert_eq!(truncated, expected.truncated_cells);
+        assert_eq!(truncated, 1);
+        assert_eq!(xlsx_cells(&bytes), xlsx_cells(&expected.bytes));
+        // Same column widths as `autofit()` over every row.
+        let widths = xlsx_cols_xml(&bytes);
+        assert!(widths.contains("<col "), "{widths}");
+        assert_eq!(widths, xlsx_cols_xml(&expected.bytes));
+
+        // Constant-memory mode stores text as inline strings instead of a
+        // shared-string table; the import's reader takes both alike.
+        use crate::commands::xlsx_import::parse_sheet_impl;
+        let streamed = parse_sheet_impl(&bytes, "mytable").unwrap();
+        let in_memory = parse_sheet_impl(&expected.bytes, "mytable").unwrap();
+        assert_eq!(streamed.headers, in_memory.headers);
+        assert_eq!(streamed.rows, in_memory.rows);
+        assert_eq!(streamed.rows.len(), 40);
+
+        // Header only.
+        let (bytes, _) = stream_xlsx(&cols, &[], 7);
+        let empty = to_xlsx(&cols, &[], "my:table").unwrap();
+        assert_eq!(xlsx_cells(&bytes), xlsx_cells(&empty.bytes));
+        assert_eq!(xlsx_cols_xml(&bytes), xlsx_cols_xml(&empty.bytes));
     }
 }

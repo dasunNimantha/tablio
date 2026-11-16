@@ -196,7 +196,32 @@ impl DatabaseDriver for TidbDriver {
     ) -> Result<TableData> {
         let columns = self.list_columns(database, database, table).await?;
         my_fetch_rows_impl(
-            &self.pool, columns, database, table, offset, limit, sort, filter,
+            &self.pool, columns, database, table, offset, limit, sort, filter, true,
+        )
+        .await
+    }
+
+    async fn fetch_export_page(
+        &self,
+        database: &str,
+        _schema: &str,
+        table: &str,
+        columns: &[ColumnInfo],
+        offset: u64,
+        limit: u64,
+        sort: Vec<SortSpec>,
+        filter: Option<String>,
+    ) -> Result<TableData> {
+        my_fetch_rows_impl(
+            &self.pool,
+            columns.to_vec(),
+            database,
+            table,
+            offset,
+            limit,
+            sort,
+            filter,
+            false,
         )
         .await
     }
