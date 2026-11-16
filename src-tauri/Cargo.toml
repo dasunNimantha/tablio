@@ -96,3 +96,7 @@ pageant = "0.2"
 [dev-dependencies]
 which = "8"
 proptest = "1"
+
+# sqlx-core with TCP_NODELAY on its sockets; see vendor/sqlx-core/TABLIO_PATCH.md.
+[patch.crates-io]
+sqlx-core = { path = "vendor/sqlx-core" }
