@@ -1,5 +1,6 @@
 use anyhow::Result;
 use sqlx::{Column, PgPool, Row, TypeInfo};
+use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::db::cancel::{
@@ -747,42 +748,107 @@ pub async fn pg_list_indexes(
         .collect())
 }
 
+/// Outgoing foreign keys of the tables of a schema, one row per column
+/// pair, read from `pg_constraint` (the `information_schema` views scan
+/// the whole catalog and pair every column of a composite key with
+/// every referenced column). `$1` is the schema; the filter appended
+/// via `$filter` may narrow it to one table (`$2`).
+///
+/// A foreign key that references a partitioned table also has a clone
+/// per referenced partition (same referencing table, `conparentid`
+/// set); those are internal and skipped. A partition's own copy of its
+/// parent's foreign key is a different referencing table and is kept.
+macro_rules! pg_foreign_keys_sql {
+    ($filter:literal) => {
+        concat!(
+            r#"
+            SELECT
+                rel.relname::text                                     AS table_name,
+                con.conname::text                                     AS constraint_name,
+                att.attname::text                                     AS column_name,
+                frel.relname::text                                    AS foreign_table,
+                fatt.attname::text                                    AS foreign_column,
+                CASE con.confdeltype
+                     WHEN 'a' THEN 'NO ACTION'
+                     WHEN 'r' THEN 'RESTRICT'
+                     WHEN 'c' THEN 'CASCADE'
+                     WHEN 'n' THEN 'SET NULL'
+                     WHEN 'd' THEN 'SET DEFAULT'
+                     ELSE con.confdeltype::text
+                END                                                   AS delete_rule,
+                CASE con.confupdtype
+                     WHEN 'a' THEN 'NO ACTION'
+                     WHEN 'r' THEN 'RESTRICT'
+                     WHEN 'c' THEN 'CASCADE'
+                     WHEN 'n' THEN 'SET NULL'
+                     WHEN 'd' THEN 'SET DEFAULT'
+                     ELSE con.confupdtype::text
+                END                                                   AS update_rule
+            FROM pg_constraint con
+            JOIN pg_class      rel  ON rel.oid  = con.conrelid
+            JOIN pg_namespace  n    ON n.oid    = rel.relnamespace
+            JOIN pg_class      frel ON frel.oid = con.confrelid
+            JOIN unnest(con.conkey)  WITH ORDINALITY AS ck(attnum, ord) ON true
+            JOIN unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord) ON ck.ord = fk.ord
+            JOIN pg_attribute  att  ON att.attrelid  = con.conrelid  AND att.attnum  = ck.attnum
+            JOIN pg_attribute  fatt ON fatt.attrelid = con.confrelid AND fatt.attnum = fk.attnum
+            WHERE con.contype = 'f'
+              AND NOT EXISTS (
+                  SELECT 1 FROM pg_constraint pc
+                  WHERE pc.oid = con.conparentid AND pc.conrelid = con.conrelid
+              )
+              AND n.nspname = $1::name
+            "#,
+            $filter,
+            r#"
+            ORDER BY rel.relname, con.conname, ck.ord
+            "#
+        )
+    };
+}
+
+fn pg_foreign_key_from_row(r: &sqlx::postgres::PgRow) -> ForeignKeyInfo {
+    ForeignKeyInfo {
+        name: r.get("constraint_name"),
+        column: r.get("column_name"),
+        referenced_table: r.get("foreign_table"),
+        referenced_column: r.get("foreign_column"),
+        on_delete: r.get("delete_rule"),
+        on_update: r.get("update_rule"),
+    }
+}
+
 pub async fn pg_list_foreign_keys(
     pool: &PgPool,
     _database: &str,
     schema: &str,
     table: &str,
 ) -> Result<Vec<ForeignKeyInfo>> {
-    let sql = "SELECT tc.constraint_name, kcu.column_name, \
-               ccu.table_name AS foreign_table, ccu.column_name AS foreign_column, \
-               rc.delete_rule, rc.update_rule \
-               FROM information_schema.table_constraints tc \
-               JOIN information_schema.key_column_usage kcu \
-                   ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema \
-               JOIN information_schema.constraint_column_usage ccu \
-                   ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema \
-               JOIN information_schema.referential_constraints rc \
-                   ON rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.table_schema \
-               WHERE tc.constraint_type = 'FOREIGN KEY' \
-                   AND tc.table_schema = $1 AND tc.table_name = $2 \
-               ORDER BY tc.constraint_name, kcu.ordinal_position";
-    let rows = sqlx::query(sql)
+    let rows = sqlx::query(pg_foreign_keys_sql!("AND rel.relname = $2::name"))
         .bind(schema)
         .bind(table)
         .fetch_all(pool)
         .await?;
+    Ok(rows.iter().map(pg_foreign_key_from_row).collect())
+}
 
-    Ok(rows
-        .iter()
-        .map(|r| ForeignKeyInfo {
-            name: r.get("constraint_name"),
-            column: r.get("column_name"),
-            referenced_table: r.get("foreign_table"),
-            referenced_column: r.get("foreign_column"),
-            on_delete: r.get("delete_rule"),
-            on_update: r.get("update_rule"),
-        })
-        .collect())
+/// [`pg_list_foreign_keys`] for every table of `schema` in one query,
+/// keyed by table name.
+pub async fn pg_list_schema_foreign_keys(
+    pool: &PgPool,
+    schema: &str,
+) -> Result<HashMap<String, Vec<ForeignKeyInfo>>> {
+    let rows = sqlx::query(pg_foreign_keys_sql!(""))
+        .bind(schema)
+        .fetch_all(pool)
+        .await?;
+    let mut out: HashMap<String, Vec<ForeignKeyInfo>> = HashMap::new();
+    for r in &rows {
+        out.entry(r.get("table_name"))
+            .or_default()
+            .push(pg_foreign_key_from_row(r));
+    }
+    Ok(out)
 }
 
 /// Returns the FKs that point INTO `(schema, table)` from elsewhere in the

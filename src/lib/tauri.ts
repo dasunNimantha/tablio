@@ -134,6 +134,14 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       const table = (args?.table as string) || "";
       return mock.getTableForeignKeys(table) as T;
     }
+    case "get_schema_graph":
+      return mock.mockTables
+        .filter((t) => t.table_type === "BASE TABLE" || t.table_type === "TABLE")
+        .map((t) => ({
+          table: t,
+          columns: mock.getTableColumns(t.name),
+          foreign_keys: mock.getTableForeignKeys(t.name),
+        })) as T;
     case "drop_object":
       return undefined as T;
     case "truncate_table":
@@ -479,6 +487,17 @@ export interface ForeignKeyInfo {
   referenced_column: string;
   on_delete: string;
   on_update: string;
+}
+
+/**
+ * One base table of a schema with its columns and outgoing foreign keys
+ * (the ERD). `columns` / `foreign_keys` equal what `listColumns` /
+ * `listForeignKeys` return for the table.
+ */
+export interface TableGraph {
+  table: TableInfo;
+  columns: ColumnInfo[];
+  foreign_keys: ForeignKeyInfo[];
 }
 
 export interface ReferencingTableInfo {
@@ -945,6 +964,17 @@ export const api = {
     table: string
   ): Promise<ForeignKeyInfo[]> =>
     invoke("list_foreign_keys", { connectionId, database, schema, table }),
+
+  /**
+   * Every base table of a schema with its columns and foreign keys, in
+   * one call (instead of two calls per table).
+   */
+  getSchemaGraph: (
+    connectionId: string,
+    database: string,
+    schema: string
+  ): Promise<TableGraph[]> =>
+    invoke("get_schema_graph", { connectionId, database, schema }),
 
   listReferencedBy: (
     connectionId: string,
