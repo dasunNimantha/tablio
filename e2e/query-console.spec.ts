@@ -285,6 +285,17 @@ test.describe("Query console — suggest toggle", () => {
     await suggestBtn.click();
     await expect(suggestBtn).toHaveClass(/active-filter/);
   });
+
+  test("typing a space opens the suggestions", async ({ page }) => {
+    await page.goto("/");
+    await openQueryConsole(page);
+    const editor = page.locator(".query-console:visible .query-editor-wrapper .monaco-editor");
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.press("Delete");
+    await page.keyboard.type("SELECT * FROM ");
+    await expect(page.locator(".query-console:visible .suggest-widget.visible")).toBeVisible({ timeout: 5000 });
+  });
 });
 
 test.describe("Query console — result table", () => {

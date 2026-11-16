@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useEffect, useCallback } from "react";
+import { memo, useMemo, useRef, useState, useEffect, useCallback } from "react";
 import { api, QueryResult, ColumnInfo, DataChanges, CellChange, NewRow, DeleteRow, ForeignKeyInfo } from "../../lib/tauri";
 import { AllCommunityModule, themeQuartz, type ColDef, type GridApi, type GridReadyEvent, type CellContextMenuEvent, type CellClickedEvent, type IHeaderParams } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
@@ -174,7 +174,13 @@ function generateTestValue(colName: string): unknown {
   return "test_" + Math.floor(Math.random() * 10000);
 }
 
-export function ResultTable({ result, resultMode, onToggleChart, onExport, connectionId, database, sourceTable, onReExecute, tabId, isActive = true }: Props) {
+// Hoisted so the grid sees the same references on every render.
+const GRID_MODULES = [AllCommunityModule];
+const getResultRowId = (params: { data: { __rowIdx: unknown } }) => String(params.data.__rowIdx);
+
+// Memoised: the console re-renders on every keystroke, and the result grid
+// only needs to when its own props change.
+export const ResultTable = memo(function ResultTable({ result, resultMode, onToggleChart, onExport, connectionId, database, sourceTable, onReExecute, tabId, isActive = true }: Props) {
   const addToast = useToastStore((s) => s.addToast);
   const openTab = useTabStore((s) => s.openTab);
   const connections = useConnectionStore((s) => s.connections);
@@ -1036,11 +1042,11 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
       <div className="ag-grid-wrapper">
         <AgGridReact
           theme={gridTheme}
-          modules={[AllCommunityModule]}
+          modules={GRID_MODULES}
           rowData={rowData}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}
-          getRowId={(params) => String(params.data.__rowIdx)}
+          getRowId={getResultRowId}
           getRowClass={getRowClass as any}
           onGridReady={onGridReady}
           onCellClicked={onCellClicked}
@@ -1160,4 +1166,4 @@ export function ResultTable({ result, resultMode, onToggleChart, onExport, conne
       </div>
     </div>
   );
-}
+});
