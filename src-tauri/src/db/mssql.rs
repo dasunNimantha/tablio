@@ -686,24 +686,20 @@ async fn client_result_sets(c: &mut MssqlClient, sql: &str) -> Result<Vec<Result
     let mut sets: Vec<ResultSet> = Vec::new();
     while let Some(item) = stream.try_next().await.map_err(tds_err)? {
         match item {
-            QueryItem::Metadata(meta) => sets.push(ResultSet {
-                columns: meta
-                    .columns()
+            QueryItem::Metadata(meta) => sets.push(ResultSet::new(
+                meta.columns()
                     .iter()
                     .map(|c| c.name().to_string())
                     .collect(),
-                rows: Vec::new(),
-            }),
+            )),
             QueryItem::Row(row) => {
                 if sets.is_empty() {
-                    sets.push(ResultSet {
-                        columns: row.columns().iter().map(|c| c.name().to_string()).collect(),
-                        rows: Vec::new(),
-                    });
+                    sets.push(ResultSet::new(
+                        row.columns().iter().map(|c| c.name().to_string()).collect(),
+                    ));
                 }
                 let set = sets.last_mut().expect("set exists");
-                set.rows
-                    .push(row.cells().map(|(_, d)| column_data_to_json(d)).collect());
+                set.push_row(|| row.cells().map(|(_, d)| column_data_to_json(d)).collect());
             }
         }
     }

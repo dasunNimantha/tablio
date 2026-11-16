@@ -1243,15 +1243,14 @@ async fn pg_run_statements(
                 }
                 sqlx::Either::Right(row) => {
                     if !in_set {
-                        sets.push(ResultSet {
-                            columns: row.columns().iter().map(|c| c.name().to_string()).collect(),
-                            rows: Vec::new(),
-                        });
+                        sets.push(ResultSet::new(
+                            row.columns().iter().map(|c| c.name().to_string()).collect(),
+                        ));
                         in_set = true;
                     }
                     let set = sets.last_mut().expect("set was just opened");
-                    let values = pg_row_to_json_values(&row, set.columns.len());
-                    set.rows.push(values);
+                    let n = set.columns.len();
+                    set.push_row(|| pg_row_to_json_values(&row, n));
                 }
             }
         }

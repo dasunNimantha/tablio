@@ -2681,3 +2681,22 @@ async fn sqlite_console_shows_returning_rows_and_empty_headers() {
     run.await;
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn sqlite_console_result_is_capped_with_a_notice() {
+    use tablio_lib::db::console::MAX_CONSOLE_ROWS;
+    let (driver, path) = create_driver().await;
+    let r = driver
+        .execute_query(DB, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 60000) SELECT x FROM c")
+        .await
+        .unwrap();
+    assert_eq!(r.rows.len(), MAX_CONSOLE_ROWS);
+    assert!(
+        r.notices
+            .iter()
+            .any(|n| n.starts_with("Showing the first 50,000 of 60,000 rows.")),
+        "missing truncation notice: {:?}",
+        r.notices
+    );
+    let _ = std::fs::remove_file(&path);
+}

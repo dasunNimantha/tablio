@@ -1420,14 +1420,23 @@ impl DatabaseDriver for CassandraDriver {
             });
         }
         let result = result.into_rows_result().map_err(|e| anyhow!("{}", e))?;
-        let (columns, rows) = rows_from_result(&result);
+        let (columns, mut rows) = rows_from_result(&result);
+        let total = rows.len();
+        let mut notices = Vec::new();
+        if total > crate::db::console::MAX_CONSOLE_ROWS {
+            rows.truncate(crate::db::console::MAX_CONSOLE_ROWS);
+            notices.push(crate::db::console::truncated_notice(
+                rows.len(),
+                total as u64,
+            ));
+        }
         Ok(QueryResult {
             columns,
-            rows_affected: rows.len() as u64,
+            rows_affected: total as u64,
             rows,
             execution_time_ms: elapsed,
             is_select: true,
-            notices: Vec::new(),
+            notices,
         })
     }
 
