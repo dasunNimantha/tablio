@@ -4320,3 +4320,122 @@ async fn pg_sorting_json_and_geometric_columns() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Pools for other databases on the server
+// ---------------------------------------------------------------------------
+
+/// Server sessions of this test's databases, as (database, count).
+async fn sessions_on(driver: &PostgresDriver, prefix: &str) -> Vec<(String, i64)> {
+    let r = driver
+        .execute_query(
+            DB,
+            &format!(
+                "SELECT datname::text, count(*)::int8 FROM pg_stat_activity \
+                 WHERE datname LIKE '{prefix}%' GROUP BY datname ORDER BY datname"
+            ),
+        )
+        .await
+        .unwrap();
+    r.rows
+        .iter()
+        .map(|row| {
+            let n = row[1]
+                .as_i64()
+                .or_else(|| row[1].as_str().and_then(|s| s.parse().ok()))
+                .unwrap();
+            (row[0].as_str().unwrap().to_string(), n)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn pg_pools_for_other_databases_are_small_and_capped() {
+    use tablio_lib::db::db_pools::{EXTRA_DB_MAX_CONNECTIONS, MAX_EXTRA_DB_POOLS};
+    let driver = pg_driver!();
+    let prefix = unique_table("pooldb");
+    let names: Vec<String> = (0..8).map(|i| format!("{prefix}_{i}")).collect();
+    for n in &names {
+        driver
+            .execute_query(DB, &format!("CREATE DATABASE \"{n}\""))
+            .await
+            .unwrap();
+    }
+    // Browse each database the way the sidebar does: schemas, then tables,
+    // functions and schemas again in parallel.
+    for n in &names {
+        driver.list_schemas(n).await.unwrap();
+        let (t, f, s) = tokio::join!(
+            driver.list_tables(n, "public"),
+            driver.list_functions(n, "public"),
+            driver.list_schemas(n),
+        );
+        t.unwrap();
+        f.unwrap();
+        s.unwrap();
+    }
+    // Evicted pools close in the background; give them a moment.
+    let mut sessions = Vec::new();
+    for _ in 0..50 {
+        sessions = sessions_on(&driver, &prefix).await;
+        if sessions.len() <= MAX_EXTRA_DB_POOLS {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let total: i64 = sessions.iter().map(|(_, n)| n).sum();
+    assert!(
+        sessions.len() <= MAX_EXTRA_DB_POOLS,
+        "pools kept for too many databases: {sessions:?}"
+    );
+    assert!(
+        total <= (MAX_EXTRA_DB_POOLS as i64) * (EXTRA_DB_MAX_CONNECTIONS as i64),
+        "too many server sessions: {sessions:?}"
+    );
+    // The least recently used databases are the ones that were closed.
+    assert!(
+        sessions
+            .iter()
+            .all(|(db, _)| names[names.len() - MAX_EXTRA_DB_POOLS..].contains(db)),
+        "an old database kept its pool: {sessions:?}"
+    );
+    for n in &names {
+        driver
+            .execute_query(DB, &format!("DROP DATABASE \"{n}\" WITH (FORCE)"))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pg_initial_database_reuses_the_main_pool() {
+    // A connection without a database connects to `postgres`; browsing
+    // `postgres` must not open a second pool for it.
+    let driver = pg_driver_no_db!();
+    let before = sessions_on_any(&driver, "postgres").await;
+    driver.list_schemas("postgres").await.unwrap();
+    driver.list_tables("postgres", "public").await.unwrap();
+    let after = sessions_on_any(&driver, "postgres").await;
+    assert!(
+        after <= before + 1,
+        "a second pool was opened for postgres: {before} -> {after}"
+    );
+}
+
+async fn sessions_on_any(driver: &PostgresDriver, db: &str) -> i64 {
+    let r = driver
+        .execute_query(
+            db,
+            &format!(
+                "SELECT count(*)::int8 FROM pg_stat_activity WHERE datname = '{db}' \
+                 AND application_name = current_setting('application_name') \
+                 AND usename = current_user"
+            ),
+        )
+        .await
+        .unwrap();
+    r.rows[0][0]
+        .as_i64()
+        .or_else(|| r.rows[0][0].as_str().and_then(|s| s.parse().ok()))
+        .unwrap()
+}

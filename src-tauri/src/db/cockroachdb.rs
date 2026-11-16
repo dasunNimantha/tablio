@@ -2,11 +2,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 
 use crate::db::cancel::CancellationToken;
+use crate::db::db_pools::DbPools;
 use crate::db::pg_common::*;
 use crate::db::DatabaseDriver;
 use crate::models::*;
@@ -14,7 +13,7 @@ use crate::models::*;
 pub struct CockroachdbDriver {
     pool: PgPool,
     config: ConnectionConfig,
-    db_pools: RwLock<HashMap<String, PgPool>>,
+    db_pools: DbPools,
 }
 
 impl CockroachdbDriver {
@@ -66,32 +65,27 @@ impl CockroachdbDriver {
         Ok(Self {
             pool,
             config: config.clone(),
-            db_pools: RwLock::new(HashMap::new()),
+            db_pools: DbPools::new(),
         })
     }
 
+    /// The database the main pool is connected to (`defaultdb` when the
+    /// connection doesn't name one).
+    fn initial_database(&self) -> &str {
+        if self.config.database.trim().is_empty() {
+            "defaultdb"
+        } else {
+            &self.config.database
+        }
+    }
+
     async fn get_pool(&self, database: &str) -> Result<PgPool> {
-        if database.is_empty() || database == self.config.database {
+        if database.is_empty() || database == self.initial_database() {
             return Ok(self.pool.clone());
         }
-        {
-            let pools = self.db_pools.read().await;
-            if let Some(pool) = pools.get(database) {
-                return Ok(pool.clone());
-            }
-        }
-        let url = Self::build_url(&self.config, database);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .min_connections(0)
-            .idle_timeout(Duration::from_secs(1800))
-            .connect(&url)
-            .await?;
         self.db_pools
-            .write()
+            .get_or_connect(database, || Self::build_url(&self.config, database))
             .await
-            .insert(database.to_string(), pool.clone());
-        Ok(pool)
     }
 }
 
