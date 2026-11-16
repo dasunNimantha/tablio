@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::db::cancel::CancellationToken;
@@ -9,6 +10,134 @@ use crate::db::db_pools::DbPools;
 use crate::db::pg_common::*;
 use crate::db::DatabaseDriver;
 use crate::models::*;
+
+/// Columns of the relations of a schema, read from `pg_attribute` with
+/// the same expressions `information_schema.columns` uses (its
+/// `data_type`, length / precision helpers, default, identity and
+/// generated flags, and the same visibility rule), so results match
+/// it. The view itself can't use the catalog indexes for a
+/// schema/table filter and scans the whole catalog on every call.
+/// `$1` is the schema; `$filter` may narrow it to one table (`$2`).
+macro_rules! pg_columns_sql {
+    ($filter:literal, $order:literal) => {
+        concat!(
+            r#"
+            SELECT
+                c.relname::text                                       AS table_name,
+                a.attname::text                                       AS column_name,
+                (CASE
+                    WHEN t.typtype = 'd' THEN
+                        CASE
+                            WHEN bt.typelem <> 0 AND bt.typlen = -1 THEN 'ARRAY'
+                            WHEN nbt.nspname = 'pg_catalog' THEN format_type(t.typbasetype, NULL)
+                            ELSE 'USER-DEFINED'
+                        END
+                    ELSE
+                        CASE
+                            WHEN t.typelem <> 0 AND t.typlen = -1 THEN 'ARRAY'
+                            WHEN nt.nspname = 'pg_catalog' THEN format_type(a.atttypid, NULL)
+                            ELSE 'USER-DEFINED'
+                        END
+                END)::text                                            AS data_type,
+                CASE WHEN a.attnotnull OR (t.typtype = 'd' AND t.typnotnull)
+                     THEN 'NO' ELSE 'YES' END                         AS is_nullable,
+                CASE WHEN a.attgenerated = ''
+                     THEN pg_get_expr(ad.adbin, ad.adrelid) END       AS column_default,
+                a.attnum::int4                                        AS ordinal_position,
+                CASE WHEN a.attidentity IN ('a', 'd')
+                     THEN 'YES' ELSE 'NO' END                         AS is_identity,
+                CASE WHEN a.attgenerated <> ''
+                     THEN 'ALWAYS' ELSE 'NEVER' END                   AS is_generated,
+                information_schema._pg_char_max_length(
+                    information_schema._pg_truetypid(a.*, t.*),
+                    information_schema._pg_truetypmod(a.*, t.*))::int4 AS character_maximum_length,
+                information_schema._pg_numeric_precision(
+                    information_schema._pg_truetypid(a.*, t.*),
+                    information_schema._pg_truetypmod(a.*, t.*))::int4 AS numeric_precision,
+                information_schema._pg_numeric_scale(
+                    information_schema._pg_truetypid(a.*, t.*),
+                    information_schema._pg_truetypmod(a.*, t.*))::int4 AS numeric_scale,
+                EXISTS (
+                    SELECT 1 FROM pg_constraint pk
+                    WHERE pk.conrelid = c.oid AND pk.contype = 'p'
+                      AND a.attnum = ANY (pk.conkey)
+                )                                                     AS is_pk
+            FROM pg_attribute a
+            JOIN pg_class c      ON c.oid = a.attrelid
+            JOIN pg_namespace nc ON nc.oid = c.relnamespace
+            JOIN pg_type t       ON t.oid = a.atttypid
+            JOIN pg_namespace nt ON nt.oid = t.typnamespace
+            LEFT JOIN (pg_type bt JOIN pg_namespace nbt ON nbt.oid = bt.typnamespace)
+                   ON t.typtype = 'd' AND t.typbasetype = bt.oid
+            LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+            WHERE a.attnum > 0
+              AND NOT a.attisdropped
+              AND c.relkind IN ('r', 'v', 'f', 'p')
+              AND NOT pg_is_other_temp_schema(nc.oid)
+              AND (pg_has_role(c.relowner, 'USAGE')
+                   OR has_column_privilege(c.oid, a.attnum, 'SELECT, INSERT, UPDATE, REFERENCES'))
+              AND nc.nspname = $1::name
+            "#,
+            $filter,
+            "\n",
+            $order
+        )
+    };
+}
+
+fn pg_column_from_row(r: &sqlx::postgres::PgRow) -> ColumnInfo {
+    let nullable_str: String = r.get("is_nullable");
+    let default_val: Option<String> = r.try_get("column_default").ok().flatten();
+    let is_identity: String = r.get("is_identity");
+    let is_generated: String = r.get("is_generated");
+    let has_serial_default = default_val
+        .as_deref()
+        .map(|d| d.starts_with("nextval("))
+        .unwrap_or(false);
+    let raw_type: String = r.get("data_type");
+    let char_max_len: Option<i32> = r.try_get("character_maximum_length").ok().flatten();
+    let num_precision: Option<i32> = r.try_get("numeric_precision").ok().flatten();
+    let num_scale: Option<i32> = r.try_get("numeric_scale").ok().flatten();
+    let data_type = if let Some(len) = char_max_len {
+        format!("{}({})", raw_type, len)
+    } else if raw_type == "numeric" || raw_type == "decimal" {
+        match (num_precision, num_scale) {
+            (Some(p), Some(s)) if s > 0 => format!("{}({},{})", raw_type, p, s),
+            (Some(p), _) => format!("{}({})", raw_type, p),
+            _ => raw_type,
+        }
+    } else {
+        raw_type
+    };
+    ColumnInfo {
+        name: r.get("column_name"),
+        data_type,
+        is_nullable: nullable_str == "YES",
+        is_primary_key: r.get("is_pk"),
+        default_value: default_val,
+        ordinal_position: r.get::<i32, _>("ordinal_position"),
+        is_auto_generated: is_identity == "YES" || is_generated == "ALWAYS" || has_serial_default,
+    }
+}
+
+/// `list_columns` for every relation of `schema` in one query, keyed by
+/// table name.
+async fn pg_list_schema_columns(
+    pool: &PgPool,
+    schema: &str,
+) -> Result<HashMap<String, Vec<ColumnInfo>>> {
+    let rows = sqlx::query(pg_columns_sql!("", "ORDER BY c.relname, a.attnum"))
+        .bind(schema)
+        .fetch_all(pool)
+        .await?;
+    let mut out: HashMap<String, Vec<ColumnInfo>> = HashMap::new();
+    for r in &rows {
+        out.entry(r.get("table_name"))
+            .or_default()
+            .push(pg_column_from_row(r));
+    }
+    Ok(out)
+}
 
 pub struct PostgresDriver {
     pool: PgPool,
@@ -249,69 +378,29 @@ impl DatabaseDriver for PostgresDriver {
         table: &str,
     ) -> Result<Vec<ColumnInfo>> {
         let pool = self.get_pool(database).await?;
-        let rows = sqlx::query(
-            "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, c.ordinal_position, \
-                    c.is_identity, c.identity_generation, c.is_generated, \
-                    c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
-                    CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_pk \
-             FROM information_schema.columns c \
-             LEFT JOIN ( \
-                 SELECT ku.column_name \
-                 FROM information_schema.table_constraints tc \
-                 JOIN information_schema.key_column_usage ku \
-                     ON tc.constraint_name = ku.constraint_name \
-                     AND tc.table_schema = ku.table_schema \
-                 WHERE tc.constraint_type = 'PRIMARY KEY' \
-                   AND tc.table_schema = $1 AND tc.table_name = $2 \
-             ) pk ON pk.column_name = c.column_name \
-             WHERE c.table_schema = $1 AND c.table_name = $2 \
-             ORDER BY c.ordinal_position",
-        )
+        let rows = sqlx::query(pg_columns_sql!(
+            "AND c.relname = $2::name",
+            "ORDER BY a.attnum"
+        ))
         .bind(schema)
         .bind(table)
         .fetch_all(&pool)
         .await?;
+        Ok(rows.iter().map(pg_column_from_row).collect())
+    }
 
-        Ok(rows
-            .iter()
-            .map(|r| {
-                let nullable_str: String = r.get("is_nullable");
-                let default_val: Option<String> = r.try_get("column_default").ok();
-                let is_identity: String = r.get("is_identity");
-                let is_generated: String = r.get("is_generated");
-                let has_serial_default = default_val
-                    .as_deref()
-                    .map(|d| d.starts_with("nextval("))
-                    .unwrap_or(false);
-                let raw_type: String = r.get("data_type");
-                let char_max_len: Option<i32> =
-                    r.try_get("character_maximum_length").ok().flatten();
-                let num_precision: Option<i32> = r.try_get("numeric_precision").ok().flatten();
-                let num_scale: Option<i32> = r.try_get("numeric_scale").ok().flatten();
-                let data_type = if let Some(len) = char_max_len {
-                    format!("{}({})", raw_type, len)
-                } else if raw_type == "numeric" || raw_type == "decimal" {
-                    match (num_precision, num_scale) {
-                        (Some(p), Some(s)) if s > 0 => format!("{}({},{})", raw_type, p, s),
-                        (Some(p), _) => format!("{}({})", raw_type, p),
-                        _ => raw_type,
-                    }
-                } else {
-                    raw_type
-                };
-                ColumnInfo {
-                    name: r.get("column_name"),
-                    data_type,
-                    is_nullable: nullable_str == "YES",
-                    is_primary_key: r.get("is_pk"),
-                    default_value: default_val,
-                    ordinal_position: r.get::<i32, _>("ordinal_position"),
-                    is_auto_generated: is_identity == "YES"
-                        || is_generated == "ALWAYS"
-                        || has_serial_default,
-                }
-            })
-            .collect())
+    async fn get_schema_graph(&self, database: &str, schema: &str) -> Result<Vec<TableGraph>> {
+        let pool = self.get_pool(database).await?;
+        let (tables, columns, foreign_keys) = tokio::try_join!(
+            pg_list_tables(&pool, database, schema),
+            pg_list_schema_columns(&pool, schema),
+            pg_list_schema_foreign_keys(&pool, schema),
+        )?;
+        Ok(crate::db::assemble_schema_graph(
+            tables,
+            columns,
+            foreign_keys,
+        ))
     }
 
     async fn fetch_rows(
