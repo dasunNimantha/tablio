@@ -14,6 +14,7 @@ function makeWorkbookPreview(sheetCount: number): XlsxWorkbookPreview {
   return {
     sheet_names: sheetNames,
     default_sheet: sheetNames[0],
+    token: "wb-token",
     sheet: {
       name: sheetNames[0],
       headers: ["id", "name", "active"],
@@ -214,7 +215,7 @@ describe("ImportDialog", () => {
 
     fireEvent.change(select, { target: { value: "Sheet2" } });
     await waitFor(() => {
-      expect(sheetSpy).toHaveBeenCalledWith(expect.any(Uint8Array), "Sheet2");
+      expect(sheetSpy).toHaveBeenCalledWith("wb-token", "Sheet2");
     });
   });
 
