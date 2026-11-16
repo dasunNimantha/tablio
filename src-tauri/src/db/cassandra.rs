@@ -1423,12 +1423,14 @@ impl DatabaseDriver for CassandraDriver {
         let (columns, mut rows) = rows_from_result(&result);
         let total = rows.len();
         let mut notices = Vec::new();
+        let mut total_rows = None;
         if total > crate::db::console::MAX_CONSOLE_ROWS {
             rows.truncate(crate::db::console::MAX_CONSOLE_ROWS);
             notices.push(crate::db::console::truncated_notice(
                 rows.len(),
                 total as u64,
             ));
+            total_rows = Some(total as u64);
         }
         Ok(QueryResult {
             columns,
@@ -1437,7 +1439,43 @@ impl DatabaseDriver for CassandraDriver {
             execution_time_ms: elapsed,
             is_select: true,
             notices,
+            total_rows,
         })
+    }
+
+    /// A `SELECT`, read page by page.
+    async fn stream_query(
+        &self,
+        _database: &str,
+        sql: &str,
+        sink: &mut crate::db::stream::RowSink,
+    ) -> Result<()> {
+        let stmt = crate::db::stream::single_query(
+            sql,
+            crate::util::sql::SqlDialect::Generic,
+            &["SELECT"],
+        )?;
+        let mut statement = scylla::statement::Statement::new(stmt);
+        statement.set_page_size(5000);
+        let mut paging_state = PagingState::start();
+        loop {
+            let (page, paging_response) = self
+                .session
+                .query_single_page(statement.clone(), &[], paging_state)
+                .await
+                .map_err(|e| anyhow!("{}", e))?;
+            let page = page.into_rows_result().map_err(|e| anyhow!("{}", e))?;
+            // Same decoding as the console.
+            let (names, rows) = rows_from_result(&page);
+            if !sink.has_columns() {
+                sink.columns(names, Vec::new()).await?;
+            }
+            sink.extend(rows).await?;
+            match paging_response {
+                PagingStateResponse::HasMorePages { state } => paging_state = state,
+                PagingStateResponse::NoMorePages => return Ok(()),
+            }
+        }
     }
 
     async fn explain_query(&self, _database: &str, sql: &str) -> Result<ExplainResult> {

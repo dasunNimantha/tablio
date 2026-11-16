@@ -3620,6 +3620,7 @@ async fn mssql_console_result_is_capped_with_a_notice() {
         "missing truncation notice: {:?}",
         r.notices
     );
+    assert_eq!(r.total_rows, Some(60_000));
 }
 
 #[tokio::test]
@@ -3647,6 +3648,30 @@ async fn mssql_streamed_exports_match_in_memory_exports() {
         SCHEMA,
         &tbl,
         45,
+    )
+    .await;
+    export_common::assert_full_query_export(
+        driver.clone(),
+        &db,
+        "SELECT TOP 60000 1 AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b",
+        &format!("SELECT id, txt, b, n, f, id AS txt FROM {q} ORDER BY id"),
+    )
+    .await;
+    let count = format!("SELECT COUNT(*) FROM {q}");
+    export_common::assert_full_export_cannot_write(
+        driver.clone(),
+        &db,
+        &format!("WITH x AS (SELECT 1 AS id) DELETE FROM {q} WHERE id IN (SELECT id FROM x)"),
+        &count,
+        false,
+    )
+    .await;
+    export_common::assert_full_export_cannot_write(
+        driver.clone(),
+        &db,
+        &format!("DELETE FROM {q}"),
+        &count,
+        true,
     )
     .await;
     driver

@@ -1,6 +1,7 @@
 //! Export commands.
 //!
-//! Table exports stream: rows are fetched page by page and handed through a
+//! Table exports and full query exports stream: rows are fetched page
+//! by page (or read off the wire for a query) and handed through a
 //! bounded channel ([`RowSink`]) to a writer on a blocking thread, which
 //! writes each batch to the file as it arrives. Memory stays around one
 //! page however large the table is, and no tokio worker is blocked by
@@ -11,6 +12,7 @@ use crate::db::stream::{Chunk, RowSink, SinkClosed};
 use crate::db::DatabaseDriver;
 use crate::export::{self, RowWriter, SqlColumnKind, SqlExportDialect, TextExport, TextFormat};
 use crate::models::*;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -411,6 +413,34 @@ pub async fn export_table_to_string(
     join_export(produced, writer).await.map(|(_, s)| s)
 }
 
+/// Run `sql` again and export every row it returns to `dest`. Returns
+/// the number of rows written and the xlsx truncation warning, if any.
+pub async fn export_query_to_path(
+    driver: &Arc<dyn DatabaseDriver>,
+    database: &str,
+    sql: &str,
+    format: &str,
+    table_name: &str,
+    dest: PathBuf,
+) -> Result<(u64, Option<String>), String> {
+    // Query results don't know their target engine or column types.
+    let format = FileFormat::parse(
+        format,
+        (SqlExportDialect::Standard, None, table_name.to_string()),
+    )?;
+    let (mut sink, rx) = RowSink::channel();
+    let writer = spawn_file_writer(format, dest, rx);
+    let produced = match driver.stream_query(database, sql, &mut sink).await {
+        Ok(()) => sink.finish().await,
+        // Dropping the sink closes the channel, which stops the writer.
+        Err(e) => {
+            drop(sink);
+            Err(e)
+        }
+    };
+    join_export(produced, writer).await
+}
+
 #[tauri::command]
 pub async fn export_table_data(
     pool: State<'_, Arc<PoolManager>>,
@@ -512,4 +542,51 @@ pub async fn export_query_result_to_file(
     .await
     .map_err(|e| format!("The export failed: {e}"))?
     .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryExportRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub sql: String,
+    pub format: String,
+    pub table_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryExportSummary {
+    /// Rows written to the file.
+    pub rows: u64,
+    /// Shown to the user when the export had to alter data (XLSX cells
+    /// cut to Excel's length limit).
+    pub warning: Option<String>,
+}
+
+/// Run a console query again and write every row it returns to
+/// `file_path`, for results the console showed only partly. Only a
+/// single statement is accepted (see `DatabaseDriver::stream_query`).
+#[tauri::command]
+pub async fn export_query_to_file(
+    pool: State<'_, Arc<PoolManager>>,
+    request: QueryExportRequest,
+    file_path: String,
+) -> Result<QueryExportSummary, String> {
+    let dest = PathBuf::from(crate::util::path::expand_tilde(&file_path));
+    let driver = pool
+        .get_driver(&request.connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let table_name = request
+        .table_name
+        .unwrap_or_else(|| "query_result".to_string());
+    let (rows, warning) = export_query_to_path(
+        &driver,
+        &request.database,
+        &request.sql,
+        &request.format,
+        &table_name,
+        dest,
+    )
+    .await?;
+    Ok(QueryExportSummary { rows, warning })
 }

@@ -7,6 +7,7 @@
 //! the writer waits instead of buffering the whole result.
 
 use crate::export::SqlColumnKind;
+use crate::util::sql::{split_sql_statements_for, statement_is_select_like, SqlDialect};
 use anyhow::{bail, Result};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -125,10 +126,59 @@ impl RowSink {
     }
 }
 
+pub const MULTIPLE_STATEMENTS_MESSAGE: &str = "Only a single statement can be exported in \
+     full: the export runs the query again, and running the other statements again could \
+     repeat their changes. Run the query on its own, then export.";
+
+/// The one statement in `sql`, or an error when it holds none or several.
+pub fn single_statement(sql: &str, dialect: SqlDialect) -> Result<String> {
+    let mut statements = split_sql_statements_for(sql, dialect);
+    match statements.len() {
+        0 => bail!("Query is empty"),
+        1 => Ok(statements.pop().expect("one statement")),
+        _ => bail!(MULTIPLE_STATEMENTS_MESSAGE),
+    }
+}
+
+pub const NOT_A_QUERY_MESSAGE: &str = "Only a query (SELECT, WITH, ...) can be exported in \
+     full: the export runs the statement again, and running anything else again could repeat \
+     its changes.";
+
+/// The one statement in `sql` when it is a query by its leading keyword
+/// (one of `query_keywords`), or an error.
+pub fn single_query(sql: &str, dialect: SqlDialect, query_keywords: &[&str]) -> Result<String> {
+    let stmt = single_statement(sql, dialect)?;
+    if !statement_is_select_like(&stmt, query_keywords) {
+        bail!(NOT_A_QUERY_MESSAGE);
+    }
+    Ok(stmt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn single_statement_rejects_scripts() {
+        assert_eq!(
+            single_statement("SELECT 1;", SqlDialect::Postgres).unwrap(),
+            "SELECT 1"
+        );
+        assert_eq!(
+            single_statement("-- c\nSELECT ';' AS x", SqlDialect::Postgres).unwrap(),
+            "-- c\nSELECT ';' AS x"
+        );
+        let err = single_statement("SET x = 1; SELECT 1", SqlDialect::Postgres).unwrap_err();
+        assert_eq!(err.to_string(), MULTIPLE_STATEMENTS_MESSAGE);
+        assert!(single_statement("  ", SqlDialect::Generic).is_err());
+        let err = single_query("DELETE FROM t", SqlDialect::Generic, &["SELECT"]).unwrap_err();
+        assert_eq!(err.to_string(), NOT_A_QUERY_MESSAGE);
+        assert_eq!(
+            single_query("/* x */ select 1", SqlDialect::Generic, &["SELECT"]).unwrap(),
+            "/* x */ select 1"
+        );
+    }
 
     #[tokio::test]
     async fn rows_arrive_in_batches_then_end() {

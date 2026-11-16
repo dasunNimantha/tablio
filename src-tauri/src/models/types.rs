@@ -167,6 +167,11 @@ pub struct QueryResult {
     /// were discarded afterwards. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
+    /// Set when `rows` holds only the first rows of a larger result (see
+    /// `db::console::MAX_CONSOLE_ROWS`): how many rows the query
+    /// returned in all. Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_rows: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

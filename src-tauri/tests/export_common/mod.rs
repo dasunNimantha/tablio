@@ -3,12 +3,14 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use tablio_lib::commands::export::{export_table_to_path, export_table_to_string};
+use tablio_lib::commands::export::{
+    export_query_to_path, export_table_to_path, export_table_to_string,
+};
 use tablio_lib::commands::xlsx_import::parse_sheet_impl;
 use tablio_lib::db::DatabaseDriver;
 use tablio_lib::export::{
-    sanitize_sheet_name, to_csv, to_json, to_sql_inserts_for, to_xlsx, SqlColumnKind,
-    SqlExportDialect,
+    sanitize_sheet_name, to_csv, to_json, to_sql_inserts, to_sql_inserts_for, to_xlsx,
+    SqlColumnKind, SqlExportDialect,
 };
 use tablio_lib::models::*;
 
@@ -176,4 +178,122 @@ pub async fn assert_streamed_table_export_matches(
         "keep me"
     );
     assert_dir_holds(dir.path(), &["out.csv", "out.json", "out.sql", "out.xlsx"]);
+}
+
+/// Full export of a query returning 60,000 rows (more than the
+/// console keeps), plus an exact comparison for a small query against
+/// what the console shows for it.
+pub async fn assert_full_query_export(
+    driver: Arc<dyn DatabaseDriver>,
+    database: &str,
+    sixty_thousand_rows_sql: &str,
+    small_sql: &str,
+) {
+    assert_full_query_export_of(driver, database, sixty_thousand_rows_sql, 60_000, small_sql).await
+}
+
+/// [`assert_full_query_export`] for a big query returning `big_rows`.
+pub async fn assert_full_query_export_of(
+    driver: Arc<dyn DatabaseDriver>,
+    database: &str,
+    sixty_thousand_rows_sql: &str,
+    big_rows: u64,
+    small_sql: &str,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("all.csv");
+    let (rows, _) = export_query_to_path(
+        &driver,
+        database,
+        sixty_thousand_rows_sql,
+        "csv",
+        "q",
+        path.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, big_rows);
+    let csv = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(csv.lines().count() as u64, big_rows + 1);
+
+    let path = dir.path().join("all.xlsx");
+    let (rows, _) = export_query_to_path(
+        &driver,
+        database,
+        sixty_thousand_rows_sql,
+        "xlsx",
+        "q",
+        path.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, big_rows);
+    let sheet = parse_sheet_impl(&std::fs::read(&path).unwrap(), "q").unwrap();
+    assert_eq!(sheet.rows.len() as u64, big_rows);
+
+    let shown = driver.execute_query(database, small_sql).await.unwrap();
+    assert!(shown.total_rows.is_none());
+    for format in ["csv", "json", "sql"] {
+        let path = dir.path().join(format!("small.{format}"));
+        let (rows, _) =
+            export_query_to_path(&driver, database, small_sql, format, "q", path.clone())
+                .await
+                .unwrap();
+        assert_eq!(rows, shown.rows.len() as u64);
+        let expected = match format {
+            "csv" => to_csv(&shown.columns, &shown.rows),
+            "json" => to_json(&shown.columns, &shown.rows),
+            _ => to_sql_inserts(None, "q", &shown.columns, &shown.rows),
+        };
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            expected,
+            "{format} differs from the console's rows"
+        );
+    }
+
+    // Scripts are refused before anything runs.
+    let script = format!("SELECT 1; {small_sql}");
+    let err = export_query_to_path(
+        &driver,
+        database,
+        &script,
+        "csv",
+        "q",
+        dir.path().join("script.csv"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("Only a single statement"), "{err}");
+    assert!(!dir.path().join("script.csv").exists());
+}
+
+/// A statement that would change data changes nothing. With
+/// `must_fail` the export must also fail (refused or rejected by a
+/// read-only transaction) and leave no file; otherwise it may succeed
+/// with its change rolled back.
+pub async fn assert_full_export_cannot_write(
+    driver: Arc<dyn DatabaseDriver>,
+    database: &str,
+    writing_sql: &str,
+    count_sql: &str,
+    must_fail: bool,
+) {
+    let count = |r: QueryResult| -> String {
+        let v = &r.rows[0][0];
+        v.as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| v.to_string())
+    };
+    let before = count(driver.execute_query(database, count_sql).await.unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("w.csv");
+    let result =
+        export_query_to_path(&driver, database, writing_sql, "csv", "q", path.clone()).await;
+    if must_fail {
+        assert!(result.is_err(), "{writing_sql} was exported: {result:?}");
+        assert!(!path.exists());
+    }
+    let after = count(driver.execute_query(database, count_sql).await.unwrap());
+    assert_eq!(before, after, "{writing_sql} changed data");
 }

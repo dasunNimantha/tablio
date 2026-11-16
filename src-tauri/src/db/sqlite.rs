@@ -734,6 +734,52 @@ impl DatabaseDriver for SqliteDriver {
             .await
     }
 
+    /// One query with `PRAGMA query_only` on, so running it again can't
+    /// write to the database.
+    async fn stream_query(
+        &self,
+        _database: &str,
+        sql: &str,
+        sink: &mut crate::db::stream::RowSink,
+    ) -> Result<()> {
+        let stmt = crate::db::stream::single_query(
+            sql,
+            crate::util::sql::SqlDialect::Generic,
+            SQLITE_SELECT_KEYWORDS,
+        )?;
+        let mut conn = self.pool.acquire().await?;
+        sqlx::raw_sql("PRAGMA query_only = ON")
+            .execute(&mut *conn)
+            .await?;
+        let outcome = async {
+            // Same decoding as the console.
+            let mut stream =
+                sqlx::raw_sql(sqlx::AssertSqlSafe(stmt.as_str())).fetch_many(&mut *conn);
+            let mut n = 0;
+            while let Some(item) = stream.try_next().await? {
+                if let sqlx::Either::Right(row) = item {
+                    if !sink.has_columns() {
+                        let names: Vec<String> =
+                            row.columns().iter().map(|c| c.name().to_string()).collect();
+                        n = names.len();
+                        sink.columns(names, Vec::new()).await?;
+                    }
+                    sink.row(sqlite_row_to_json_values(&row, n)).await?;
+                }
+            }
+            anyhow::Ok(())
+        }
+        .await;
+        if sqlx::raw_sql("PRAGMA query_only = OFF")
+            .execute(&mut *conn)
+            .await
+            .is_err()
+        {
+            conn.close_on_drop();
+        }
+        outcome
+    }
+
     async fn fetch_export_page(
         &self,
         _database: &str,

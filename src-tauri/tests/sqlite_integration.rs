@@ -2700,6 +2700,7 @@ async fn sqlite_console_result_is_capped_with_a_notice() {
         "missing truncation notice: {:?}",
         r.notices
     );
+    assert_eq!(r.total_rows, Some(60_000));
     let _ = std::fs::remove_file(&path);
 }
 
@@ -2735,5 +2736,52 @@ async fn sqlite_streamed_table_export_matches_in_memory_export() {
         45,
     )
     .await;
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_full_query_export_writes_every_row_read_only() {
+    let (driver, path) = create_driver().await;
+    let tbl = unique_table("exp_q");
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE TABLE \"{tbl}\" (id INTEGER PRIMARY KEY, txt TEXT, b BLOB, \
+                 n NUMERIC, f REAL)"
+            ),
+        )
+        .await
+        .unwrap();
+    let values = export_common::tricky_value_rows(30, |hex| format!("X'{hex}'"));
+    driver
+        .execute_query(
+            DB,
+            &format!("INSERT INTO \"{tbl}\" VALUES {}", values.join(", ")),
+        )
+        .await
+        .unwrap();
+    let driver: std::sync::Arc<dyn DatabaseDriver> = std::sync::Arc::new(driver);
+    export_common::assert_full_query_export(
+        driver.clone(),
+        DB,
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 60000) \
+         SELECT x, 'row ' || x AS label FROM c",
+        &format!("SELECT id, txt, b, n, f, id AS txt FROM \"{tbl}\" ORDER BY id"),
+    )
+    .await;
+    let count = format!("SELECT COUNT(*) FROM \"{tbl}\"");
+    for writing in [
+        format!("WITH x AS (SELECT 1) INSERT INTO \"{tbl}\" (id) VALUES (1000)"),
+        format!("DELETE FROM \"{tbl}\""),
+    ] {
+        export_common::assert_full_export_cannot_write(driver.clone(), DB, &writing, &count, true)
+            .await;
+    }
+    // The connection is writable again afterwards.
+    driver
+        .execute_query(DB, &format!("DELETE FROM \"{tbl}\" WHERE id = 1"))
+        .await
+        .unwrap();
     let _ = std::fs::remove_file(&path);
 }

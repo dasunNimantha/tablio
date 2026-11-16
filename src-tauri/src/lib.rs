@@ -67,6 +67,7 @@ pub fn run() {
             export_table_to_file,
             export_query_result,
             export_query_result_to_file,
+            export_query_to_file,
             load_saved_queries,
             save_query,
             delete_saved_query,

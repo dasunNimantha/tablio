@@ -201,6 +201,15 @@ impl DatabaseDriver for TidbDriver {
         .await
     }
 
+    async fn stream_query(
+        &self,
+        database: &str,
+        sql: &str,
+        sink: &mut crate::db::stream::RowSink,
+    ) -> Result<()> {
+        my_stream_query(&self.pool, database, sql, false, sink).await
+    }
+
     async fn fetch_export_page(
         &self,
         database: &str,

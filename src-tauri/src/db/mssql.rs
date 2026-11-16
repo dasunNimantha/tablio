@@ -1635,6 +1635,49 @@ impl DatabaseDriver for MssqlDriver {
         .await
     }
 
+    /// One query on a connection of its own (a long export must not hold
+    /// the shared one the grid and every console tab use), inside a
+    /// transaction that is never committed: closing the connection rolls
+    /// back anything the query changed (`SELECT ... INTO`, a
+    /// data-modifying CTE).
+    async fn stream_query(
+        &self,
+        database: &str,
+        sql: &str,
+        sink: &mut crate::db::stream::RowSink,
+    ) -> Result<()> {
+        if tsql_execution_batches(sql).len() > 1 {
+            anyhow::bail!(crate::db::stream::MULTIPLE_STATEMENTS_MESSAGE);
+        }
+        let stmt = crate::db::stream::single_query(
+            sql,
+            crate::util::sql::SqlDialect::Generic,
+            &["SELECT", "WITH"],
+        )?;
+        let (mut client, _) = open_client(&self.tcfg).await?;
+        client_use_database(&mut client, database).await?;
+        client_batch(&mut client, "BEGIN TRANSACTION").await?;
+        let mut stream = client.simple_query(stmt).await.map_err(tds_err)?;
+        while let Some(item) = stream.try_next().await.map_err(tds_err)? {
+            match item {
+                QueryItem::Metadata(meta) => {
+                    let names = meta.columns().iter().map(|c| c.name().to_string());
+                    sink.columns(names.collect(), Vec::new()).await?;
+                }
+                QueryItem::Row(row) => {
+                    if !sink.has_columns() {
+                        let names = row.columns().iter().map(|c| c.name().to_string());
+                        sink.columns(names.collect(), Vec::new()).await?;
+                    }
+                    sink.row(row.cells().map(|(_, d)| column_data_to_json(d)).collect())
+                        .await?;
+                }
+            }
+        }
+        // Dropping the client closes the connection, which rolls back.
+        Ok(())
+    }
+
     async fn fetch_export_page(
         &self,
         database: &str,

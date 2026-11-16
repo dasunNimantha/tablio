@@ -110,6 +110,21 @@ pub trait DatabaseDriver: Send + Sync {
             .await
     }
     async fn execute_query(&self, database: &str, sql: &str) -> Result<QueryResult>;
+    /// Run a single console statement again and push every row it
+    /// returns to `sink`, without the console's row cap, so a result the
+    /// console truncated can be exported in full. The statement runs
+    /// read-only where the engine allows it (it is being run a second
+    /// time), and scripts of several statements are rejected. Rows are
+    /// decoded exactly as the console decodes them.
+    async fn stream_query(
+        &self,
+        database: &str,
+        sql: &str,
+        sink: &mut stream::RowSink,
+    ) -> Result<()> {
+        let _ = (database, sql, sink);
+        anyhow::bail!("Exporting every row of a query isn't supported for this database.")
+    }
     /// Like [`execute_query`](Self::execute_query), but stops early when
     /// `cancel` fires and then resolves to
     /// [`cancel::QueryCancelled`]. The default drops the in-flight

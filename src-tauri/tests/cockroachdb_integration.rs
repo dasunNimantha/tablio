@@ -2329,6 +2329,7 @@ async fn crdb_console_result_is_capped_with_a_notice() {
         "missing truncation notice: {:?}",
         r.notices
     );
+    assert_eq!(r.total_rows, Some(60_000));
 }
 
 #[tokio::test]
@@ -2356,6 +2357,30 @@ async fn crdb_streamed_exports_match_in_memory_exports() {
         SCHEMA,
         &tbl,
         45,
+    )
+    .await;
+    export_common::assert_full_query_export(
+        driver.clone(),
+        &db,
+        "SELECT g, 'row ' || g::STRING AS label FROM generate_series(1, 60000) g",
+        &format!("SELECT id, txt, b, n, f, id AS txt FROM {q} ORDER BY id"),
+    )
+    .await;
+    let count = format!("SELECT COUNT(*) FROM {q}");
+    export_common::assert_full_export_cannot_write(
+        driver.clone(),
+        &db,
+        &format!("WITH d AS (DELETE FROM {q} RETURNING id) SELECT * FROM d"),
+        &count,
+        true,
+    )
+    .await;
+    export_common::assert_full_export_cannot_write(
+        driver.clone(),
+        &db,
+        &format!("DELETE FROM {q}"),
+        &count,
+        true,
     )
     .await;
     driver

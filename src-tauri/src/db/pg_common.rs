@@ -6,6 +6,7 @@ use crate::db::cancel::{
     cancelled_error, run_interruptible, unless_cancelled, CancellationToken, Interruptible,
 };
 use crate::db::console::{console_result, ResultSet, SESSION_RESET_NOTICE};
+use crate::db::stream::{single_query, RowSink};
 use crate::models::*;
 use crate::util::sql::{
     ensure_row_matched, script_changes_session, script_transaction_state, split_sql_statements_for,
@@ -1287,6 +1288,53 @@ async fn pg_run_statements(
         rows_affected,
         elapsed,
     ))
+}
+
+/// [`DatabaseDriver::stream_query`](crate::db::DatabaseDriver::stream_query)
+/// for Postgres-protocol servers: one query, run in a `READ ONLY`
+/// transaction that is rolled back afterwards, so running it again
+/// can't change data (a data-modifying CTE, `EXPLAIN ANALYZE DELETE`).
+pub async fn pg_stream_query(pool: &PgPool, sql: &str, sink: &mut RowSink) -> Result<()> {
+    let stmt = single_query(sql, SqlDialect::Postgres, PG_SELECT_KEYWORDS)?;
+    if let Some(e) = copy_stdio_error(std::slice::from_ref(&stmt)) {
+        return Err(e);
+    }
+    let mut conn = pool.acquire().await?;
+    sqlx::raw_sql("BEGIN READ ONLY").execute(&mut *conn).await?;
+    let outcome = pg_stream_rows(&mut conn, &stmt, sink).await;
+    // A read that stopped part-way leaves rows on the wire; don't hand
+    // that connection back to the pool.
+    if outcome.is_err() || sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.is_err() {
+        conn.close_on_drop();
+    }
+    outcome
+}
+
+async fn pg_stream_rows(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    stmt: &str,
+    sink: &mut RowSink,
+) -> Result<()> {
+    // Same simple-protocol text decoding as the console.
+    let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(stmt)).fetch_many(&mut **conn);
+    let mut in_set = false;
+    let mut n = 0;
+    while let Some(item) = stream.try_next().await? {
+        match item {
+            sqlx::Either::Left(_) => in_set = false,
+            sqlx::Either::Right(row) => {
+                if !in_set {
+                    let names: Vec<String> =
+                        row.columns().iter().map(|c| c.name().to_string()).collect();
+                    n = names.len();
+                    sink.columns(names, Vec::new()).await?;
+                    in_set = true;
+                }
+                sink.row(pg_row_to_json_values(&row, n)).await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Leading keywords of statements the console shows as a row set even

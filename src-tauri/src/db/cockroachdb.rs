@@ -342,6 +342,16 @@ impl DatabaseDriver for CockroachdbDriver {
         .await
     }
 
+    async fn stream_query(
+        &self,
+        database: &str,
+        sql: &str,
+        sink: &mut crate::db::stream::RowSink,
+    ) -> Result<()> {
+        let pool = self.get_pool(database).await?;
+        pg_stream_query(&pool, sql, sink).await
+    }
+
     async fn fetch_export_page(
         &self,
         database: &str,
