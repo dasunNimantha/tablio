@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::db::cancel::CancellationToken;
@@ -87,6 +88,82 @@ impl CockroachdbDriver {
             .get_or_connect(database, || Self::build_url(&self.config, database))
             .await
     }
+}
+
+fn crdb_column_from_row(r: &sqlx::postgres::PgRow) -> ColumnInfo {
+    let nullable_str: String = r.get("is_nullable");
+    let default_val: Option<String> = r.try_get("column_default").ok();
+    let is_identity: String = r.get("is_identity");
+    let is_generated: String = r.get("is_generated");
+    let has_serial_default = default_val
+        .as_deref()
+        .map(|d| d.starts_with("nextval(") || d.starts_with("unique_rowid("))
+        .unwrap_or(false);
+    let raw_type: String = r.get("data_type");
+    let char_max_len: Option<i32> = r.try_get("character_maximum_length").ok().flatten();
+    let num_precision: Option<i32> = r.try_get("numeric_precision").ok().flatten();
+    let num_scale: Option<i32> = r.try_get("numeric_scale").ok().flatten();
+    let data_type = if let Some(len) = char_max_len {
+        format!("{}({})", raw_type, len)
+    } else if raw_type == "numeric" || raw_type == "decimal" {
+        match (num_precision, num_scale) {
+            (Some(p), Some(s)) if s > 0 => format!("{}({},{})", raw_type, p, s),
+            (Some(p), _) => format!("{}({})", raw_type, p),
+            _ => raw_type,
+        }
+    } else {
+        raw_type
+    };
+    // CockroachDB returns ordinal_position as INT8
+    let ordinal: i32 = r.get::<i64, _>("ordinal_position") as i32;
+    ColumnInfo {
+        name: r.get("column_name"),
+        data_type,
+        is_nullable: nullable_str == "YES",
+        is_primary_key: r.get("is_pk"),
+        default_value: default_val,
+        ordinal_position: ordinal,
+        is_auto_generated: is_identity == "YES" || is_generated == "ALWAYS" || has_serial_default,
+    }
+}
+
+/// `list_columns` for every table of `schema` in one query, keyed by
+/// table name: the same `information_schema` query with the table
+/// filter dropped and the primary-key lookup matched per table.
+async fn crdb_list_schema_columns(
+    pool: &PgPool,
+    schema: &str,
+) -> Result<HashMap<String, Vec<ColumnInfo>>> {
+    let rows = sqlx::query(
+        "SELECT c.table_name, c.column_name, c.data_type, c.is_nullable, c.column_default, \
+                c.ordinal_position, c.is_identity, c.identity_generation, c.is_generated, \
+                c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
+                CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_pk \
+         FROM information_schema.columns c \
+         LEFT JOIN ( \
+             SELECT DISTINCT tc.table_name, ku.column_name \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage ku \
+                 ON tc.constraint_name = ku.constraint_name \
+                 AND tc.table_schema = ku.table_schema \
+                 AND tc.table_name = ku.table_name \
+             WHERE tc.constraint_type = 'PRIMARY KEY' \
+               AND tc.table_schema = $1 \
+         ) pk ON pk.table_name = c.table_name AND pk.column_name = c.column_name \
+         WHERE c.table_schema = $1 \
+           AND c.is_hidden = 'NO' \
+         ORDER BY c.table_name, c.ordinal_position",
+    )
+    .bind(schema)
+    .fetch_all(pool)
+    .await?;
+    let mut out: HashMap<String, Vec<ColumnInfo>> = HashMap::new();
+    for r in &rows {
+        out.entry(r.get("table_name"))
+            .or_default()
+            .push(crdb_column_from_row(r));
+    }
+    Ok(out)
 }
 
 #[async_trait]
@@ -280,48 +357,21 @@ impl DatabaseDriver for CockroachdbDriver {
         .fetch_all(&pool)
         .await?;
 
-        Ok(rows
-            .iter()
-            .map(|r| {
-                let nullable_str: String = r.get("is_nullable");
-                let default_val: Option<String> = r.try_get("column_default").ok();
-                let is_identity: String = r.get("is_identity");
-                let is_generated: String = r.get("is_generated");
-                let has_serial_default = default_val
-                    .as_deref()
-                    .map(|d| d.starts_with("nextval(") || d.starts_with("unique_rowid("))
-                    .unwrap_or(false);
-                let raw_type: String = r.get("data_type");
-                let char_max_len: Option<i32> =
-                    r.try_get("character_maximum_length").ok().flatten();
-                let num_precision: Option<i32> = r.try_get("numeric_precision").ok().flatten();
-                let num_scale: Option<i32> = r.try_get("numeric_scale").ok().flatten();
-                let data_type = if let Some(len) = char_max_len {
-                    format!("{}({})", raw_type, len)
-                } else if raw_type == "numeric" || raw_type == "decimal" {
-                    match (num_precision, num_scale) {
-                        (Some(p), Some(s)) if s > 0 => format!("{}({},{})", raw_type, p, s),
-                        (Some(p), _) => format!("{}({})", raw_type, p),
-                        _ => raw_type,
-                    }
-                } else {
-                    raw_type
-                };
-                // CockroachDB returns ordinal_position as INT8
-                let ordinal: i32 = r.get::<i64, _>("ordinal_position") as i32;
-                ColumnInfo {
-                    name: r.get("column_name"),
-                    data_type,
-                    is_nullable: nullable_str == "YES",
-                    is_primary_key: r.get("is_pk"),
-                    default_value: default_val,
-                    ordinal_position: ordinal,
-                    is_auto_generated: is_identity == "YES"
-                        || is_generated == "ALWAYS"
-                        || has_serial_default,
-                }
-            })
-            .collect())
+        Ok(rows.iter().map(crdb_column_from_row).collect())
+    }
+
+    async fn get_schema_graph(&self, database: &str, schema: &str) -> Result<Vec<TableGraph>> {
+        let pool = self.get_pool(database).await?;
+        let (tables, columns, foreign_keys) = tokio::try_join!(
+            pg_list_tables_basic(&pool, database, schema),
+            crdb_list_schema_columns(&pool, schema),
+            pg_list_schema_foreign_keys(&pool, schema),
+        )?;
+        Ok(crate::db::assemble_schema_graph(
+            tables,
+            columns,
+            foreign_keys,
+        ))
     }
 
     async fn fetch_rows(

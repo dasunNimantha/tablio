@@ -1,3 +1,4 @@
+use futures_util::FutureExt;
 use tablio_lib::db::cockroachdb::CockroachdbDriver;
 use tablio_lib::db::DatabaseDriver;
 use tablio_lib::models::*;
@@ -2307,6 +2308,218 @@ async fn crdb_console_result_shapes_and_session_reset() {
 
     driver
         .execute_query(&db, &format!("DROP TABLE \"{SCHEMA}\".\"{tbl}\""))
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Schema graph (ERD)
+// ---------------------------------------------------------------------------
+
+/// `list_foreign_keys` as it was implemented on `information_schema`
+/// (shared with Postgres). It pairs every column of a composite key with
+/// every referenced column, so it is only a reference for single-column
+/// keys.
+async fn legacy_crdb_list_foreign_keys(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    table: &str,
+) -> Vec<ForeignKeyInfo> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT tc.constraint_name, kcu.column_name, \
+         ccu.table_name AS foreign_table, ccu.column_name AS foreign_column, \
+         rc.delete_rule, rc.update_rule \
+         FROM information_schema.table_constraints tc \
+         JOIN information_schema.key_column_usage kcu \
+             ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema \
+         JOIN information_schema.constraint_column_usage ccu \
+             ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema \
+         JOIN information_schema.referential_constraints rc \
+             ON rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.table_schema \
+         WHERE tc.constraint_type = 'FOREIGN KEY' \
+             AND tc.table_schema = $1 AND tc.table_name = $2 \
+         ORDER BY tc.constraint_name, kcu.ordinal_position",
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    rows.iter()
+        .map(|r| ForeignKeyInfo {
+            name: r.get("constraint_name"),
+            column: r.get("column_name"),
+            referenced_table: r.get("foreign_table"),
+            referenced_column: r.get("foreign_column"),
+            on_delete: r.get("delete_rule"),
+            on_update: r.get("update_rule"),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn crdb_schema_graph_matches_per_table_listings() {
+    let (driver, db) = crdb_driver!();
+    let s = unique_table("erdperf_graph");
+    let ddl = r#"
+        CREATE SCHEMA {s};
+        CREATE TABLE {s}.parent (a INT, b INT, label VARCHAR(40) NOT NULL, PRIMARY KEY (a, b));
+        CREATE TABLE {s}.ref_one (
+            id SERIAL PRIMARY KEY, amount DECIMAL(10,2), whole DECIMAL(8), plain DECIMAL,
+            created TIMESTAMPTZ DEFAULT now(), tags STRING[]
+        );
+        CREATE TABLE {s}.child (
+            id INT8 GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            a INT, b INT,
+            one_id INT8 REFERENCES {s}.ref_one(id) ON DELETE CASCADE,
+            total INT AS (COALESCE(a, 0) + COALESCE(b, 0)) STORED,
+            up_id INT8,
+            note STRING DEFAULT 'x',
+            CONSTRAINT child_parent_fk FOREIGN KEY (a, b) REFERENCES {s}.parent(a, b) ON UPDATE CASCADE,
+            CONSTRAINT child_up_fk FOREIGN KEY (up_id) REFERENCES {s}.child(id) ON DELETE SET NULL
+        );
+        CREATE TABLE {s}."Mixed Case" ("Id" INT PRIMARY KEY, "Child Id" INT8 REFERENCES {s}.child(id));
+        CREATE TABLE {s}.no_pk (v INT);
+        CREATE VIEW {s}.child_view AS SELECT id, a, b FROM {s}.child;
+    "#
+    .replace("{s}", &s);
+    for stmt in ddl.split(';').map(str::trim).filter(|x| !x.is_empty()) {
+        driver.execute_query(&db, stmt).await.unwrap();
+    }
+    let url = std::env::var("TEST_COCKROACHDB_URL").unwrap();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .unwrap();
+
+    let result = std::panic::AssertUnwindSafe(async {
+        let tables = driver.list_tables(&db, &s).await.unwrap();
+        let graph = driver.get_schema_graph(&db, &s).await.unwrap();
+        let expected: Vec<&TableInfo> = tables
+            .iter()
+            .filter(|t| t.table_type == "BASE TABLE")
+            .collect();
+        let got: Vec<&TableInfo> = graph.iter().map(|g| &g.table).collect();
+        assert_eq!(got, expected);
+        let names: Vec<&str> = graph.iter().map(|g| g.table.name.as_str()).collect();
+        assert_eq!(names, ["Mixed Case", "child", "no_pk", "parent", "ref_one"]);
+
+        for g in &graph {
+            let name = &g.table.name;
+            let cols = driver.list_columns(&db, &s, name).await.unwrap();
+            let fks = driver.list_foreign_keys(&db, &s, name).await.unwrap();
+            assert_eq!(g.columns, cols, "columns of {name}");
+            assert_eq!(g.foreign_keys, fks, "foreign keys of {name}");
+            let single: Vec<_> = fks
+                .iter()
+                .filter(|f| f.name != "child_parent_fk")
+                .cloned()
+                .collect();
+            let legacy: Vec<_> = legacy_crdb_list_foreign_keys(&pool, &s, name)
+                .await
+                .into_iter()
+                .filter(|f| f.name != "child_parent_fk")
+                .collect();
+            assert_eq!(single, legacy, "single-column FKs of {name}");
+        }
+
+        let by_name = |n: &str| graph.iter().find(|g| g.table.name == n).unwrap();
+        let pairs: Vec<(&str, &str)> = by_name("child")
+            .foreign_keys
+            .iter()
+            .filter(|f| f.name == "child_parent_fk")
+            .map(|f| (f.column.as_str(), f.referenced_column.as_str()))
+            .collect();
+        assert_eq!(pairs, [("a", "a"), ("b", "b")]);
+        let parent_pk: Vec<_> = by_name("parent")
+            .columns
+            .iter()
+            .filter(|c| c.is_primary_key)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(parent_pk, ["a", "b"]);
+        // The hidden rowid of a table without a primary key stays hidden.
+        let no_pk: Vec<_> = by_name("no_pk")
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(no_pk, ["v"]);
+    })
+    .catch_unwind()
+    .await;
+
+    pool.close().await;
+    driver
+        .execute_query(&db, &format!("DROP SCHEMA {s} CASCADE"))
+        .await
+        .unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Times `get_schema_graph` on a 500-table schema. Run with
+/// `--release -- --ignored crdb_schema_graph_timing --nocapture`.
+#[tokio::test]
+#[ignore]
+async fn crdb_schema_graph_timing() {
+    let (driver, db) = crdb_driver!();
+    let n: usize = std::env::var("ERDPERF_TABLES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500);
+    let s = "erdperf_timing";
+    driver
+        .execute_query(&db, &format!("DROP SCHEMA IF EXISTS {s} CASCADE"))
+        .await
+        .unwrap();
+    driver
+        .execute_query(&db, &format!("CREATE SCHEMA {s}"))
+        .await
+        .unwrap();
+    for i in 0..n {
+        let fk = if i > 0 {
+            format!(", parent_id INT8 REFERENCES {s}.t{} (id)", i - 1)
+        } else {
+            String::new()
+        };
+        driver
+            .execute_query(
+                &db,
+                &format!(
+                    "CREATE TABLE {s}.t{i} (id INT8 PRIMARY KEY DEFAULT unique_rowid(), \
+                     name VARCHAR(50) NOT NULL, amount DECIMAL(10,2), \
+                     created TIMESTAMPTZ DEFAULT now(){fk})"
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    let start = std::time::Instant::now();
+    let graph = driver.get_schema_graph(&db, s).await.unwrap();
+    let first = start.elapsed();
+    assert_eq!(graph.len(), n);
+    let start = std::time::Instant::now();
+    driver.get_schema_graph(&db, s).await.unwrap();
+    let bulk = start.elapsed();
+    let start = std::time::Instant::now();
+    let tables = driver.list_tables(&db, s).await.unwrap();
+    let per_table = tablio_lib::db::schema_graph_per_table(&driver, &db, s, tables)
+        .await
+        .unwrap();
+    let bounded = start.elapsed();
+    assert_eq!(per_table, graph);
+    eprintln!(
+        "cockroachdb {n} tables: get_schema_graph {bulk:?} (first call {first:?}); \
+         per-table (8 at a time) {bounded:?}"
+    );
+
+    driver
+        .execute_query(&db, &format!("DROP SCHEMA {s} CASCADE"))
         .await
         .unwrap();
 }
