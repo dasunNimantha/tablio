@@ -17,6 +17,8 @@ pub mod tidb;
 use crate::models::*;
 use anyhow::Result;
 use async_trait::async_trait;
+use futures_util::{StreamExt, TryStreamExt};
+use std::collections::HashMap;
 
 #[async_trait]
 #[allow(clippy::too_many_arguments)]
@@ -52,6 +54,19 @@ pub trait DatabaseDriver: Send + Sync {
         _table: &str,
     ) -> Result<Vec<ReferencingTableInfo>> {
         Ok(Vec::new())
+    }
+    /// Every base table of `schema` with its columns and foreign keys,
+    /// for the ERD. Each entry's `columns` / `foreign_keys` equal what
+    /// [`list_columns`](Self::list_columns) /
+    /// [`list_foreign_keys`](Self::list_foreign_keys) return for that
+    /// table, in [`list_tables`](Self::list_tables) order.
+    ///
+    /// The default asks per table, a bounded number at a time; drivers
+    /// with a catalog that can answer for a whole schema in one query
+    /// override it.
+    async fn get_schema_graph(&self, database: &str, schema: &str) -> Result<Vec<TableGraph>> {
+        let tables = self.list_tables(database, schema).await?;
+        schema_graph_per_table(self, database, schema, tables).await
     }
     async fn list_functions(&self, database: &str, schema: &str) -> Result<Vec<FunctionInfo>>;
     async fn list_triggers(
@@ -162,6 +177,62 @@ pub trait DatabaseDriver: Send + Sync {
     async fn close(&self) {}
 }
 
+/// How many tables [`schema_graph_per_table`] loads at once. Each one
+/// issues two catalog queries, so this keeps a pool of a few connections
+/// busy without queueing thousands of requests behind it (which ran into
+/// the pool's acquire timeout on large schemas).
+pub const SCHEMA_GRAPH_CONCURRENCY: usize = 8;
+
+/// The tables the ERD draws: base tables, not views or foreign tables.
+pub fn is_schema_graph_table(t: &TableInfo) -> bool {
+    t.table_type == "BASE TABLE" || t.table_type == "TABLE"
+}
+
+/// [`DatabaseDriver::get_schema_graph`] from per-table
+/// `list_columns` / `list_foreign_keys` calls, at most
+/// [`SCHEMA_GRAPH_CONCURRENCY`] tables at a time, keeping table order.
+pub async fn schema_graph_per_table<D: DatabaseDriver + ?Sized>(
+    driver: &D,
+    database: &str,
+    schema: &str,
+    tables: Vec<TableInfo>,
+) -> Result<Vec<TableGraph>> {
+    futures_util::stream::iter(tables.into_iter().filter(is_schema_graph_table))
+        .map(|table| async move {
+            let (columns, foreign_keys) = tokio::try_join!(
+                driver.list_columns(database, schema, &table.name),
+                driver.list_foreign_keys(database, schema, &table.name),
+            )?;
+            Ok::<_, anyhow::Error>(TableGraph {
+                table,
+                columns,
+                foreign_keys,
+            })
+        })
+        .buffered(SCHEMA_GRAPH_CONCURRENCY)
+        .try_collect()
+        .await
+}
+
+/// [`DatabaseDriver::get_schema_graph`] from schema-wide column and
+/// foreign-key listings keyed by table name. Tables missing from a map
+/// get an empty list, as a per-table query would return.
+pub fn assemble_schema_graph(
+    tables: Vec<TableInfo>,
+    mut columns: HashMap<String, Vec<ColumnInfo>>,
+    mut foreign_keys: HashMap<String, Vec<ForeignKeyInfo>>,
+) -> Vec<TableGraph> {
+    tables
+        .into_iter()
+        .filter(is_schema_graph_table)
+        .map(|table| TableGraph {
+            columns: columns.remove(&table.name).unwrap_or_default(),
+            foreign_keys: foreign_keys.remove(&table.name).unwrap_or_default(),
+            table,
+        })
+        .collect()
+}
+
 /// Format a host for the authority part of a connection URL.
 ///
 /// IPv6 literals must be wrapped in brackets (`[::1]`) or the URL
@@ -178,7 +249,62 @@ pub fn url_host(host: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::url_host;
+    use super::*;
+
+    fn table(name: &str, table_type: &str) -> TableInfo {
+        TableInfo {
+            name: name.into(),
+            schema: "s".into(),
+            table_type: table_type.into(),
+            ..Default::default()
+        }
+    }
+
+    fn column(name: &str) -> ColumnInfo {
+        ColumnInfo {
+            name: name.into(),
+            data_type: "int".into(),
+            is_nullable: true,
+            is_primary_key: false,
+            default_value: None,
+            ordinal_position: 1,
+            is_auto_generated: false,
+        }
+    }
+
+    #[test]
+    fn assemble_schema_graph_keeps_base_tables_in_order() {
+        let tables = vec![
+            table("b", "BASE TABLE"),
+            table("v", "VIEW"),
+            table("a", "TABLE"),
+            table("empty", "BASE TABLE"),
+        ];
+        let columns = HashMap::from([
+            ("a".to_string(), vec![column("x")]),
+            ("b".to_string(), vec![column("y"), column("z")]),
+            ("v".to_string(), vec![column("x")]),
+        ]);
+        let fks = HashMap::from([(
+            "b".to_string(),
+            vec![ForeignKeyInfo {
+                name: "fk".into(),
+                column: "y".into(),
+                referenced_table: "a".into(),
+                referenced_column: "x".into(),
+                on_delete: "NO ACTION".into(),
+                on_update: "NO ACTION".into(),
+            }],
+        )]);
+        let graph = assemble_schema_graph(tables, columns, fks);
+        let names: Vec<&str> = graph.iter().map(|g| g.table.name.as_str()).collect();
+        assert_eq!(names, ["b", "a", "empty"]);
+        assert_eq!(graph[0].columns.len(), 2);
+        assert_eq!(graph[0].foreign_keys.len(), 1);
+        assert_eq!(graph[1].columns, vec![column("x")]);
+        assert!(graph[1].foreign_keys.is_empty());
+        assert!(graph[2].columns.is_empty());
+    }
 
     #[test]
     fn url_host_brackets_ipv6_only() {

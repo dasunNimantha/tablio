@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tiberius::numeric::Numeric;
 use tiberius::{AuthMethod, Client, ColumnData, Config, EncryptionLevel, QueryItem, Row};
@@ -686,24 +686,20 @@ async fn client_result_sets(c: &mut MssqlClient, sql: &str) -> Result<Vec<Result
     let mut sets: Vec<ResultSet> = Vec::new();
     while let Some(item) = stream.try_next().await.map_err(tds_err)? {
         match item {
-            QueryItem::Metadata(meta) => sets.push(ResultSet {
-                columns: meta
-                    .columns()
+            QueryItem::Metadata(meta) => sets.push(ResultSet::new(
+                meta.columns()
                     .iter()
                     .map(|c| c.name().to_string())
                     .collect(),
-                rows: Vec::new(),
-            }),
+            )),
             QueryItem::Row(row) => {
                 if sets.is_empty() {
-                    sets.push(ResultSet {
-                        columns: row.columns().iter().map(|c| c.name().to_string()).collect(),
-                        rows: Vec::new(),
-                    });
+                    sets.push(ResultSet::new(
+                        row.columns().iter().map(|c| c.name().to_string()).collect(),
+                    ));
                 }
                 let set = sets.last_mut().expect("set exists");
-                set.rows
-                    .push(row.cells().map(|(_, d)| column_data_to_json(d)).collect());
+                set.push_row(|| row.cells().map(|(_, d)| column_data_to_json(d)).collect());
             }
         }
     }
@@ -992,41 +988,156 @@ impl MssqlDriver {
             .filter_map(|v| v.as_str().map(|s| s.to_ascii_uppercase()))
             .collect())
     }
+}
 
-    async fn primary_key_set(
-        &self,
-        database: &str,
-        schema: &str,
-        table: &str,
-    ) -> Result<HashSet<String>> {
-        let sql = format!(
-            "SELECT c.name
-             FROM {}.sys.indexes i
-             INNER JOIN {}.sys.index_columns ic
-               ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-             INNER JOIN {}.sys.columns c
-               ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-             INNER JOIN {}.sys.tables t ON i.object_id = t.object_id
-             INNER JOIN {}.sys.schemas s ON t.schema_id = s.schema_id
-             WHERE i.is_primary_key = 1 AND t.name = N'{}' AND s.name = N'{}'
-             ORDER BY ic.key_ordinal",
-            bracket(database),
-            bracket(database),
-            bracket(database),
-            bracket(database),
-            bracket(database),
-            table.replace('\'', "''"),
-            schema.replace('\'', "''"),
-        );
-        let (_, rows) = self.run_select(&sql).await?;
-        let mut set = HashSet::new();
-        for r in rows {
-            if let Some(serde_json::Value::String(name)) = r.first() {
-                set.insert(name.clone());
-            }
-        }
-        Ok(set)
+/// Run a catalog query through `sp_executesql` with `@schema` (and
+/// `@table` when given) as parameters. The statement text then stays
+/// the same from one table to the next, so SQL Server reuses its plan:
+/// compiling these multi-join catalog queries takes ~200 ms, far more
+/// than running them.
+fn parameterized(sql: &str, schema: &str, table: Option<&str>) -> String {
+    let lit = |v: &str| format!("N'{}'", v.replace('\'', "''"));
+    match table {
+        Some(t) => format!(
+            "EXEC sp_executesql {}, N'@schema sysname, @table sysname', @schema = {}, @table = {}",
+            lit(sql),
+            lit(schema),
+            lit(t)
+        ),
+        None => format!(
+            "EXEC sp_executesql {}, N'@schema sysname', @schema = {}",
+            lit(sql),
+            lit(schema)
+        ),
     }
+}
+
+/// Columns of the tables and views of `schema` (or of just `table`),
+/// read from `sys.columns` with the expressions
+/// `INFORMATION_SCHEMA.COLUMNS` uses for the fields we keep, plus the
+/// identity flag and primary-key membership. Selects
+/// `table, name, data_type, is_nullable, default, ordinal, is_identity, is_pk`.
+///
+/// Every reference is three-part so the query doesn't depend on the
+/// session's current database; that rules out the context-bound
+/// built-ins the view calls (`TYPE_NAME`, `OBJECT_DEFINITION`,
+/// `COLUMNPROPERTY`), so they are replaced by catalog joins:
+/// - `DATA_TYPE` is `ISNULL(TYPE_NAME(system_type_id), <user type>)`:
+///   the system type whose `user_type_id` is the column's
+///   `system_type_id` (absent for CLR types such as `geography`, which
+///   fall back to the column's own type name).
+/// - `COLUMN_DEFAULT` is the text of the default constraint, or of a
+///   bound stand-alone default (`sp_bindefault`).
+/// - `ORDINAL_POSITION` is the column's dense position, which differs
+///   from `column_id` once a column was dropped.
+fn mssql_columns_sql(database: &str, schema: &str, table: Option<&str>) -> String {
+    let db = bracket(database);
+    let table_filter = if table.is_some() {
+        " AND o.name = @table"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT o.name, c.name,
+                ISNULL(st.name, ut.name) AS data_type,
+                CASE c.is_nullable WHEN 1 THEN 'YES' ELSE 'NO' END AS is_nullable,
+                CONVERT(nvarchar(4000), COALESCE(dc.definition, dm.definition)) AS column_default,
+                CONVERT(int, ROW_NUMBER() OVER (PARTITION BY c.object_id ORDER BY c.column_id)) AS ordinal,
+                CONVERT(int, c.is_identity) AS is_identity,
+                CASE WHEN EXISTS (
+                    SELECT 1 FROM {db}.sys.indexes i
+                    INNER JOIN {db}.sys.index_columns ic
+                      ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+                    WHERE i.object_id = c.object_id AND i.is_primary_key = 1
+                      AND ic.column_id = c.column_id
+                ) THEN 1 ELSE 0 END AS is_pk
+         FROM {db}.sys.objects o
+         INNER JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id
+         INNER JOIN {db}.sys.columns c ON c.object_id = o.object_id
+         LEFT JOIN {db}.sys.types ut ON ut.user_type_id = c.user_type_id
+         LEFT JOIN {db}.sys.types st ON st.user_type_id = c.system_type_id
+         LEFT JOIN {db}.sys.default_constraints dc ON dc.object_id = c.default_object_id
+         LEFT JOIN {db}.sys.sql_modules dm ON dm.object_id = c.default_object_id
+         WHERE o.type IN ('U', 'V') AND s.name = @schema{table_filter}
+         ORDER BY o.name, ordinal"
+    );
+    parameterized(&sql, schema, table)
+}
+
+fn mssql_column_from_row(r: &[serde_json::Value]) -> Option<(String, ColumnInfo)> {
+    if r.len() < 8 {
+        return None;
+    }
+    let table = r[0].as_str()?.to_string();
+    let name = r[1].as_str()?.to_string();
+    let data_type = r[2].as_str().unwrap_or_default().to_string();
+    let is_nullable =
+        matches!(&r[3], serde_json::Value::String(s) if s.eq_ignore_ascii_case("YES"));
+    let default_value = r[4].as_str().map(str::to_string);
+    let ordinal_position = r[5].as_i64().unwrap_or(0) as i32;
+    let flag = |v: &serde_json::Value| v.as_i64() == Some(1) || v.as_bool() == Some(true);
+    Some((
+        table,
+        ColumnInfo {
+            name,
+            data_type,
+            is_nullable,
+            is_primary_key: flag(&r[7]),
+            default_value,
+            ordinal_position,
+            is_auto_generated: flag(&r[6]),
+        },
+    ))
+}
+
+/// Foreign keys of the tables of `schema` (or of just `table`), one row
+/// per column pair. Selects
+/// `table, name, column, ref_schema, ref_table, ref_column, on_delete, on_update`.
+fn mssql_foreign_keys_sql(database: &str, schema: &str, table: Option<&str>) -> String {
+    let db = bracket(database);
+    let db_lit = database.replace('\'', "''");
+    let table_filter = if table.is_some() {
+        " AND pt.name = @table"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT pt.name AS tname, fk.name, cp.name AS col,
+                OBJECT_SCHEMA_NAME(fk.referenced_object_id, DB_ID(N'{db_lit}')) AS rschema,
+                OBJECT_NAME(fk.referenced_object_id, DB_ID(N'{db_lit}')) AS rtable,
+                cr.name AS rcol,
+                fk.delete_referential_action_desc,
+                fk.update_referential_action_desc
+         FROM {db}.sys.foreign_keys fk
+         INNER JOIN {db}.sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+         INNER JOIN {db}.sys.tables pt ON fk.parent_object_id = pt.object_id
+         INNER JOIN {db}.sys.schemas ps ON pt.schema_id = ps.schema_id
+         INNER JOIN {db}.sys.columns cp ON fkc.parent_object_id = cp.object_id AND fkc.parent_column_id = cp.column_id
+         INNER JOIN {db}.sys.columns cr ON fkc.referenced_object_id = cr.object_id AND fkc.referenced_column_id = cr.column_id
+         WHERE ps.name = @schema{table_filter}
+         ORDER BY pt.name, fk.name, fkc.constraint_column_id"
+    );
+    parameterized(&sql, schema, table)
+}
+
+fn mssql_foreign_key_from_row(r: &[serde_json::Value]) -> Option<(String, ForeignKeyInfo)> {
+    if r.len() < 8 {
+        return None;
+    }
+    let table = r[0].as_str().unwrap_or("").to_string();
+    let rschema = r[3].as_str().unwrap_or("dbo");
+    let rtable = r[4].as_str().unwrap_or("");
+    Some((
+        table,
+        ForeignKeyInfo {
+            name: r[1].as_str().unwrap_or("").to_string(),
+            column: r[2].as_str().unwrap_or("").to_string(),
+            referenced_table: format!("{}.{}", rschema, rtable),
+            referenced_column: r[5].as_str().unwrap_or("").to_string(),
+            on_delete: r[6].as_str().unwrap_or("").to_string(),
+            on_update: r[7].as_str().unwrap_or("").to_string(),
+        },
+    ))
 }
 
 #[async_trait]
@@ -1110,62 +1221,40 @@ impl DatabaseDriver for MssqlDriver {
         schema: &str,
         table: &str,
     ) -> Result<Vec<ColumnInfo>> {
-        let pk = self.primary_key_set(database, schema, table).await?;
-        let sql = format!(
-            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, ORDINAL_POSITION,
-                    COLUMNPROPERTY(
-                      OBJECT_ID(QUOTENAME(N'{}') + N'.' + QUOTENAME(TABLE_SCHEMA) + N'.' + QUOTENAME(TABLE_NAME)),
-                      COLUMN_NAME,
-                      N'IsIdentity'
-                    ) AS is_identity
-             FROM {}.INFORMATION_SCHEMA.COLUMNS
-             WHERE TABLE_SCHEMA = N'{}' AND TABLE_NAME = N'{}'
-             ORDER BY ORDINAL_POSITION",
-            database.replace('\'', "''"),
-            bracket(database),
-            schema.replace('\'', "''"),
-            table.replace('\'', "''"),
-        );
+        let sql = mssql_columns_sql(database, schema, Some(table));
         let (_, rows) = self.run_select(&sql).await?;
-        let mut cols = Vec::new();
-        for r in rows {
-            if r.len() < 6 {
-                continue;
+        Ok(rows
+            .iter()
+            .filter_map(|r| mssql_column_from_row(r).map(|(_, c)| c))
+            .collect())
+    }
+
+    async fn get_schema_graph(&self, database: &str, schema: &str) -> Result<Vec<TableGraph>> {
+        // One connection: run the three listings back to back.
+        let tables = self.list_tables(database, schema).await?;
+        let (_, col_rows) = self
+            .run_select(&mssql_columns_sql(database, schema, None))
+            .await?;
+        let mut columns: HashMap<String, Vec<ColumnInfo>> = HashMap::new();
+        for r in &col_rows {
+            if let Some((table, col)) = mssql_column_from_row(r) {
+                columns.entry(table).or_default().push(col);
             }
-            let name = match &r[0] {
-                serde_json::Value::String(s) => s.clone(),
-                _ => continue,
-            };
-            let data_type = match &r[1] {
-                serde_json::Value::String(s) => s.clone(),
-                _ => String::new(),
-            };
-            let is_nullable =
-                matches!(&r[2], serde_json::Value::String(s) if s.eq_ignore_ascii_case("YES"));
-            let default_value = match &r[3] {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Null => None,
-                _ => None,
-            };
-            let ordinal = match &r[4] {
-                serde_json::Value::Number(n) => n.as_i64().unwrap_or(0) as i32,
-                _ => 0,
-            };
-            let is_auto = matches!(&r[5], serde_json::Value::Number(n) if n.as_i64() == Some(1));
-            cols.push(ColumnInfo {
-                name,
-                data_type,
-                is_nullable,
-                is_primary_key: false,
-                default_value,
-                ordinal_position: ordinal,
-                is_auto_generated: is_auto,
-            });
         }
-        for c in &mut cols {
-            c.is_primary_key = pk.contains(&c.name);
+        let (_, fk_rows) = self
+            .run_select(&mssql_foreign_keys_sql(database, schema, None))
+            .await?;
+        let mut foreign_keys: HashMap<String, Vec<ForeignKeyInfo>> = HashMap::new();
+        for r in &fk_rows {
+            if let Some((table, fk)) = mssql_foreign_key_from_row(r) {
+                foreign_keys.entry(table).or_default().push(fk);
+            }
         }
-        Ok(cols)
+        Ok(crate::db::assemble_schema_graph(
+            tables,
+            columns,
+            foreign_keys,
+        ))
     }
 
     async fn list_indexes(
@@ -1295,56 +1384,12 @@ impl DatabaseDriver for MssqlDriver {
         schema: &str,
         table: &str,
     ) -> Result<Vec<ForeignKeyInfo>> {
-        let sql = format!(
-            "SELECT fk.name, cp.name AS col,
-                    OBJECT_SCHEMA_NAME(fk.referenced_object_id, DB_ID(N'{}')) AS rschema,
-                    OBJECT_NAME(fk.referenced_object_id, DB_ID(N'{}')) AS rtable,
-                    cr.name AS rcol,
-                    fk.delete_referential_action_desc,
-                    fk.update_referential_action_desc
-             FROM {}.sys.foreign_keys fk
-             INNER JOIN {}.sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
-             INNER JOIN {}.sys.tables pt ON fk.parent_object_id = pt.object_id
-             INNER JOIN {}.sys.schemas ps ON pt.schema_id = ps.schema_id
-             INNER JOIN {}.sys.columns cp ON fkc.parent_object_id = cp.object_id AND fkc.parent_column_id = cp.column_id
-             INNER JOIN {}.sys.columns cr ON fkc.referenced_object_id = cr.object_id AND fkc.referenced_column_id = cr.column_id
-             WHERE ps.name = N'{}' AND pt.name = N'{}'
-             ORDER BY fk.name, fkc.constraint_column_id",
-            database.replace('\'', "''"),
-            database.replace('\'', "''"),
-            bracket(database),
-            bracket(database),
-            bracket(database),
-            bracket(database),
-            bracket(database),
-            bracket(database),
-            schema.replace('\'', "''"),
-            table.replace('\'', "''"),
-        );
+        let sql = mssql_foreign_keys_sql(database, schema, Some(table));
         let (_, rows) = self.run_select(&sql).await?;
-        let mut out = Vec::new();
-        for r in rows {
-            if r.len() < 7 {
-                continue;
-            }
-            let name = r[0].as_str().unwrap_or("").to_string();
-            let column = r[1].as_str().unwrap_or("").to_string();
-            let rschema = r[2].as_str().unwrap_or("dbo");
-            let rtable = r[3].as_str().unwrap_or("").to_string();
-            let rcol = r[4].as_str().unwrap_or("").to_string();
-            let referenced_table = format!("{}.{}", rschema, rtable);
-            let on_delete = r[5].as_str().unwrap_or("").to_string();
-            let on_update = r[6].as_str().unwrap_or("").to_string();
-            out.push(ForeignKeyInfo {
-                name,
-                column,
-                referenced_table,
-                referenced_column: rcol,
-                on_delete,
-                on_update,
-            });
-        }
-        Ok(out)
+        Ok(rows
+            .iter()
+            .filter_map(|r| mssql_foreign_key_from_row(r).map(|(_, fk)| fk))
+            .collect())
     }
 
     async fn list_functions(&self, database: &str, schema: &str) -> Result<Vec<FunctionInfo>> {

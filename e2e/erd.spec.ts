@@ -85,3 +85,63 @@ test.describe("ERD view", () => {
     expect(text).toMatch(/\d+%/);
   });
 });
+
+declare global {
+  interface Window {
+    __mockInvokeLog?: { cmd: string; args?: Record<string, any> }[];
+    __mockOverride?: (cmd: string, args?: Record<string, any>) => unknown;
+    __failSchemaGraph?: string;
+  }
+}
+
+test.describe("ERD view loading", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__mockInvokeLog = [];
+      window.__mockOverride = async (cmd) => {
+        if (cmd === "get_schema_graph" && window.__failSchemaGraph) throw window.__failSchemaGraph;
+        return undefined;
+      };
+    });
+    await page.goto("/");
+  });
+
+  const calls = (page: import("@playwright/test").Page, cmd: string) =>
+    page.evaluate((c) => (window.__mockInvokeLog ?? []).filter((x) => x.cmd === c).map((x) => x.args), cmd);
+
+  test("loads the whole schema with one get_schema_graph call", async ({ page }) => {
+    await openERD(page);
+    await page.locator(".erd-table-name").first().waitFor({ timeout: 8000 });
+
+    // One call per load (React StrictMode runs the load effect twice
+    // in dev), never two calls per table.
+    const graphCalls = await calls(page, "get_schema_graph");
+    expect(graphCalls.length).toBeGreaterThanOrEqual(1);
+    expect(graphCalls.length).toBeLessThanOrEqual(2);
+    for (const args of graphCalls) {
+      expect(args).toEqual(expect.objectContaining({ database: "postgres", schema: "public" }));
+    }
+    expect(await calls(page, "list_columns")).toEqual([]);
+    expect(await calls(page, "list_foreign_keys")).toEqual([]);
+
+    // Base tables only; views are left out.
+    const names = await page.locator(".erd-table-name").allTextContents();
+    expect(names).toContain("users");
+    expect(names).toContain("order_items");
+    expect(names).not.toContain("active_users_view");
+
+    await page.locator("button[title='Reload schema']").click();
+    await expect
+      .poll(async () => (await calls(page, "get_schema_graph")).length)
+      .toBeGreaterThan(graphCalls.length);
+    await page.locator(".erd-table-name").first().waitFor({ timeout: 8000 });
+  });
+
+  test("shows the backend error when loading fails", async ({ page }) => {
+    await page.evaluate(() => {
+      window.__failSchemaGraph = "permission denied for schema public";
+    });
+    await openERD(page);
+    await expect(page.locator(".erd-error")).toContainText("permission denied for schema public");
+  });
+});

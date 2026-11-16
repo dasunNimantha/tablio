@@ -52,7 +52,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "lts/*"
+          node-version-file: ".nvmrc"
           cache: "npm"
 
       - run: npm ci
@@ -985,7 +985,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "lts/*"
+          node-version-file: ".nvmrc"
           cache: "npm"
 
       - run: npm ci
@@ -1013,7 +1013,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "lts/*"
+          node-version-file: ".nvmrc"
           cache: "npm"
 
       - run: npm ci

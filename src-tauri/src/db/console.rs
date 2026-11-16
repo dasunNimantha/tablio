@@ -10,11 +10,58 @@
 use crate::models::QueryResult;
 use serde_json::Value;
 
-/// One result set: its column names and rows.
+/// Most rows a console result keeps. Larger results are counted but not
+/// kept: a million-row SELECT used to be held in full (~350 MB in the
+/// backend, ~80 MB of JSON for the webview).
+pub const MAX_CONSOLE_ROWS: usize = 50_000;
+
+/// One result set: its column names and (up to [`MAX_CONSOLE_ROWS`]) rows.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResultSet {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
+    /// Every row the server sent, including those not kept.
+    pub total_rows: u64,
+}
+
+impl ResultSet {
+    pub fn new(columns: Vec<String>) -> Self {
+        Self {
+            columns,
+            ..Default::default()
+        }
+    }
+
+    /// Count a row, and keep it (calling `values`) while under the cap.
+    /// Rows past the cap are never decoded.
+    pub fn push_row(&mut self, values: impl FnOnce() -> Vec<Value>) {
+        self.total_rows += 1;
+        if self.rows.len() < MAX_CONSOLE_ROWS {
+            self.rows.push(values());
+        }
+    }
+}
+
+/// Notice for a result cut at [`MAX_CONSOLE_ROWS`].
+pub fn truncated_notice(shown: usize, total: u64) -> String {
+    format!(
+        "Showing the first {} of {} rows. Add a LIMIT or filter to see others; exporting \
+         these results also exports only the rows shown.",
+        group_digits(shown as u64),
+        group_digits(total)
+    )
+}
+
+fn group_digits(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Shown when a script changed session state and its connection was
@@ -49,14 +96,20 @@ pub fn console_result(
         notices.push(multiple_result_sets_notice(sets.len()));
     }
     match sets.pop() {
-        Some(set) => QueryResult {
-            columns: set.columns,
-            rows: set.rows,
-            rows_affected,
-            execution_time_ms,
-            is_select: true,
-            notices,
-        },
+        Some(set) => {
+            let shown = set.rows.len();
+            if set.total_rows > shown as u64 {
+                notices.push(truncated_notice(shown, set.total_rows));
+            }
+            QueryResult {
+                columns: set.columns,
+                rows: set.rows,
+                rows_affected,
+                execution_time_ms,
+                is_select: true,
+                notices,
+            }
+        }
         None if select_like => QueryResult {
             columns: fallback_columns,
             execution_time_ms,
@@ -79,6 +132,7 @@ mod tests {
     fn set(cols: &[&str], rows: Vec<Vec<Value>>) -> ResultSet {
         ResultSet {
             columns: cols.iter().map(|c| c.to_string()).collect(),
+            total_rows: rows.len() as u64,
             rows,
         }
     }
@@ -132,5 +186,36 @@ mod tests {
         let r = console_result(vec![], false, vec![], 0, 0);
         let v = serde_json::to_value(&r).unwrap();
         assert!(v.get("notices").is_none());
+    }
+
+    #[test]
+    fn rows_past_the_cap_are_counted_but_not_kept_or_decoded() {
+        let mut set = ResultSet::new(vec!["n".into()]);
+        let mut decoded = 0;
+        for i in 0..(MAX_CONSOLE_ROWS + 25) {
+            set.push_row(|| {
+                decoded += 1;
+                vec![json!(i)]
+            });
+        }
+        assert_eq!(set.rows.len(), MAX_CONSOLE_ROWS);
+        assert_eq!(decoded, MAX_CONSOLE_ROWS);
+        assert_eq!(set.total_rows, (MAX_CONSOLE_ROWS + 25) as u64);
+        let r = console_result(vec![set], true, vec![], 0, 1);
+        assert_eq!(r.rows.len(), MAX_CONSOLE_ROWS);
+        assert_eq!(
+            r.notices,
+            vec![truncated_notice(
+                MAX_CONSOLE_ROWS,
+                (MAX_CONSOLE_ROWS + 25) as u64
+            )]
+        );
+        assert!(r.notices[0].starts_with("Showing the first 50,000 of 50,025 rows."));
+    }
+
+    #[test]
+    fn results_under_the_cap_have_no_notice() {
+        let r = console_result(vec![set(&["a"], vec![vec![json!(1)]])], true, vec![], 0, 1);
+        assert!(r.notices.is_empty());
     }
 }

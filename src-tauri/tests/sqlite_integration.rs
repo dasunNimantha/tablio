@@ -2681,3 +2681,69 @@ async fn sqlite_console_shows_returning_rows_and_empty_headers() {
     run.await;
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------------
+// Schema graph (ERD): the default, per-table implementation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sqlite_schema_graph_matches_per_table_listings() {
+    let (driver, path) = create_driver().await;
+    for sql in [
+        "CREATE TABLE parent (a INTEGER, b INTEGER, label VARCHAR(40), PRIMARY KEY (a, b))",
+        "CREATE TABLE child (id INTEGER PRIMARY KEY AUTOINCREMENT, a INTEGER, b INTEGER, \
+         up INTEGER REFERENCES child(id), \
+         FOREIGN KEY (a, b) REFERENCES parent(a, b) ON DELETE CASCADE)",
+        "CREATE VIEW child_view AS SELECT id, a FROM child",
+    ] {
+        driver.execute_query(DB, sql).await.unwrap();
+    }
+    let tables = driver.list_tables(DB, SCHEMA).await.unwrap();
+    assert!(tables.iter().any(|t| t.name == "child_view"));
+
+    let graph = driver.get_schema_graph(DB, SCHEMA).await.unwrap();
+    let names: Vec<&str> = graph.iter().map(|g| g.table.name.as_str()).collect();
+    assert!(names.contains(&"child") && names.contains(&"parent"));
+    assert!(!names.contains(&"child_view"));
+    let expected: Vec<&TableInfo> = tables
+        .iter()
+        .filter(|t| tablio_lib::db::is_schema_graph_table(t))
+        .collect();
+    assert_eq!(graph.iter().map(|g| &g.table).collect::<Vec<_>>(), expected);
+    for g in &graph {
+        let name = &g.table.name;
+        assert_eq!(
+            g.columns,
+            driver.list_columns(DB, SCHEMA, name).await.unwrap(),
+            "columns of {name}"
+        );
+        assert_eq!(
+            g.foreign_keys,
+            driver.list_foreign_keys(DB, SCHEMA, name).await.unwrap(),
+            "foreign keys of {name}"
+        );
+    }
+    let child = graph.iter().find(|g| g.table.name == "child").unwrap();
+    assert_eq!(child.foreign_keys.len(), 3);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn sqlite_console_result_is_capped_with_a_notice() {
+    use tablio_lib::db::console::MAX_CONSOLE_ROWS;
+    let (driver, path) = create_driver().await;
+    let r = driver
+        .execute_query(DB, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 60000) SELECT x FROM c")
+        .await
+        .unwrap();
+    assert_eq!(r.rows.len(), MAX_CONSOLE_ROWS);
+    assert!(
+        r.notices
+            .iter()
+            .any(|n| n.starts_with("Showing the first 50,000 of 60,000 rows.")),
+        "missing truncation notice: {:?}",
+        r.notices
+    );
+    let _ = std::fs::remove_file(&path);
+}

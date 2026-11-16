@@ -3509,3 +3509,21 @@ async fn mysql_console_shows_rows_of_call_and_empty_headers() {
         .unwrap();
     assert_eq!(r.columns, vec!["a", "b"]);
 }
+
+#[tokio::test]
+async fn mysql_console_result_is_capped_with_a_notice() {
+    use tablio_lib::db::console::MAX_CONSOLE_ROWS;
+    let (driver, db) = mysql_driver!();
+    let r = driver
+        .execute_query(&db, "SELECT 1 AS n FROM information_schema.columns a, information_schema.columns b LIMIT 60000")
+        .await
+        .unwrap();
+    assert_eq!(r.rows.len(), MAX_CONSOLE_ROWS);
+    assert!(
+        r.notices
+            .iter()
+            .any(|n| n.starts_with("Showing the first 50,000 of 60,000 rows.")),
+        "missing truncation notice: {:?}",
+        r.notices
+    );
+}

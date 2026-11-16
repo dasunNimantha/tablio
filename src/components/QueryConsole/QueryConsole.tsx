@@ -469,15 +469,11 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
       keybindings: [2048 | 1024 | 36],
       run: () => { formatRef.current(); },
     }));
-    layoutEditor();
-  }, []);
-
-  useEffect(() => {
-    const editor = editorRef.current;
-    const monaco = monacoRef.current;
-    if (!editor || !monaco) return;
-
-    const typeDisposable = editor.onDidType((text: string) => {
+    // Suggest on space; subscribed once and disposed with the editor
+    // (an effect without deps used to re-subscribe on every keystroke).
+    // onDidType exists on the editor but isn't in Monaco's public typings.
+    const typed = editor as unknown as { onDidType(cb: (text: string) => void): { dispose(): void } };
+    actions.push(typed.onDidType((text: string) => {
       if (text === " ") {
         const pos = editor.getPosition();
         const model = editor.getModel();
@@ -493,9 +489,9 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
         }
         editor.trigger("editor", "editor.action.triggerSuggest", null);
       }
-    });
+    }));
 
-    const contentDisposable = editor.onDidChangeModelContent((e: { isFlush: boolean; changes: { text: string }[] }) => {
+    actions.push(editor.onDidChangeModelContent((e: { isFlush: boolean; changes: { text: string }[] }) => {
       if (e.isFlush) return;
       for (const change of e.changes) {
         if (change.text.endsWith(" ") && change.text.length > 1) {
@@ -503,13 +499,9 @@ export function QueryConsole({ tabId, connectionId, database }: Props) {
           break;
         }
       }
-    });
-
-    return () => {
-      typeDisposable.dispose();
-      contentDisposable.dispose();
-    };
-  });
+    }));
+    layoutEditor();
+  }, []);
 
   const handleSqlChange = useCallback((v: string | undefined) => setSql(v || ""), []);
 

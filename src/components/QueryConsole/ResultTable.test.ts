@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseSimpleSelect } from "./ResultTable";
+import { parseSimpleSelect, ResultTable } from "./ResultTable";
 
 function computeEditCount(
   editingRows: unknown[][],
@@ -695,5 +695,11 @@ describe("ResultTable cell value formatter", () => {
 
   it("handles empty string", () => {
     expect(formatCellValue("")).toBe("");
+  });
+});
+
+describe("ResultTable", () => {
+  it("is memoised, so typing in the console doesn't re-render the result grid", () => {
+    expect((ResultTable as unknown as { $$typeof: symbol }).$$typeof).toBe(Symbol.for("react.memo"));
   });
 });
