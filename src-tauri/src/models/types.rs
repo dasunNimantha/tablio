@@ -104,7 +104,7 @@ impl ConnectionConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TableInfo {
     pub name: String,
     pub schema: String,
@@ -132,7 +132,7 @@ pub struct TableInfo {
     pub total_bytes: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,
@@ -324,7 +324,7 @@ pub struct IndexInfo {
     pub index_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ForeignKeyInfo {
     pub name: String,
     pub column: String,
@@ -332,6 +332,16 @@ pub struct ForeignKeyInfo {
     pub referenced_column: String,
     pub on_delete: String,
     pub on_update: String,
+}
+
+/// One table of a schema with its columns and outgoing foreign keys, as
+/// the ERD draws it. `columns` / `foreign_keys` equal what
+/// `list_columns` / `list_foreign_keys` return for `table`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TableGraph {
+    pub table: TableInfo,
+    pub columns: Vec<ColumnInfo>,
+    pub foreign_keys: Vec<ForeignKeyInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

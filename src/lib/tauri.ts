@@ -3,9 +3,10 @@ import * as mock from "./mockData";
 
 const isTauri = !!(window as any).__TAURI_INTERNALS__;
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  if (isTauri) return tauriInvoke<T>(cmd, args);
-  return mockInvoke<T>(cmd, args);
+async function invoke<T>(cmd: string, args?: Record<string, unknown> | Uint8Array): Promise<T> {
+  // A Uint8Array is sent as a raw IPC body (the mock ignores it).
+  if (isTauri) return tauriInvoke<T>(cmd, args as Parameters<typeof tauriInvoke>[1]);
+  return mockInvoke<T>(cmd, args instanceof Uint8Array ? undefined : args);
 }
 
 /** Message the backend's cancelled console runs reject with. */
@@ -133,6 +134,14 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       const table = (args?.table as string) || "";
       return mock.getTableForeignKeys(table) as T;
     }
+    case "get_schema_graph":
+      return mock.mockTables
+        .filter((t) => t.table_type === "BASE TABLE" || t.table_type === "TABLE")
+        .map((t) => ({
+          table: t,
+          columns: mock.getTableColumns(t.name),
+          foreign_keys: mock.getTableForeignKeys(t.name),
+        })) as T;
     case "drop_object":
       return undefined as T;
     case "truncate_table":
@@ -238,6 +247,7 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       return {
         sheet_names: ["Sheet1", "Other"],
         default_sheet: "Sheet1",
+        token: "mock-workbook",
         sheet: {
           name: "Sheet1",
           headers: ["id", "name", "active"],
@@ -487,6 +497,17 @@ export interface ForeignKeyInfo {
   on_update: string;
 }
 
+/**
+ * One base table of a schema with its columns and outgoing foreign keys
+ * (the ERD). `columns` / `foreign_keys` equal what `listColumns` /
+ * `listForeignKeys` return for the table.
+ */
+export interface TableGraph {
+  table: TableInfo;
+  columns: ColumnInfo[];
+  foreign_keys: ForeignKeyInfo[];
+}
+
 export interface ReferencingTableInfo {
   constraint_name: string;
   referencing_schema: string;
@@ -728,6 +749,8 @@ export interface XlsxWorkbookPreview {
   sheet_names: string[];
   default_sheet: string;
   sheet: XlsxSheetPreview;
+  /** Refers to the uploaded workbook in `parseXlsxSheet`. */
+  token: string;
 }
 
 /**
@@ -966,6 +989,17 @@ export const api = {
   ): Promise<ForeignKeyInfo[]> =>
     invoke("list_foreign_keys", { connectionId, database, schema, table }),
 
+  /**
+   * Every base table of a schema with its columns and foreign keys, in
+   * one call (instead of two calls per table).
+   */
+  getSchemaGraph: (
+    connectionId: string,
+    database: string,
+    schema: string
+  ): Promise<TableGraph[]> =>
+    invoke("get_schema_graph", { connectionId, database, schema }),
+
   listReferencedBy: (
     connectionId: string,
     database: string,
@@ -1054,11 +1088,12 @@ export const api = {
   // The backend deserializes Vec<u8> from a JS Array<number>. Tauri's
   // IPC bridge does the array-of-bytes round-trip transparently —
   // there's no need for a separate Buffer / base64 step.
+  // Sent as a raw IPC body: a JSON number array was ~3.5x the file size.
   parseXlsxWorkbook: (bytes: Uint8Array): Promise<XlsxWorkbookPreview> =>
-    invoke("parse_xlsx_workbook", { bytes: Array.from(bytes) }),
+    invoke("parse_xlsx_workbook", bytes),
 
-  parseXlsxSheet: (bytes: Uint8Array, sheetName: string): Promise<XlsxSheetPayload> =>
-    invoke("parse_xlsx_sheet", { bytes: Array.from(bytes), sheetName }),
+  parseXlsxSheet: (token: string, sheetName: string): Promise<XlsxSheetPayload> =>
+    invoke("parse_xlsx_sheet", { token, sheetName }),
 
   loadSavedQueries: (): Promise<SavedQuery[]> =>
     invoke("load_saved_queries"),

@@ -88,22 +88,19 @@ export function ERDView({ connectionId, database, schema }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const tables = await api.listTables(connectionId, database, schema);
+      // One call for the whole schema (base tables only): asking per
+      // table meant two backend queries per table, all at once.
+      const graph = await api.getSchemaGraph(connectionId, database, schema);
       if (gen !== loadGenRef.current) return;
-      const baseTables = tables.filter(
-        (t) => t.table_type === "BASE TABLE" || t.table_type === "TABLE",
+      setNodes(
+        layoutTables(
+          graph.map((g) => ({
+            table: g.table,
+            columns: g.columns,
+            foreignKeys: g.foreign_keys,
+          })),
+        ),
       );
-      const details = await Promise.all(
-        baseTables.map(async (t) => {
-          const [columns, foreignKeys] = await Promise.all([
-            api.listColumns(connectionId, database, schema, t.name),
-            api.listForeignKeys(connectionId, database, schema, t.name),
-          ]);
-          return { table: t, columns, foreignKeys };
-        }),
-      );
-      if (gen !== loadGenRef.current) return;
-      setNodes(layoutTables(details));
     } catch (e) {
       if (gen !== loadGenRef.current) return;
       setError(String(e));

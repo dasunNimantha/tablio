@@ -1,3 +1,4 @@
+use futures_util::FutureExt;
 use tablio_lib::db::postgres::PostgresDriver;
 use tablio_lib::db::DatabaseDriver;
 use tablio_lib::models::*;
@@ -4440,6 +4441,448 @@ async fn sessions_on_any(driver: &PostgresDriver, db: &str) -> i64 {
         .as_i64()
         .or_else(|| r.rows[0][0].as_str().and_then(|s| s.parse().ok()))
         .unwrap()
+}
+
+// ===========================================================================
+// Schema graph (ERD) and the catalog-based column / foreign-key listings
+// ===========================================================================
+
+/// `list_columns` as it was implemented on `information_schema` before
+/// the catalog query replaced it; the new one must return the same.
+async fn legacy_pg_list_columns(pool: &sqlx::PgPool, schema: &str, table: &str) -> Vec<ColumnInfo> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, c.ordinal_position, \
+                c.is_identity, c.identity_generation, c.is_generated, \
+                c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
+                CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_pk \
+         FROM information_schema.columns c \
+         LEFT JOIN ( \
+             SELECT ku.column_name \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage ku \
+                 ON tc.constraint_name = ku.constraint_name \
+                 AND tc.table_schema = ku.table_schema \
+             WHERE tc.constraint_type = 'PRIMARY KEY' \
+               AND tc.table_schema = $1 AND tc.table_name = $2 \
+         ) pk ON pk.column_name = c.column_name \
+         WHERE c.table_schema = $1 AND c.table_name = $2 \
+         ORDER BY c.ordinal_position",
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    rows.iter()
+        .map(|r| {
+            let nullable_str: String = r.get("is_nullable");
+            let default_val: Option<String> = r.try_get("column_default").ok();
+            let is_identity: String = r.get("is_identity");
+            let is_generated: String = r.get("is_generated");
+            let has_serial_default = default_val
+                .as_deref()
+                .map(|d| d.starts_with("nextval("))
+                .unwrap_or(false);
+            let raw_type: String = r.get("data_type");
+            let char_max_len: Option<i32> = r.try_get("character_maximum_length").ok().flatten();
+            let num_precision: Option<i32> = r.try_get("numeric_precision").ok().flatten();
+            let num_scale: Option<i32> = r.try_get("numeric_scale").ok().flatten();
+            let data_type = if let Some(len) = char_max_len {
+                format!("{}({})", raw_type, len)
+            } else if raw_type == "numeric" || raw_type == "decimal" {
+                match (num_precision, num_scale) {
+                    (Some(p), Some(s)) if s > 0 => format!("{}({},{})", raw_type, p, s),
+                    (Some(p), _) => format!("{}({})", raw_type, p),
+                    _ => raw_type,
+                }
+            } else {
+                raw_type
+            };
+            ColumnInfo {
+                name: r.get("column_name"),
+                data_type,
+                is_nullable: nullable_str == "YES",
+                is_primary_key: r.get("is_pk"),
+                default_value: default_val,
+                ordinal_position: r.get::<i32, _>("ordinal_position"),
+                is_auto_generated: is_identity == "YES"
+                    || is_generated == "ALWAYS"
+                    || has_serial_default,
+            }
+        })
+        .collect()
+}
+
+/// `list_foreign_keys` as it was implemented on `information_schema`.
+/// It pairs every column of a composite key with every referenced
+/// column, so it is only a reference for single-column keys.
+async fn legacy_pg_list_foreign_keys(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    table: &str,
+) -> Vec<ForeignKeyInfo> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT tc.constraint_name, kcu.column_name, \
+         ccu.table_name AS foreign_table, ccu.column_name AS foreign_column, \
+         rc.delete_rule, rc.update_rule \
+         FROM information_schema.table_constraints tc \
+         JOIN information_schema.key_column_usage kcu \
+             ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema \
+         JOIN information_schema.constraint_column_usage ccu \
+             ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema \
+         JOIN information_schema.referential_constraints rc \
+             ON rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.table_schema \
+         WHERE tc.constraint_type = 'FOREIGN KEY' \
+             AND tc.table_schema = $1 AND tc.table_name = $2 \
+         ORDER BY tc.constraint_name, kcu.ordinal_position",
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    rows.iter()
+        .map(|r| ForeignKeyInfo {
+            name: r.get("constraint_name"),
+            column: r.get("column_name"),
+            referenced_table: r.get("foreign_table"),
+            referenced_column: r.get("foreign_column"),
+            on_delete: r.get("delete_rule"),
+            on_update: r.get("update_rule"),
+        })
+        .collect()
+}
+
+fn fk(
+    name: &str,
+    column: &str,
+    table: &str,
+    ref_col: &str,
+    del: &str,
+    upd: &str,
+) -> ForeignKeyInfo {
+    ForeignKeyInfo {
+        name: name.into(),
+        column: column.into(),
+        referenced_table: table.into(),
+        referenced_column: ref_col.into(),
+        on_delete: del.into(),
+        on_update: upd.into(),
+    }
+}
+
+/// A schema exercising what the column / FK listings format: composite
+/// PK, single, composite and self-referencing FKs, identity / serial /
+/// generated columns, typed lengths, domains, enums, arrays, a dropped
+/// column (ordinal gap), a partitioned table referenced by a FK, odd
+/// names, and a view the ERD must leave out.
+const PG_GRAPH_DDL: &str = r#"
+    CREATE TYPE {s}.mood AS ENUM ('ok', 'meh');
+    CREATE DOMAIN {s}.short_code AS varchar(6) NOT NULL DEFAULT 'abc';
+    CREATE TABLE {s}.parent (
+        a int, b int, label varchar(40) NOT NULL, code char(3),
+        PRIMARY KEY (a, b)
+    );
+    CREATE TABLE {s}.ref_one (
+        id serial PRIMARY KEY,
+        amount numeric(10,2), whole numeric(8), plain numeric,
+        bits bit varying(5), m {s}.mood, sc {s}.short_code,
+        tags text[], created timestamptz DEFAULT now(),
+        dropme int, kept int DEFAULT 7
+    );
+    ALTER TABLE {s}.ref_one DROP COLUMN dropme;
+    CREATE TABLE {s}.child (
+        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        id2 int GENERATED BY DEFAULT AS IDENTITY,
+        a int, b int,
+        one_id int REFERENCES {s}.ref_one(id) ON DELETE CASCADE,
+        total int GENERATED ALWAYS AS (coalesce(a, 0) + coalesce(b, 0)) STORED,
+        up_id bigint,
+        note text DEFAULT 'x''y',
+        CONSTRAINT child_parent_fk FOREIGN KEY (a, b) REFERENCES {s}.parent(a, b) ON UPDATE CASCADE,
+        CONSTRAINT child_up_fk FOREIGN KEY (up_id) REFERENCES {s}.child(id) ON DELETE SET NULL
+    );
+    CREATE TABLE {s}."Mixed Case" ("Id" int PRIMARY KEY, "Child Id" bigint REFERENCES {s}.child(id));
+    CREATE TABLE {s}.events (id int, at date NOT NULL, PRIMARY KEY (id, at)) PARTITION BY RANGE (at);
+    CREATE TABLE {s}.events_2026 PARTITION OF {s}.events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+    CREATE TABLE {s}.events_2027 PARTITION OF {s}.events FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');
+    CREATE TABLE {s}.event_note (id int PRIMARY KEY, ev_id int, ev_at date,
+        FOREIGN KEY (ev_id, ev_at) REFERENCES {s}.events(id, at));
+    CREATE TABLE {s}.empty_table ();
+    CREATE VIEW {s}.child_view AS SELECT id, a, b FROM {s}.child;
+"#;
+
+async fn pg_test_pool() -> sqlx::PgPool {
+    let url = std::env::var("TEST_POSTGRES_URL").unwrap();
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn pg_schema_graph_matches_per_table_listings() {
+    let driver = pg_driver!();
+    let schema = unique_table("erdperf_graph");
+    driver
+        .execute_query(
+            DB,
+            &format!(
+                "CREATE SCHEMA {schema}; {}",
+                PG_GRAPH_DDL.replace("{s}", &schema)
+            ),
+        )
+        .await
+        .unwrap();
+    let pool = pg_test_pool().await;
+
+    let result = std::panic::AssertUnwindSafe(async {
+        let tables = driver.list_tables(DB, &schema).await.unwrap();
+        let graph = driver.get_schema_graph(DB, &schema).await.unwrap();
+
+        // Base tables only, in list_tables order, with the same TableInfo.
+        let expected: Vec<&TableInfo> = tables
+            .iter()
+            .filter(|t| t.table_type == "BASE TABLE")
+            .collect();
+        let got: Vec<&TableInfo> = graph.iter().map(|g| &g.table).collect();
+        assert_eq!(got, expected);
+        assert!(!graph.iter().any(|g| g.table.name == "child_view"));
+        assert!(graph.iter().any(|g| g.table.name == "events_2026"));
+
+        for g in &graph {
+            let name = &g.table.name;
+            let cols = driver.list_columns(DB, &schema, name).await.unwrap();
+            let fks = driver.list_foreign_keys(DB, &schema, name).await.unwrap();
+            assert_eq!(g.columns, cols, "columns of {name}");
+            assert_eq!(g.foreign_keys, fks, "foreign keys of {name}");
+        }
+
+        // The catalog-based list_columns returns what the
+        // information_schema query did, for tables and the view.
+        for t in &tables {
+            let name = &t.name;
+            let cols = driver.list_columns(DB, &schema, name).await.unwrap();
+            assert_eq!(
+                cols,
+                legacy_pg_list_columns(&pool, &schema, name).await,
+                "list_columns of {name}"
+            );
+        }
+
+        // Single-column FKs match the information_schema query too.
+        for name in ["child", "Mixed Case"] {
+            let fks = driver.list_foreign_keys(DB, &schema, name).await.unwrap();
+            let legacy = legacy_pg_list_foreign_keys(&pool, &schema, name).await;
+            let single: Vec<_> = fks
+                .iter()
+                .filter(|f| f.name != "child_parent_fk")
+                .cloned()
+                .collect();
+            let legacy_single: Vec<_> = legacy
+                .into_iter()
+                .filter(|f| f.name != "child_parent_fk")
+                .collect();
+            assert_eq!(single, legacy_single, "single-column FKs of {name}");
+        }
+
+        let by_name = |n: &str| graph.iter().find(|g| g.table.name == n).unwrap();
+        let child = by_name("child");
+        assert_eq!(
+            child.foreign_keys,
+            vec![
+                fk(
+                    "child_one_id_fkey",
+                    "one_id",
+                    "ref_one",
+                    "id",
+                    "CASCADE",
+                    "NO ACTION"
+                ),
+                fk(
+                    "child_parent_fk",
+                    "a",
+                    "parent",
+                    "a",
+                    "NO ACTION",
+                    "CASCADE"
+                ),
+                fk(
+                    "child_parent_fk",
+                    "b",
+                    "parent",
+                    "b",
+                    "NO ACTION",
+                    "CASCADE"
+                ),
+                fk(
+                    "child_up_fk",
+                    "up_id",
+                    "child",
+                    "id",
+                    "SET NULL",
+                    "NO ACTION"
+                ),
+            ]
+        );
+        // One row per column pair, not one per referenced partition.
+        assert_eq!(
+            by_name("event_note").foreign_keys,
+            vec![
+                fk(
+                    &by_name("event_note").foreign_keys[0].name,
+                    "ev_id",
+                    "events",
+                    "id",
+                    "NO ACTION",
+                    "NO ACTION"
+                ),
+                fk(
+                    &by_name("event_note").foreign_keys[0].name,
+                    "ev_at",
+                    "events",
+                    "at",
+                    "NO ACTION",
+                    "NO ACTION"
+                ),
+            ]
+        );
+
+        let col = |t: &str, c: &str| {
+            by_name(t)
+                .columns
+                .iter()
+                .find(|x| x.name == c)
+                .unwrap_or_else(|| panic!("{t}.{c}"))
+                .clone()
+        };
+        let parent_pk: Vec<_> = by_name("parent")
+            .columns
+            .iter()
+            .filter(|c| c.is_primary_key)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(parent_pk, ["a", "b"]);
+        assert_eq!(col("parent", "label").data_type, "character varying(40)");
+        assert_eq!(col("ref_one", "amount").data_type, "numeric(10,2)");
+        assert_eq!(col("ref_one", "whole").data_type, "numeric(8)");
+        assert!(col("ref_one", "id").is_auto_generated);
+        assert_eq!(col("ref_one", "kept").ordinal_position, 11);
+        assert!(col("child", "id").is_auto_generated);
+        assert!(col("child", "id2").is_auto_generated);
+        assert!(col("child", "total").is_auto_generated);
+        assert_eq!(col("child", "total").default_value, None);
+        assert!(!col("child", "a").is_auto_generated);
+        assert!(by_name("empty_table").columns.is_empty());
+    })
+    .catch_unwind()
+    .await;
+
+    driver
+        .execute_query(DB, &format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+    pool.close().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Times `get_schema_graph` on a 2,000-table schema. Run with
+/// `--release -- --ignored pg_schema_graph_timing --nocapture`.
+#[tokio::test]
+#[ignore]
+async fn pg_schema_graph_timing() {
+    let driver = pg_driver!();
+    let n: usize = std::env::var("ERDPERF_TABLES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let schema = "erdperf_timing";
+    let mut ddl = format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};");
+    for i in 0..n {
+        let fk = if i > 0 {
+            format!(", parent_id int REFERENCES {schema}.t{} (id)", i - 1)
+        } else {
+            String::new()
+        };
+        ddl.push_str(&format!(
+            "CREATE TABLE {schema}.t{i} (id serial PRIMARY KEY, name varchar(50) NOT NULL, \
+             amount numeric(10,2), created timestamptz DEFAULT now(){fk});"
+        ));
+    }
+    driver.execute_query(DB, &ddl).await.unwrap();
+
+    let start = std::time::Instant::now();
+    let graph = driver.get_schema_graph(DB, schema).await.unwrap();
+    let first = start.elapsed();
+    assert_eq!(graph.len(), n);
+    let start = std::time::Instant::now();
+    driver.get_schema_graph(DB, schema).await.unwrap();
+    let bulk = start.elapsed();
+    let start = std::time::Instant::now();
+    driver.list_tables(DB, schema).await.unwrap();
+    let list_tables = start.elapsed();
+
+    let start = std::time::Instant::now();
+    let tables = driver.list_tables(DB, schema).await.unwrap();
+    let per_table = tablio_lib::db::schema_graph_per_table(&driver, DB, schema, tables)
+        .await
+        .unwrap();
+    let bounded = start.elapsed();
+    assert_eq!(per_table, graph);
+
+    let start = std::time::Instant::now();
+    for t in graph.iter().take(50) {
+        driver
+            .list_columns(DB, schema, &t.table.name)
+            .await
+            .unwrap();
+    }
+    let cols_each = start.elapsed() / 50;
+    let pool = pg_test_pool().await;
+    let start = std::time::Instant::now();
+    for t in graph.iter().take(50) {
+        legacy_pg_list_columns(&pool, schema, &t.table.name).await;
+    }
+    let legacy_cols_each = start.elapsed() / 50;
+    let start = std::time::Instant::now();
+    for t in graph.iter().take(50) {
+        legacy_pg_list_foreign_keys(&pool, schema, &t.table.name).await;
+    }
+    let legacy_fks_each = start.elapsed() / 50;
+    let start = std::time::Instant::now();
+    for t in graph.iter().take(50) {
+        driver
+            .list_foreign_keys(DB, schema, &t.table.name)
+            .await
+            .unwrap();
+    }
+    let fks_each = start.elapsed() / 50;
+    pool.close().await;
+    eprintln!(
+        "postgres {n} tables: get_schema_graph {bulk:?} (first call {first:?}; \
+         list_tables alone {list_tables:?}); per-table (8 at a time) {bounded:?}; \
+         list_columns {cols_each:?} each (information_schema: {legacy_cols_each:?}); \
+         list_foreign_keys {fks_each:?} each (information_schema: {legacy_fks_each:?})"
+    );
+
+    // One DROP SCHEMA ... CASCADE over thousands of tables runs out of
+    // lock slots; drop the tables in batches first.
+    for chunk in (0..n).rev().collect::<Vec<_>>().chunks(100) {
+        let sql: String = chunk
+            .iter()
+            .map(|i| format!("DROP TABLE {schema}.t{i} CASCADE;"))
+            .collect();
+        driver.execute_query(DB, &sql).await.unwrap();
+    }
+    driver
+        .execute_query(DB, &format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

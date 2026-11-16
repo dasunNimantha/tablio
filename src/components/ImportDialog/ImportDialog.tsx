@@ -98,7 +98,7 @@ export function ImportDialog({
   const [sourceData, setSourceData] = useState<ParsedSheet | null>(null);
   // Cache the workbook bytes so the user can flip between sheets
   // without re-reading the file from disk.
-  const [workbookBytes, setWorkbookBytes] = useState<Uint8Array | null>(null);
+  const [workbookToken, setWorkbookToken] = useState<string | null>(null);
   const [workbook, setWorkbook] = useState<XlsxWorkbookPreview | null>(null);
   const [activeSheet, setActiveSheet] = useState<string | null>(null);
   const [parsing, setParsing] = useState(false);
@@ -175,7 +175,7 @@ export function ImportDialog({
 
   const resetSourceState = () => {
     setSourceData(null);
-    setWorkbookBytes(null);
+    setWorkbookToken(null);
     setWorkbook(null);
     setActiveSheet(null);
     setParseError(null);
@@ -242,11 +242,11 @@ export function ImportDialog({
         applyCsv(text, delimiter);
       } else {
         const buf = new Uint8Array(await file.arrayBuffer());
-        setWorkbookBytes(buf);
         const preview = await api.parseXlsxWorkbook(buf);
+        setWorkbookToken(preview.token);
         setWorkbook(preview);
         setActiveSheet(preview.default_sheet);
-        await loadXlsxSheet(buf, preview.default_sheet);
+        await loadXlsxSheet(preview.token, preview.default_sheet);
       }
     } catch (err) {
       setParseError(err instanceof Error ? err.message : String(err));
@@ -258,8 +258,8 @@ export function ImportDialog({
   // Fetch the full payload for a sheet (headers + rows + inferred
   // types) and seed the column mapping. Used both for the initial
   // load and any sheet-picker change.
-  const loadXlsxSheet = async (buf: Uint8Array, sheetName: string) => {
-    const payload = await api.parseXlsxSheet(buf, sheetName);
+  const loadXlsxSheet = async (token: string, sheetName: string) => {
+    const payload = await api.parseXlsxSheet(token, sheetName);
     // Blank / repeated header cells would collide as mapping keys.
     const headers = normalizeHeaders(payload.headers);
     setSourceData({
@@ -274,12 +274,12 @@ export function ImportDialog({
   };
 
   const handleSheetChange = async (sheetName: string) => {
-    if (!workbookBytes) return;
+    if (!workbookToken) return;
     setActiveSheet(sheetName);
     setParsing(true);
     setParseError(null);
     try {
-      await loadXlsxSheet(workbookBytes, sheetName);
+      await loadXlsxSheet(workbookToken, sheetName);
     } catch (err) {
       setParseError(String(err));
     } finally {

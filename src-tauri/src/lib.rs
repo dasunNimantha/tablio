@@ -39,6 +39,7 @@ pub fn run() {
             list_schemas,
             list_tables,
             list_columns,
+            get_schema_graph,
             list_indexes,
             list_foreign_keys,
             list_referenced_by,

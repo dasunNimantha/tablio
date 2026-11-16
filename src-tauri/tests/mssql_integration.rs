@@ -1,3 +1,4 @@
+use futures_util::FutureExt;
 use tablio_lib::db::mssql::MssqlDriver;
 use tablio_lib::db::DatabaseDriver;
 use tablio_lib::models::*;
@@ -3599,6 +3600,352 @@ async fn mssql_console_query_longer_than_30s_keeps_the_connection() {
         .expect("long query must not hit a client-side timeout");
     assert_eq!(as_i64(&r.rows[0][0]), Some(1));
     driver.execute_query(&db, "SELECT 1").await.unwrap();
+}
+
+// ===========================================================================
+// Schema graph (ERD) and the catalog-based column listing
+// ===========================================================================
+
+/// `list_columns` as it was implemented on `INFORMATION_SCHEMA.COLUMNS`
+/// plus a separate primary-key query; the catalog query that replaced
+/// it must return the same.
+async fn legacy_mssql_list_columns(
+    driver: &MssqlDriver,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Vec<ColumnInfo> {
+    let q = |s: &str| s.replace('\'', "''");
+    let b = |s: &str| format!("[{}]", s.replace(']', "]]"));
+    let pk_sql = format!(
+        "SELECT c.name
+         FROM {db}.sys.indexes i
+         INNER JOIN {db}.sys.index_columns ic
+           ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+         INNER JOIN {db}.sys.columns c
+           ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+         INNER JOIN {db}.sys.tables t ON i.object_id = t.object_id
+         INNER JOIN {db}.sys.schemas s ON t.schema_id = s.schema_id
+         WHERE i.is_primary_key = 1 AND t.name = N'{}' AND s.name = N'{}'
+         ORDER BY ic.key_ordinal",
+        q(table),
+        q(schema),
+        db = b(database),
+    );
+    let pk: std::collections::HashSet<String> = driver
+        .execute_query(database, &pk_sql)
+        .await
+        .unwrap()
+        .rows
+        .into_iter()
+        .filter_map(|r| r[0].as_str().map(str::to_string))
+        .collect();
+    let sql = format!(
+        "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, ORDINAL_POSITION,
+                COLUMNPROPERTY(
+                  OBJECT_ID(QUOTENAME(N'{}') + N'.' + QUOTENAME(TABLE_SCHEMA) + N'.' + QUOTENAME(TABLE_NAME)),
+                  COLUMN_NAME,
+                  N'IsIdentity'
+                ) AS is_identity
+         FROM {}.INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = N'{}' AND TABLE_NAME = N'{}'
+         ORDER BY ORDINAL_POSITION",
+        q(database),
+        b(database),
+        q(schema),
+        q(table),
+    );
+    let rows = driver.execute_query(database, &sql).await.unwrap().rows;
+    rows.into_iter()
+        .map(|r| {
+            let name = r[0].as_str().unwrap().to_string();
+            ColumnInfo {
+                is_primary_key: pk.contains(&name),
+                name,
+                data_type: r[1].as_str().unwrap_or_default().to_string(),
+                is_nullable: matches!(&r[2], serde_json::Value::String(s) if s.eq_ignore_ascii_case("YES")),
+                default_value: r[3].as_str().map(str::to_string),
+                ordinal_position: r[4].as_i64().unwrap_or(0) as i32,
+                is_auto_generated: r[5].as_i64() == Some(1),
+            }
+        })
+        .collect()
+}
+
+fn mssql_fk(
+    name: &str,
+    column: &str,
+    table: &str,
+    ref_col: &str,
+    del: &str,
+    upd: &str,
+) -> ForeignKeyInfo {
+    ForeignKeyInfo {
+        name: name.into(),
+        column: column.into(),
+        referenced_table: table.into(),
+        referenced_column: ref_col.into(),
+        on_delete: del.into(),
+        on_update: upd.into(),
+    }
+}
+
+#[tokio::test]
+async fn mssql_schema_graph_matches_per_table_listings() {
+    let (driver, db) = mssql_driver!();
+    let s = unique_table("erdperf_graph");
+    let s2 = format!("{s}_b");
+    let setup = [
+        format!("CREATE SCHEMA [{s}]"),
+        format!("CREATE SCHEMA [{s2}]"),
+        format!("CREATE TYPE [{s}].ssn FROM varchar(11) NOT NULL"),
+        format!("CREATE DEFAULT [{s}].answer AS 42"),
+        format!("CREATE TABLE [{s2}].other (id int PRIMARY KEY)"),
+        format!(
+            "CREATE TABLE [{s}].parent (a int, b int, label nvarchar(40) NOT NULL, \
+             code char(3), amount decimal(10,2), PRIMARY KEY (a, b))"
+        ),
+        format!(
+            "CREATE TABLE [{s}].ref_one (id int IDENTITY(1,1) PRIMARY KEY, dropme int, \
+             kept int DEFAULT 7, created datetime2 DEFAULT SYSUTCDATETIME(), \
+             g geography NULL, h hierarchyid NULL, nm sysname NULL, ssn [{s}].ssn, \
+             bound int NULL, other_id int REFERENCES [{s2}].other(id))"
+        ),
+        format!("ALTER TABLE [{s}].ref_one DROP COLUMN dropme"),
+        format!("EXEC sp_bindefault N'[{s}].answer', N'[{s}].ref_one.bound'"),
+        format!(
+            "CREATE TABLE [{s}].child (id bigint IDENTITY PRIMARY KEY, a int, b int, \
+             one_id int REFERENCES [{s}].ref_one(id) ON DELETE CASCADE, \
+             total AS (a + b) PERSISTED, up_id bigint, note nvarchar(max) DEFAULT N'x''y', \
+             CONSTRAINT child_parent_fk FOREIGN KEY (a, b) REFERENCES [{s}].parent(a, b) \
+               ON UPDATE CASCADE, \
+             CONSTRAINT child_up_fk FOREIGN KEY (up_id) REFERENCES [{s}].child(id))"
+        ),
+        format!(
+            "CREATE TABLE [{s}].[Mixed Case] ([Id] int PRIMARY KEY, \
+             [Child Id] bigint REFERENCES [{s}].child(id))"
+        ),
+        format!("CREATE VIEW [{s}].child_view AS SELECT id, a, b FROM [{s}].child"),
+    ];
+    for sql in &setup {
+        driver.execute_query(&db, sql).await.unwrap();
+    }
+
+    let result = std::panic::AssertUnwindSafe(async {
+        // Run the new queries from another database: they must not
+        // depend on the session's current one.
+        driver.execute_query("master", "SELECT 1").await.unwrap();
+        let tables = driver.list_tables(&db, &s).await.unwrap();
+        let graph = driver.get_schema_graph(&db, &s).await.unwrap();
+        let got: Vec<&TableInfo> = graph.iter().map(|g| &g.table).collect();
+        assert_eq!(got, tables.iter().collect::<Vec<_>>());
+        let names: Vec<&str> = graph.iter().map(|g| g.table.name.as_str()).collect();
+        assert_eq!(names, ["child", "Mixed Case", "parent", "ref_one"]);
+
+        let mut per_table = Vec::new();
+        for g in &graph {
+            let name = &g.table.name;
+            let cols = driver.list_columns(&db, &s, name).await.unwrap();
+            let fks = driver.list_foreign_keys(&db, &s, name).await.unwrap();
+            assert_eq!(g.columns, cols, "columns of {name}");
+            assert_eq!(g.foreign_keys, fks, "foreign keys of {name}");
+            per_table.push(cols);
+        }
+        let view_cols = driver.list_columns(&db, &s, "child_view").await.unwrap();
+
+        for (g, cols) in graph.iter().zip(&per_table) {
+            let name = &g.table.name;
+            assert_eq!(
+                cols,
+                &legacy_mssql_list_columns(&driver, &db, &s, name).await,
+                "list_columns of {name}"
+            );
+        }
+        assert_eq!(
+            view_cols,
+            legacy_mssql_list_columns(&driver, &db, &s, "child_view").await
+        );
+
+        let by_name = |n: &str| graph.iter().find(|g| g.table.name == n).unwrap();
+        let child = by_name("child");
+        let one_fk = child
+            .foreign_keys
+            .iter()
+            .find(|f| f.column == "one_id")
+            .unwrap()
+            .name
+            .clone();
+        let mut expected = vec![
+            mssql_fk(
+                "child_parent_fk",
+                "a",
+                &format!("{s}.parent"),
+                "a",
+                "NO_ACTION",
+                "CASCADE",
+            ),
+            mssql_fk(
+                "child_parent_fk",
+                "b",
+                &format!("{s}.parent"),
+                "b",
+                "NO_ACTION",
+                "CASCADE",
+            ),
+            mssql_fk(
+                "child_up_fk",
+                "up_id",
+                &format!("{s}.child"),
+                "id",
+                "NO_ACTION",
+                "NO_ACTION",
+            ),
+            mssql_fk(
+                &one_fk,
+                "one_id",
+                &format!("{s}.ref_one"),
+                "id",
+                "CASCADE",
+                "NO_ACTION",
+            ),
+        ];
+        // The default collation orders names case-insensitively.
+        expected.sort_by_key(|f| f.name.to_lowercase());
+        assert_eq!(child.foreign_keys, expected);
+        assert_eq!(
+            by_name("ref_one").foreign_keys[0].referenced_table,
+            format!("{s2}.other")
+        );
+
+        let col = |t: &str, c: &str| {
+            by_name(t)
+                .columns
+                .iter()
+                .find(|x| x.name == c)
+                .unwrap_or_else(|| panic!("{t}.{c}"))
+                .clone()
+        };
+        let parent_pk: Vec<_> = by_name("parent")
+            .columns
+            .iter()
+            .filter(|c| c.is_primary_key)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(parent_pk, ["a", "b"]);
+        assert!(col("ref_one", "id").is_auto_generated);
+        assert_eq!(col("ref_one", "kept").ordinal_position, 2);
+        assert_eq!(col("ref_one", "g").data_type, "geography");
+        assert_eq!(col("ref_one", "nm").data_type, "nvarchar");
+        assert_eq!(col("ref_one", "ssn").data_type, "varchar");
+        // A bound stand-alone default reports its whole definition, as
+        // INFORMATION_SCHEMA did.
+        assert_eq!(
+            col("ref_one", "bound").default_value,
+            Some(format!("CREATE DEFAULT [{s}].answer AS 42"))
+        );
+        assert_eq!(
+            col("child", "note").default_value.as_deref(),
+            Some("(N'x''y')")
+        );
+        assert!(col("child", "id").is_auto_generated);
+    })
+    .catch_unwind()
+    .await;
+
+    driver.execute_query(&db, "SELECT 1").await.unwrap();
+    let teardown = [
+        format!("DROP VIEW [{s}].child_view"),
+        format!("DROP TABLE [{s}].[Mixed Case]"),
+        format!("DROP TABLE [{s}].child"),
+        format!("EXEC sp_unbindefault N'[{s}].ref_one.bound'"),
+        format!("DROP TABLE [{s}].ref_one"),
+        format!("DROP TABLE [{s}].parent"),
+        format!("DROP TABLE [{s2}].other"),
+        format!("DROP DEFAULT [{s}].answer"),
+        format!("DROP TYPE [{s}].ssn"),
+        format!("DROP SCHEMA [{s}]"),
+        format!("DROP SCHEMA [{s2}]"),
+    ];
+    for sql in &teardown {
+        driver.execute_query(&db, sql).await.unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Times `get_schema_graph` on a 2,000-table schema. Run with
+/// `--release -- --ignored mssql_schema_graph_timing --nocapture`.
+#[tokio::test]
+#[ignore]
+async fn mssql_schema_graph_timing() {
+    let (driver, db) = mssql_driver!();
+    let n: usize = std::env::var("ERDPERF_TABLES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let s = "erdperf_timing";
+    let drop_all = format!(
+        "DECLARE @sql nvarchar(max) = N'';
+         SELECT @sql += N'ALTER TABLE [{s}].' + QUOTENAME(OBJECT_NAME(parent_object_id)) +
+                N' DROP CONSTRAINT ' + QUOTENAME(name) + N';'
+         FROM sys.foreign_keys WHERE SCHEMA_NAME(schema_id) = N'{s}';
+         EXEC sp_executesql @sql;
+         SET @sql = N'';
+         SELECT @sql += N'DROP TABLE [{s}].' + QUOTENAME(name) + N';'
+         FROM sys.tables WHERE SCHEMA_NAME(schema_id) = N'{s}';
+         EXEC sp_executesql @sql;
+         IF SCHEMA_ID(N'{s}') IS NOT NULL EXEC(N'DROP SCHEMA [{s}]');"
+    );
+    driver.execute_query(&db, &drop_all).await.unwrap();
+    driver
+        .execute_query(&db, &format!("CREATE SCHEMA [{s}]"))
+        .await
+        .unwrap();
+    for chunk in (0..n).collect::<Vec<_>>().chunks(200) {
+        let mut ddl = String::new();
+        for &i in chunk {
+            let fk = if i > 0 {
+                format!(", parent_id int REFERENCES [{s}].t{} (id)", i - 1)
+            } else {
+                String::new()
+            };
+            ddl.push_str(&format!(
+                "CREATE TABLE [{s}].t{i} (id int IDENTITY PRIMARY KEY, name nvarchar(50) NOT NULL, \
+                 amount decimal(10,2), created datetime2 DEFAULT SYSUTCDATETIME(){fk});"
+            ));
+        }
+        driver.execute_query(&db, &ddl).await.unwrap();
+    }
+
+    let start = std::time::Instant::now();
+    let graph = driver.get_schema_graph(&db, s).await.unwrap();
+    let bulk = start.elapsed();
+    assert_eq!(graph.len(), n);
+
+    let start = std::time::Instant::now();
+    for t in graph.iter().take(50) {
+        driver.list_columns(&db, s, &t.table.name).await.unwrap();
+    }
+    let cols_each = start.elapsed() / 50;
+    let start = std::time::Instant::now();
+    for t in graph.iter().take(50) {
+        legacy_mssql_list_columns(&driver, &db, s, &t.table.name).await;
+    }
+    let legacy_cols_each = start.elapsed() / 50;
+    let start = std::time::Instant::now();
+    let tables = driver.list_tables(&db, s).await.unwrap();
+    let per_table = tablio_lib::db::schema_graph_per_table(&driver, &db, s, tables)
+        .await
+        .unwrap();
+    let bounded = start.elapsed();
+    assert_eq!(per_table, graph);
+    eprintln!(
+        "mssql {n} tables: get_schema_graph {bulk:?}; per-table (8 at a time) {bounded:?}; \
+         list_columns {cols_each:?} each (INFORMATION_SCHEMA: {legacy_cols_each:?})"
+    );
+
+    driver.execute_query(&db, &drop_all).await.unwrap();
 }
 
 #[tokio::test]

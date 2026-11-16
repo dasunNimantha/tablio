@@ -106,6 +106,25 @@ pub async fn list_columns(
         .map_err(|e| e.to_string())
 }
 
+/// Every base table of a schema with its columns and foreign keys, in
+/// one call (the ERD).
+#[tauri::command]
+pub async fn get_schema_graph(
+    pool: State<'_, Arc<PoolManager>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+) -> Result<Vec<TableGraph>, String> {
+    let driver = pool
+        .get_driver(&connection_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    driver
+        .get_schema_graph(&database, &schema)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn list_indexes(
     pool: State<'_, Arc<PoolManager>>,
