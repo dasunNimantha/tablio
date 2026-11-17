@@ -17,6 +17,7 @@
         "resizable": true,
         "fullscreen": false,
         "decorations": false,
+        "visible": false,
         "backgroundColor": "#1e1e22"
       }
     ],
@@ -24,8 +25,8 @@
       "csp": {
         "default-src": "'self'",
         "script-src": "'self'",
-        "style-src": "'self' 'unsafe-inline' https://fonts.googleapis.com",
-        "font-src": "'self' data: https://fonts.gstatic.com",
+        "style-src": "'self' 'unsafe-inline'",
+        "font-src": "'self' data:",
         "img-src": "'self' data: blob:",
         "worker-src": "'self'",
         "connect-src": "'self' ipc: http://ipc.localhost",

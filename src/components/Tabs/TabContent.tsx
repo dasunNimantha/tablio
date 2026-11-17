@@ -1,7 +1,6 @@
+import { lazy, Suspense } from "react";
 import { useTabStore } from "../../stores/tabStore";
 import { useShallow } from "zustand/react/shallow";
-import { QueryConsole } from "../QueryConsole/QueryConsole";
-import { DDLViewer } from "../DDLViewer/DDLViewer";
 import { ActivityDashboard } from "../Activity/ActivityDashboard";
 import { TableStats } from "../TableStats/TableStats";
 import { RoleManager } from "../RoleManager/RoleManager";
@@ -9,6 +8,15 @@ import { ERDView } from "../ERD/ERDView";
 import { QueryStats } from "../QueryStats/QueryStats";
 import { TableView, TableSubTab } from "../TableView/TableView";
 import { TabActiveContext } from "./tabActive";
+
+// Code-split: these bring in the Monaco editor, which is too large to load
+// before the app's first paint. App warms them up once it is idle.
+const QueryConsole = lazy(() =>
+  import("../QueryConsole/QueryConsole").then((m) => ({ default: m.QueryConsole })),
+);
+const DDLViewer = lazy(() =>
+  import("../DDLViewer/DDLViewer").then((m) => ({ default: m.DDLViewer })),
+);
 
 // Map legacy tab types onto the integrated TableView so stale tabs from
 // before the Data/Schema mode refactor still land somewhere sensible.
@@ -67,20 +75,24 @@ export function TabContent() {
             />
           )}
           {tab.type === "query" && (
-            <QueryConsole
-              tabId={tab.id}
-              connectionId={tab.connectionId}
-              database={tab.database}
-            />
+            <Suspense fallback={null}>
+              <QueryConsole
+                tabId={tab.id}
+                connectionId={tab.connectionId}
+                database={tab.database}
+              />
+            </Suspense>
           )}
           {tab.type === "ddl" && (
-            <DDLViewer
-              connectionId={tab.connectionId}
-              database={tab.database}
-              schema={tab.schema}
-              objectName={tab.table!}
-              objectType={tab.objectType || "TABLE"}
-            />
+            <Suspense fallback={null}>
+              <DDLViewer
+                connectionId={tab.connectionId}
+                database={tab.database}
+                schema={tab.schema}
+                objectName={tab.table!}
+                objectType={tab.objectType || "TABLE"}
+              />
+            </Suspense>
           )}
           {tab.type === "activity" && (
             <ActivityDashboard connectionId={tab.connectionId} />

@@ -9,6 +9,7 @@ import {
   Chart as ChartJS,
   CategoryScale,
   LinearScale,
+  LineController,
   PointElement,
   LineElement,
   Filler,
@@ -16,7 +17,9 @@ import {
   Legend,
 } from "chart.js";
 
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip, Legend);
+// `new ChartJS({ type: "line" })` needs LineController registered here;
+// react-chartjs-2 elsewhere only registers it once its module has loaded.
+ChartJS.register(CategoryScale, LinearScale, LineController, PointElement, LineElement, Filler, Tooltip, Legend);
 
 interface Props {
   connectionId: string;
