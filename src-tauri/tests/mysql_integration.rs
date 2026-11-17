@@ -3537,7 +3537,7 @@ async fn mysql_streamed_exports_match_in_memory_exports() {
     let tbl = unique_table("exp_stream");
     let q = format!("`{tbl}`");
     driver
-        .execute_query(&db, &format!("CREATE TABLE {q} (id INT PRIMARY KEY, txt TEXT, b BLOB, n DECIMAL(20,2), f DOUBLE)"))
+        .execute_query(&db, &format!("CREATE TABLE {q} (id INT PRIMARY KEY, txt TEXT, b BLOB, n DECIMAL(20,2), f DOUBLE) CHARACTER SET utf8mb4"))
         .await
         .unwrap();
     let values = export_common::tricky_value_rows(45, |hex| format!("X'{hex}'"));

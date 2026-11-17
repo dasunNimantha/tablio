@@ -4402,9 +4402,21 @@ async fn pg_pools_for_other_databases_are_small_and_capped() {
             .all(|(db, _)| names[names.len() - MAX_EXTRA_DB_POOLS..].contains(db)),
         "an old database kept its pool: {sessions:?}"
     );
+    // `DROP DATABASE ... WITH (FORCE)` needs PostgreSQL 13; end the
+    // pools' sessions first so this also runs on older servers.
     for n in &names {
         driver
-            .execute_query(DB, &format!("DROP DATABASE \"{n}\" WITH (FORCE)"))
+            .execute_query(
+                DB,
+                &format!(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                     WHERE datname = '{n}' AND pid <> pg_backend_pid()"
+                ),
+            )
+            .await
+            .unwrap();
+        driver
+            .execute_query(DB, &format!("DROP DATABASE \"{n}\""))
             .await
             .unwrap();
     }
