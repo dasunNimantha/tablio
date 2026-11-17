@@ -264,6 +264,18 @@ test.describe("Explorer tree — keyboard", () => {
     await expect(connect).toBeFocused();
   });
 
+  test("row actions hide again after a mouse click once the pointer leaves", async ({ page }) => {
+    const connect = page.getByRole("button", { name: "Connect Local Postgres" });
+    await page.locator(".tree-label", { hasText: "Local Postgres" }).click();
+    await page.mouse.move(0, 0);
+    // Mouse focus is not keyboard focus: the overlay must not stay up.
+    await expect(connect).toHaveCSS("opacity", "0");
+    // Then keyboard navigation back onto the row shows them again.
+    await page.keyboard.press("ArrowUp");
+    await page.keyboard.press("ArrowDown");
+    await expect(connect).toHaveCSS("opacity", "1");
+  });
+
   test("F2 renames a folder; renaming onto an existing folder is refused", async ({ page }) => {
     await page.getByRole("button", { name: "New folder" }).click();
     await page.getByRole("textbox", { name: "New folder name" }).fill("Archive");

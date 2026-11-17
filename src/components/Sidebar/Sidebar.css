@@ -338,7 +338,8 @@
 }
 
 .tree-node:hover .tree-action,
-.tree-node:focus-within .tree-action,
+.tree-node:has(:focus-visible) .tree-action,
+.object-tree[data-keyboard="true"] .tree-node:focus-within .tree-action,
 .tree-item:focus-visible .tree-action {
   opacity: 1;
   pointer-events: auto;
@@ -364,7 +365,8 @@
 }
 
 .tree-conn-row:hover .tree-conn-ssh-badge,
-.tree-conn-row:focus-within .tree-conn-ssh-badge,
+.tree-conn-row:has(:focus-visible) .tree-conn-ssh-badge,
+.object-tree[data-keyboard="true"] .tree-conn-row:focus-within .tree-conn-ssh-badge,
 .tree-conn-row:focus-visible .tree-conn-ssh-badge {
   opacity: 0;
 }
@@ -393,8 +395,14 @@
   z-index: 1;
 }
 
+/* Keyboard focus only: a mouse click also focuses the row, and plain
+   `:focus-within` kept the overlay showing after the pointer left, as a
+   box over an un-highlighted row. `data-keyboard` covers focus moved by
+   the tree's arrow-key handling, which browsers may not mark
+   `:focus-visible`. */
 .tree-conn-row:hover .tree-conn-actions,
-.tree-conn-row:focus-within .tree-conn-actions,
+.tree-conn-row:has(:focus-visible) .tree-conn-actions,
+.object-tree[data-keyboard="true"] .tree-conn-row:focus-within .tree-conn-actions,
 .tree-conn-row:focus-visible .tree-conn-actions {
   opacity: 1;
   pointer-events: auto;
