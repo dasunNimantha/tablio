@@ -571,7 +571,7 @@ export function DataGrid({
     if (!api) return;
     api.ensureIndexVisible(match.rowIndex, "middle");
     api.ensureColumnVisible(match.colId);
-    api.refreshCells({ force: true });
+    api.refreshCells();
   }, [searchMatches]);
 
   useEffect(() => {
@@ -598,7 +598,7 @@ export function DataGrid({
   useEffect(() => {
     searchQueryRef.current = searchQuery;
     if (!gridApiRef.current) return;
-    gridApiRef.current.refreshCells({ force: true });
+    gridApiRef.current.refreshCells();
   }, [searchQuery]);
 
   const totalPages = data ? Math.ceil(data.total_rows / PAGE_SIZE) : 0;
