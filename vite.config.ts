@@ -120,7 +120,13 @@ export default defineConfig(async () => ({
         codeSplitting: {
           // Monaco is bundled (see src/lib/monacoSetup.ts); keep it in its
           // own chunk rather than tripling the size of the app chunk.
-          groups: [{ name: "monaco", test: /node_modules[\\/]monaco-editor[\\/]/ }],
+          groups: [
+            // Vite's dynamic-import helper is shared by the app and Monaco;
+            // left alone it lands in the Monaco chunk, which then becomes a
+            // dependency of the entry chunk and loads before the first paint.
+            { name: "preload-helper", test: /vite[\\/]preload-helper/, priority: 2 },
+            { name: "monaco", test: /node_modules[\\/]monaco-editor[\\/]/, priority: 1 },
+          ],
         },
       },
     },

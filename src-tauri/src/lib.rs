@@ -18,6 +18,7 @@ use commands::system::*;
 use commands::xlsx_import::*;
 use db::pool::PoolManager;
 use std::sync::Arc;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -28,6 +29,18 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(pool_manager)
         .manage(cancel_registry)
+        .setup(|app| {
+            // The window starts hidden and the frontend shows it once the
+            // first frame has painted, so the webview's blank surface never
+            // flashes. Show it anyway if that hasn't happened after a while.
+            if let Some(window) = app.get_webview_window("main") {
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    let _ = window.show();
+                });
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             test_connection,
             connect,

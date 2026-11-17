@@ -1,3 +1,6 @@
+// Monaco is set up here, not at startup: it is ~3.6 MB of JS, and these
+// views are code-split so it only loads when one first opens.
+import "../../lib/monacoSetup";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Editor, { type BeforeMount, type Monaco } from "@monaco-editor/react";
 import { api } from "../../lib/tauri";

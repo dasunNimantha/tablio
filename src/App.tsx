@@ -221,9 +221,14 @@ export default function App() {
   }, [loadConnections]);
 
   useEffect(() => {
+    // Load the Monaco-based views once idle so the first console opens
+    // instantly, without putting Monaco in front of the first paint.
     const warmMonaco = () => {
-      void loader
-        .init()
+      void Promise.all([
+        import("./components/QueryConsole/QueryConsole"),
+        import("./components/DDLViewer/DDLViewer"),
+      ])
+        .then(() => loader.init())
         .then((monaco) => {
           // Register tablio-dark-0 / tablio-light-0 up-front so the first
           // <Editor> paint doesn't fall back to Monaco's default white "vs"
