@@ -343,6 +343,12 @@ export function DataGrid({
   useReportTabDirty(tabId, "grid", hasChanges);
 
   const fetchGenRef = useRef(0);
+  // Sort/filter of the last fetch that counted rows, and its total. When
+  // only the page changes the total can't have, so the COUNT(*) (a full
+  // scan on big tables) is skipped; re-fetching the same page (refresh)
+  // still counts.
+  const countedRef = useRef<{ key: string; total: number } | null>(null);
+  const lastFetchRef = useRef<{ key: string; page: number } | null>(null);
 
   const fetchData = useCallback(async (opts?: { silent?: boolean }) => {
     const gen = ++fetchGenRef.current;
@@ -353,7 +359,13 @@ export function DataGrid({
     if (!opts?.silent) setLoading(true);
     setError(null);
     try {
-      const result = await api.fetchRows({
+      const countKey = JSON.stringify([table, sort, activeFilter ?? null]);
+      const counted = countedRef.current;
+      const last = lastFetchRef.current;
+      // Count unless only the page changed since the last fetch.
+      const count = !counted || counted.key !== countKey || !last || last.key !== countKey || last.page === page;
+      lastFetchRef.current = { key: countKey, page };
+      const fetched = await api.fetchRows({
         connection_id: connectionId,
         database,
         schema,
@@ -362,8 +374,20 @@ export function DataGrid({
         limit: PAGE_SIZE,
         sort,
         filter: activeFilter,
+        count,
       });
       if (gen !== fetchGenRef.current) return;
+      let result = fetched;
+      if (fetched.total_rows >= 0) {
+        countedRef.current = { key: countKey, total: fetched.total_rows };
+      } else {
+        // Not counted: keep the known total, but never less than what this
+        // page proves exists (a full page means there may be more).
+        const proven = page * PAGE_SIZE + fetched.rows.length + (fetched.rows.length === PAGE_SIZE ? 1 : 0);
+        const total = Math.max(counted?.total ?? 0, proven);
+        countedRef.current = { key: countKey, total };
+        result = { ...fetched, total_rows: total };
+      }
       // A background refresh that lands after the user started editing
       // must not replace the rows the pending edits were made against
       // (it would wipe the visible edit while Save/Discard still show).
