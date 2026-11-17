@@ -133,6 +133,65 @@ test.describe("Data grid — search", () => {
     await expect(nextBtn).toBeEnabled();
     await nextBtn.click();
   });
+
+  test("search highlights matches and moves the current match", async ({ page }) => {
+    await page.keyboard.press("Control+f");
+    const grid = page.locator(".data-grid-container");
+    await page.locator(".grid-search-input").fill("example");
+    await expect(grid.locator(".cell-search-match").first()).toBeVisible();
+    const current = grid.locator(".cell-search-current");
+    const currentCell = () =>
+      current.evaluate((el) => `${el.closest(".ag-row")?.getAttribute("row-index")}:${el.getAttribute("col-id")}`);
+    await expect(current).toHaveCount(1);
+    const first = await currentCell();
+    await page.locator(".grid-search-nav-btn[title='Next match (Enter)']").click();
+    await expect.poll(currentCell).not.toBe(first);
+    await expect(current).toHaveCount(1);
+    await page.locator(".grid-search-input").fill("");
+    await expect(grid.locator(".cell-search-match")).toHaveCount(0);
+  });
+
+  test("repeated searching doesn't pile up queued grid cell updates", async ({ page }) => {
+    // ag-grid-react queues a React state update per visible cell on every
+    // forced refresh, and an unchanged cell never renders to clear it.
+    await page.keyboard.press("Control+f");
+    const input = page.locator(".grid-search-input");
+    const next = page.locator(".grid-search-nav-btn[title='Next match (Enter)']");
+    const pendingCellUpdates = () =>
+      page.evaluate(() => {
+        const root = document.getElementById("root")!;
+        const key = Object.keys(root).find((k) => k.startsWith("__reactContainer$"))!;
+        let total = 0;
+        const stack = [(root as any)[key].stateNode.current];
+        while (stack.length) {
+          const fiber = stack.pop();
+          if (fiber.type?.name === "CellComp") {
+            for (let hook = fiber.memoizedState; hook; hook = hook.next) {
+              const last = hook.queue?.pending;
+              if (!last) continue;
+              let u = last;
+              do { total++; u = u.next; } while (u !== last);
+            }
+          }
+          if (fiber.child) stack.push(fiber.child);
+          if (fiber.sibling) stack.push(fiber.sibling);
+        }
+        return total;
+      });
+
+    await input.fill("example");
+    await expect(next).toBeEnabled();
+    const before = await pendingCellUpdates();
+    for (let i = 0; i < 20; i++) {
+      await next.click();
+      await input.fill(i % 2 ? "example" : "exampl");
+    }
+    await expect(next).toBeEnabled();
+    const after = await pendingCellUpdates();
+    // Before the fix this grew by one per visible cell per refresh
+    // (thousands here); allow a little slack for cells that re-render.
+    expect(after - before).toBeLessThan(200);
+  });
 });
 
 test.describe("Data grid — pagination", () => {

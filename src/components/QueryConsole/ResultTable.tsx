@@ -669,7 +669,7 @@ export const ResultTable = memo(function ResultTable({ result, resultMode, onTog
   }, [selectedIndices, deletedIndices]);
 
   useEffect(() => {
-    gridApiRef.current?.refreshCells({ force: true });
+    gridApiRef.current?.refreshCells();
   }, [cellEdits]);
 
   const defaultColDef = useMemo((): ColDef => ({
@@ -728,7 +728,7 @@ export const ResultTable = memo(function ResultTable({ result, resultMode, onTog
     const node = api.getRowNode(String(match.rowIndex));
     if (node) api.ensureNodeVisible(node, "middle");
     api.ensureColumnVisible(match.colId);
-    api.refreshCells({ force: true });
+    api.refreshCells();
   }, [searchMatches]);
 
   useEffect(() => {
@@ -756,7 +756,7 @@ export const ResultTable = memo(function ResultTable({ result, resultMode, onTog
     searchQueryRef.current = searchQuery;
     const api = gridApiRef.current;
     if (!api) return;
-    api.refreshCells({ force: true });
+    api.refreshCells();
   }, [searchQuery]);
 
   useEffect(() => {
@@ -819,7 +819,7 @@ export const ResultTable = memo(function ResultTable({ result, resultMode, onTog
 
   // Row numbers show the visual position; recompute them after a sort.
   const onSortChanged = useCallback(() => {
-    gridApiRef.current?.refreshCells({ columns: [ROW_NUM_COL], force: true });
+    gridApiRef.current?.refreshCells({ columns: [ROW_NUM_COL] });
   }, []);
 
   const onCellContextMenu = useCallback((event: CellContextMenuEvent) => {
