@@ -249,6 +249,15 @@ pub struct FetchRowsRequest {
     #[serde(default)]
     pub sort: Vec<SortSpec>,
     pub filter: Option<String>,
+    /// Count the matching rows (`total_rows`). The grid turns this off
+    /// when only the page changes, since the total can't have changed
+    /// because of that; `total_rows` is then -1.
+    #[serde(default = "default_true")]
+    pub count: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

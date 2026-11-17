@@ -12,6 +12,29 @@ pub async fn fetch_rows(
         .get_driver(&request.connection_id)
         .await
         .map_err(|e| e.to_string())?;
+    if !request.count {
+        // Same page fetch, minus the COUNT(*) (a full scan on large
+        // tables, and on Cassandra).
+        let columns = driver
+            .list_columns(&request.database, &request.schema, &request.table)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut data = driver
+            .fetch_export_page(
+                &request.database,
+                &request.schema,
+                &request.table,
+                &columns,
+                request.offset,
+                request.limit,
+                request.sort,
+                request.filter,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        data.total_rows = -1;
+        return Ok(data);
+    }
     driver
         .fetch_rows(
             &request.database,

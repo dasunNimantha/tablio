@@ -1024,6 +1024,164 @@ fn rows_from_result(result: &QueryRowsResult) -> (Vec<String>, Vec<Vec<serde_jso
     (columns, rows)
 }
 
+impl CassandraDriver {
+    /// One grid page; `count_rows` adds the best-effort `COUNT(*)` (a full
+    /// scan), otherwise `total_rows` is the lower bound the page proves.
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_rows_with(
+        &self,
+        database: &str,
+        table: &str,
+        columns: Vec<ColumnInfo>,
+        offset: u64,
+        limit: u64,
+        sort: Vec<SortSpec>,
+        filter: Option<String>,
+        count_rows: bool,
+    ) -> Result<TableData> {
+        let qualified = format!("{}.{}", quote_ident(database), quote_ident(table));
+
+        // Build the optional WHERE fragment once and reuse it for both
+        // the count query and the data query so the two stay in sync.
+        let where_clause = match filter.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+            Some(f) => {
+                if let Some(reason) = filter_unsafe_reason(f) {
+                    anyhow::bail!("Filter rejected: {}", reason);
+                }
+                debug_assert!(!filter_is_unsafe(f));
+                format!(" WHERE {}", f)
+            }
+            None => String::new(),
+        };
+
+        let mut cql = format!("SELECT * FROM {}{}", qualified, where_clause);
+
+        if !sort.is_empty() {
+            // CQL `ORDER BY` is only valid on a partition's
+            // clustering columns and only in the table's defined
+            // clustering order (or its strict reverse). Tablio
+            // can't statically know which columns are clustering
+            // keys at this layer, so we just pass the user-picked
+            // sort vec through and let the Cassandra server be
+            // the gatekeeper: legal orderings work, illegal ones
+            // surface as an execution error. Multi-column sort
+            // (issue #57) follows the same rule — typically only
+            // useful when the user is sorting by the clustering
+            // columns in clustering order.
+            let parts: Vec<String> = sort
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{} {}",
+                        quote_ident(&s.column),
+                        match s.direction {
+                            SortDirection::Asc => "ASC",
+                            SortDirection::Desc => "DESC",
+                        }
+                    )
+                })
+                .collect();
+            cql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
+        }
+
+        // CQL has no OFFSET, so the first `offset` rows still have to
+        // be read and skipped. Fetch them page by page (instead of one
+        // unpaged response holding offset+limit rows), keep only the
+        // requested window plus one extra row to know whether another
+        // page exists, and stop as soon as that is reached. Saturating
+        // arithmetic keeps hostile pagination parameters from
+        // overflowing.
+        let wanted = offset.saturating_add(limit).saturating_add(1);
+        cql.push_str(&format!(
+            " LIMIT {} ALLOW FILTERING",
+            wanted.min(i32::MAX as u64)
+        ));
+        let page_size = limit.saturating_add(1).clamp(1, 5000) as i32;
+        let mut statement = scylla::statement::Statement::new(cql);
+        statement.set_page_size(page_size);
+
+        let mut paging_state = PagingState::start();
+        let mut result_columns: Option<Vec<String>> = None;
+        let mut seen: u64 = 0;
+        let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+        loop {
+            let (page, paging_response) = self
+                .session
+                .query_single_page(statement.clone(), &[], paging_state)
+                .await
+                .map_err(|e| anyhow!("{}", e))?;
+            let page = page.into_rows_result().map_err(|e| anyhow!("{}", e))?;
+            let (names, page_rows) = rows_from_result(&page);
+            if result_columns.is_none() {
+                result_columns = Some(names);
+            }
+            for row in page_rows {
+                if seen >= offset && (rows.len() as u64) <= limit {
+                    rows.push(row);
+                }
+                seen += 1;
+            }
+            if (rows.len() as u64) > limit || seen >= wanted {
+                break;
+            }
+            match paging_response {
+                PagingStateResponse::HasMorePages { state } => paging_state = state,
+                PagingStateResponse::NoMorePages => break,
+            }
+        }
+        let has_more = (rows.len() as u64) > limit;
+        rows.truncate(limit as usize);
+
+        // Header order must match cell order exactly: the grid looks up
+        // primary-key values by header index, so a mismatch makes edits
+        // target the wrong row. Use the result's own column specs as
+        // the source of truth and attach catalog metadata by name.
+        let columns = align_columns_to_result(columns, result_columns.unwrap_or_default());
+
+        // An exact `COUNT(*)` needs a full scan in Cassandra and times
+        // out (or is refused) on large tables. It is best-effort: when
+        // it fails, report a lower bound that still lets the grid page
+        // forward (one past the current window when more rows exist).
+        let fetched_through = offset + rows.len() as u64 + u64::from(has_more);
+        if !count_rows {
+            return Ok(TableData {
+                columns,
+                rows,
+                total_rows: fetched_through as i64,
+                offset,
+                limit,
+            });
+        }
+        let count_cql = format!(
+            "SELECT COUNT(*) FROM {}{} ALLOW FILTERING",
+            qualified, where_clause
+        );
+        let counted = match self.session.query_unpaged(count_cql.as_str(), &[]).await {
+            Ok(res) => res
+                .into_rows_result()
+                .ok()
+                .and_then(|r| r.first_row::<(i64,)>().ok())
+                .map(|(c,)| c),
+            Err(e) => {
+                log::warn!("Cassandra COUNT(*) failed, using approximate total: {}", e);
+                None
+            }
+        };
+        let total_rows = match counted {
+            Some(c) => c.max(fetched_through as i64),
+            None => fetched_through as i64,
+        };
+
+        Ok(TableData {
+            columns,
+            rows,
+            total_rows,
+            offset,
+            limit,
+        })
+    }
+}
+
 #[async_trait]
 impl DatabaseDriver for CassandraDriver {
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
@@ -1267,138 +1425,33 @@ impl DatabaseDriver for CassandraDriver {
         filter: Option<String>,
     ) -> Result<TableData> {
         let columns = self.list_columns(database, database, table).await?;
+        self.fetch_rows_with(database, table, columns, offset, limit, sort, filter, true)
+            .await
+    }
 
-        let qualified = format!("{}.{}", quote_ident(database), quote_ident(table));
-
-        // Build the optional WHERE fragment once and reuse it for both
-        // the count query and the data query so the two stay in sync.
-        let where_clause = match filter.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
-            Some(f) => {
-                if let Some(reason) = filter_unsafe_reason(f) {
-                    anyhow::bail!("Filter rejected: {}", reason);
-                }
-                debug_assert!(!filter_is_unsafe(f));
-                format!(" WHERE {}", f)
-            }
-            None => String::new(),
-        };
-
-        let mut cql = format!("SELECT * FROM {}{}", qualified, where_clause);
-
-        if !sort.is_empty() {
-            // CQL `ORDER BY` is only valid on a partition's
-            // clustering columns and only in the table's defined
-            // clustering order (or its strict reverse). Tablio
-            // can't statically know which columns are clustering
-            // keys at this layer, so we just pass the user-picked
-            // sort vec through and let the Cassandra server be
-            // the gatekeeper: legal orderings work, illegal ones
-            // surface as an execution error. Multi-column sort
-            // (issue #57) follows the same rule — typically only
-            // useful when the user is sorting by the clustering
-            // columns in clustering order.
-            let parts: Vec<String> = sort
-                .iter()
-                .map(|s| {
-                    format!(
-                        "{} {}",
-                        quote_ident(&s.column),
-                        match s.direction {
-                            SortDirection::Asc => "ASC",
-                            SortDirection::Desc => "DESC",
-                        }
-                    )
-                })
-                .collect();
-            cql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
-        }
-
-        // CQL has no OFFSET, so the first `offset` rows still have to
-        // be read and skipped. Fetch them page by page (instead of one
-        // unpaged response holding offset+limit rows), keep only the
-        // requested window plus one extra row to know whether another
-        // page exists, and stop as soon as that is reached. Saturating
-        // arithmetic keeps hostile pagination parameters from
-        // overflowing.
-        let wanted = offset.saturating_add(limit).saturating_add(1);
-        cql.push_str(&format!(
-            " LIMIT {} ALLOW FILTERING",
-            wanted.min(i32::MAX as u64)
-        ));
-        let page_size = limit.saturating_add(1).clamp(1, 5000) as i32;
-        let mut statement = scylla::statement::Statement::new(cql);
-        statement.set_page_size(page_size);
-
-        let mut paging_state = PagingState::start();
-        let mut result_columns: Option<Vec<String>> = None;
-        let mut seen: u64 = 0;
-        let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
-        loop {
-            let (page, paging_response) = self
-                .session
-                .query_single_page(statement.clone(), &[], paging_state)
-                .await
-                .map_err(|e| anyhow!("{}", e))?;
-            let page = page.into_rows_result().map_err(|e| anyhow!("{}", e))?;
-            let (names, page_rows) = rows_from_result(&page);
-            if result_columns.is_none() {
-                result_columns = Some(names);
-            }
-            for row in page_rows {
-                if seen >= offset && (rows.len() as u64) <= limit {
-                    rows.push(row);
-                }
-                seen += 1;
-            }
-            if (rows.len() as u64) > limit || seen >= wanted {
-                break;
-            }
-            match paging_response {
-                PagingStateResponse::HasMorePages { state } => paging_state = state,
-                PagingStateResponse::NoMorePages => break,
-            }
-        }
-        let has_more = (rows.len() as u64) > limit;
-        rows.truncate(limit as usize);
-
-        // Header order must match cell order exactly: the grid looks up
-        // primary-key values by header index, so a mismatch makes edits
-        // target the wrong row. Use the result's own column specs as
-        // the source of truth and attach catalog metadata by name.
-        let columns = align_columns_to_result(columns, result_columns.unwrap_or_default());
-
-        // An exact `COUNT(*)` needs a full scan in Cassandra and times
-        // out (or is refused) on large tables. It is best-effort: when
-        // it fails, report a lower bound that still lets the grid page
-        // forward (one past the current window when more rows exist).
-        let fetched_through = offset + rows.len() as u64 + u64::from(has_more);
-        let count_cql = format!(
-            "SELECT COUNT(*) FROM {}{} ALLOW FILTERING",
-            qualified, where_clause
-        );
-        let counted = match self.session.query_unpaged(count_cql.as_str(), &[]).await {
-            Ok(res) => res
-                .into_rows_result()
-                .ok()
-                .and_then(|r| r.first_row::<(i64,)>().ok())
-                .map(|(c,)| c),
-            Err(e) => {
-                log::warn!("Cassandra COUNT(*) failed, using approximate total: {}", e);
-                None
-            }
-        };
-        let total_rows = match counted {
-            Some(c) => c.max(fetched_through as i64),
-            None => fetched_through as i64,
-        };
-
-        Ok(TableData {
-            columns,
-            rows,
-            total_rows,
+    async fn fetch_export_page(
+        &self,
+        database: &str,
+        _schema: &str,
+        table: &str,
+        columns: &[ColumnInfo],
+        offset: u64,
+        limit: u64,
+        sort: Vec<SortSpec>,
+        filter: Option<String>,
+    ) -> Result<TableData> {
+        // Skips the COUNT(*) full scan.
+        self.fetch_rows_with(
+            database,
+            table,
+            columns.to_vec(),
             offset,
             limit,
-        })
+            sort,
+            filter,
+            false,
+        )
+        .await
     }
 
     async fn execute_query(&self, _database: &str, sql: &str) -> Result<QueryResult> {

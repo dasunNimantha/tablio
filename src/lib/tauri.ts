@@ -98,7 +98,7 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       const limit = req?.limit || 100;
       const cols = mock.getTableColumns(table);
       const { rows, total } = mock.getTableRows(table, offset, limit);
-      return { columns: cols, rows, total_rows: total, offset, limit } as T;
+      return { columns: cols, rows, total_rows: req?.count === false ? -1 : total, offset, limit } as T;
     }
     case "execute_query": {
       const req = args?.request as any;
@@ -423,6 +423,11 @@ export interface FetchRowsRequest {
    */
   sort: SortSpec[];
   filter: string | null;
+  /**
+   * Count the matching rows. Omitted / true by default; the grid sends
+   * false when only the page changed, and `total_rows` is then -1.
+   */
+  count?: boolean;
 }
 
 export interface ExecuteQueryRequest {
