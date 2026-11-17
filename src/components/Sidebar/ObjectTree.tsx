@@ -1920,6 +1920,11 @@ export const ObjectTree = memo(function ObjectTree({ onAddConnection, onCreateTa
               aria-label="Connections"
               className="object-tree"
               onKeyDown={onTreeKeyDown}
+              // Whether the user is navigating by keyboard: row actions show
+              // on the focused row only then (a mouse click also focuses it).
+              // Set on the element directly so it never re-renders the tree.
+              onKeyDownCapture={(e) => { e.currentTarget.dataset.keyboard = "true"; }}
+              onPointerDownCapture={(e) => { e.currentTarget.dataset.keyboard = "false"; }}
             >
               <TreeContext.Provider value={treeContext}>
               {(() => {
