@@ -121,9 +121,8 @@
   min-width: 0;
   justify-content: flex-end;
   flex-wrap: nowrap;
-  /* Last resort for very narrow panes: scroll rather than overlap. */
-  overflow-x: auto;
-  scrollbar-width: none;
+  /* No overflow here: a scroll container would clip the Columns, Export
+     and auto-refresh dropdowns that open below these buttons. */
 }
 
 .grid-toolbar-right::-webkit-scrollbar {

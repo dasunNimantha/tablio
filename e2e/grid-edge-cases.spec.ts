@@ -376,6 +376,37 @@ test.describe("Data grid — filters and foreign keys", () => {
   });
 });
 
+test.describe("Data grid — toolbar dropdowns", () => {
+  const dropdowns = [
+    { name: "Columns", open: "button[aria-label='Columns']", menu: ".col-organizer-dropdown" },
+    { name: "Export", open: "button[aria-label='Export']", menu: ".export-menu-dropdown" },
+    { name: "auto-refresh", open: "button[title='Auto-refresh interval']", menu: ".refresh-menu" },
+  ];
+  for (const { name, open, menu } of dropdowns) {
+    test(`${name} dropdown isn't clipped by the toolbar`, async ({ page }) => {
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await page.goto("/");
+      await openTable(page, "users");
+      await page.locator(open).click();
+      const dropdown = page.locator(menu);
+      await expect(dropdown).toBeVisible();
+      // Sample points down the whole dropdown: each must hit the dropdown
+      // itself, not whatever is behind or around it.
+      const misses = await dropdown.evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        const out: string[] = [];
+        for (const f of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+          const y = r.top + r.height * f;
+          const hit = document.elementFromPoint(r.left + r.width / 2, y);
+          if (!hit || !el.contains(hit)) out.push(`${Math.round(f * 100)}%: ${hit?.className}`);
+        }
+        return out;
+      });
+      expect(misses).toEqual([]);
+    });
+  }
+});
+
 test.describe("Data grid — toolbar layout", () => {
   for (const width of [1024, 1280]) {
     test(`buttons don't overlap or shrink at ${width}px`, async ({ page }) => {
