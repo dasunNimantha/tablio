@@ -64,7 +64,7 @@ data-encoding = "2.3"
 log = "0.4"
 # `constant_memory`: exports stream rows to a temp file instead of
 # holding the whole worksheet in memory.
-rust_xlsxwriter = { version = "0.102", features = ["chrono", "constant_memory"] }
+rust_xlsxwriter = { version = "0.103", features = ["chrono", "constant_memory"] }
 calamine = { version = "0.38", features = ["dates"] }
 # Private (0600) temp files for dumps and atomic config writes.
 tempfile = "3"
